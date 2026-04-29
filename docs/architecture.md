@@ -180,3 +180,95 @@ print(inventory.get_stats(wc26.collection_id))
 ```
 
 Ver `docs/data_layer_examples.md` para más recetas copy-paste.
+
+## Capa UI compartida (shared_ui)
+
+```
++----------------------------------------------------------+
+|                    admin/main.py / client/main.py         |
+|                  (subclases concretas de MainWindowBase)  |
++--------------------------+-------------------------------+
+                           |
+                           v
++----------------------------------------------------------+
+|                       MainWindowBase                      |
+|     (conn + migrations + status bar + menú base)          |
++--------------------------+-------------------------------+
+                           |
+            +--------------+---------------+
+            v                              v
++-------------------------+   +-----------------------------+
+|     SettingsDialog      |   |       AbmWidget             |
+| (combo de colección     |   |   (filtro + grilla + form,  |
+|  activa, persiste el    |   |    parametrizado por        |
+|  setting al aceptar)    |   |    AbmConfig + FieldDef)    |
++-------------------------+   +-----------------------------+
+                                       |
+                                       v
+                              +-----------------+
+                              | EnterNavigator  |
+                              | (Enter avanza   |
+                              |  entre inputs)  |
+                              +-----------------+
+```
+
+### Componentes principales
+
+- **`theme.py`** — constantes de espaciado, tamaños de fuente, colores de
+  status (success/info/warning/error) y `apply_app_style()`.
+- **`EnterNavigator`** — `QObject` que instala event filters para que `Enter`
+  avance al siguiente widget de una cadena ordenada y dispare un callback
+  en el último.
+- **`AbmWidget`** — widget genérico parametrizado por `AbmConfig`. Presenta
+  filtro arriba, grilla a la izquierda y formulario a la derecha. Soporta
+  campos TEXT/INT/BOOL/COMBO/READONLY, validación inline (status bar
+  inferior) y único diálogo modal en la confirmación de borrado.
+- **`SettingsDialog`** — `QDialog` con combo para elegir la colección
+  activa; al aceptar persiste vía `SettingsService.set_active_collection`.
+- **`MainWindowBase`** — `QMainWindow` que abre la conexión a SQLite,
+  corre migraciones, monta menú "Archivo → Salir" y status bar con la
+  colección activa. Subclases overridean `_build_menus()` para sumar
+  acciones propias.
+
+### Construir un ABM en ~30 líneas
+
+```python
+from collections_app.core.repositories import CodesHeadersRepository
+from collections_app.core.models import CodeHeader
+from collections_app.shared_ui import (
+    AbmConfig, AbmWidget, FieldDef, FieldType,
+)
+
+repo = CodesHeadersRepository(conn)
+
+def _save(header: CodeHeader) -> CodeHeader:
+    if header.code_header_id is None:
+        saved = repo.create(header)
+    else:
+        saved = repo.update(header)
+    conn.commit()
+    return saved
+
+def _delete(header: CodeHeader) -> bool:
+    ok = repo.delete(header.code_header_id)
+    conn.commit()
+    return ok
+
+config = AbmConfig(
+    title="Headers de códigos",
+    module_code="HDR001",
+    fields=[
+        FieldDef("code_header_id", "ID", FieldType.READONLY, is_id=True, is_required=False),
+        FieldDef("code_header_name", "Nombre", FieldType.TEXT),
+        FieldDef("code_max_length", "Long. máx.", FieldType.INT, is_required=False),
+    ],
+    on_load_all=repo.list_all,
+    on_save=_save,
+    on_delete=_delete,
+    model_class=CodeHeader,
+    filter_field="code_header_name",
+)
+widget = AbmWidget(config, parent=main_window)
+```
+
+Más recetas y ejemplos en `docs/abm_widget_guide.md`.
