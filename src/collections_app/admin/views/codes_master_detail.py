@@ -1,20 +1,33 @@
 """Vista master-detail: headers de códigos y sus líneas."""
 
+import logging
 import sqlite3
+from pathlib import Path
 
 from PySide6.QtWidgets import (
+    QFileDialog,
     QFrame,
+    QHBoxLayout,
     QLabel,
+    QMessageBox,
+    QProgressDialog,
+    QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
+from collections_app.admin.tools.codes_csv_importer import (
+    CodesCsvImporter,
+    CodesCsvImportResult,
+)
 from collections_app.core.models import CodeHeader, CodeLine
 from collections_app.core.repositories import (
     CodesHeadersRepository,
     CodesLinesRepository,
 )
 from collections_app.shared_ui import AbmConfig, AbmWidget, FieldDef, FieldType
+
+logger = logging.getLogger(__name__)
 
 
 class CodesMasterDetailView(QWidget):
@@ -43,9 +56,18 @@ class CodesMasterDetailView(QWidget):
         separator.setFrameShadow(QFrame.Shadow.Sunken)
         layout.addWidget(separator)
 
+        # Fila con label + botón importar CSV
+        detail_header_row = QHBoxLayout()
+        detail_header_row.setContentsMargins(0, 0, 0, 0)
         self.detail_label = QLabel(self.tr("Seleccione un header para ver sus códigos"))
         self.detail_label.setStyleSheet("font-weight: 500; padding: 8px;")
-        layout.addWidget(self.detail_label)
+        detail_header_row.addWidget(self.detail_label)
+        detail_header_row.addStretch()
+        self._import_lines_button = QPushButton(self.tr("Importar códigos desde CSV…"))
+        self._import_lines_button.setEnabled(False)
+        self._import_lines_button.clicked.connect(self._import_lines_csv)
+        detail_header_row.addWidget(self._import_lines_button)
+        layout.addLayout(detail_header_row)
 
         # DETAIL
         self.lines_abm, self._lines_config = self._build_lines_abm()
@@ -156,6 +178,7 @@ class CodesMasterDetailView(QWidget):
             self.tr("Códigos del header: {name}").format(name=header.code_header_name)
         )
         self.lines_abm.setEnabled(True)
+        self._import_lines_button.setEnabled(True)
         self._refresh_lines_for_current_header()
 
     def _on_header_saved(self, header: CodeHeader) -> None:
@@ -171,6 +194,7 @@ class CodesMasterDetailView(QWidget):
             self._current_header = None
             self.detail_label.setText(self.tr("Seleccione un header para ver sus códigos"))
             self.lines_abm.setEnabled(False)
+            self._import_lines_button.setEnabled(False)
             self._lines_config.on_load_all = lambda: []
             self._lines_config.extra_kwargs = {}
             self.lines_abm.refresh()
@@ -208,3 +232,60 @@ class CodesMasterDetailView(QWidget):
                 code=line.code_id, max=self._current_header.code_max_length
             )
         return True, ""
+
+    # ------------------------------------------------------------------
+    # Importar líneas desde CSV
+    # ------------------------------------------------------------------
+
+    def _import_lines_csv(self) -> None:
+        if self._current_header is None or self._current_header.code_header_id is None:
+            return
+
+        path_str, _ = QFileDialog.getOpenFileName(
+            self,
+            self.tr("Importar códigos desde CSV"),
+            "",
+            self.tr("CSV files (*.csv)"),
+        )
+        if not path_str:
+            return
+
+        progress = QProgressDialog(
+            self.tr("Importando códigos…"),
+            self.tr("Cancelar"),
+            0,
+            100,
+            self,
+        )
+        progress.setMinimumDuration(0)
+
+        def _update(current: int, total: int) -> None:
+            if total > 0:
+                progress.setMaximum(total)
+                progress.setValue(current)
+
+        importer = CodesCsvImporter(self.conn)
+        try:
+            result = importer.import_file(
+                Path(path_str),
+                self._current_header.code_header_id,
+                on_progress=_update,
+            )
+        except Exception as exc:  # noqa: BLE001
+            progress.close()
+            QMessageBox.critical(self, self.tr("Error"), str(exc))
+            logger.exception("Error importando CSV de códigos")
+            return
+
+        progress.close()
+        self._show_import_result(result)
+        self._refresh_lines_for_current_header()
+
+    def _show_import_result(self, result: CodesCsvImportResult) -> None:
+        text = self.tr(
+            "Importación completada.\n" "Total: {total}\nImportadas: {ok}\nOmitidas: {skipped}"
+        ).format(total=result.total_rows, ok=result.imported, skipped=result.skipped)
+        if result.errors:
+            sample = "\n".join(result.errors[:10])
+            text += "\n\n" + self.tr("Primeros errores:") + "\n" + sample
+        QMessageBox.information(self, self.tr("Importar CSV"), text)
