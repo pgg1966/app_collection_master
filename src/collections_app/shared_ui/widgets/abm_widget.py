@@ -63,6 +63,10 @@ class FieldType(StrEnum):
     READONLY = "readonly"
 
 
+# Tipo para choices de COMBO: lista estática o callable que la genera al vuelo.
+ComboChoices = list[tuple[str, Any]] | Callable[[], list[tuple[str, Any]]]
+
+
 @dataclass(frozen=True)
 class FieldDef:
     """Definición de un campo del ABM.
@@ -74,7 +78,12 @@ class FieldDef:
         is_id: si True, forma parte de la PK.
         is_required: si True, no puede estar vacío al guardar.
         max_length: longitud máxima del input TEXT.
-        combo_choices: opciones del combo: [(label_visible, value), ...].
+        combo_choices: opciones del combo. Puede ser una lista estática
+            `[(label_visible, value), ...]` o un callable que la retorna.
+            Pasá un callable cuando los choices dependen de datos que
+            pueden cambiar después de instanciar el widget; entonces
+            `refresh_combo_choices()` (o las acciones que llaman a
+            `clear_form` / `_populate_form`) re-evalúan el callable.
         placeholder: placeholder del input TEXT.
         show_in_grid: si False, el campo no aparece en la grilla.
         grid_width: ancho fijo de la columna en la grilla (px), opcional.
@@ -86,7 +95,7 @@ class FieldDef:
     is_id: bool = False
     is_required: bool = True
     max_length: int | None = None
-    combo_choices: list[tuple[str, Any]] | None = None
+    combo_choices: ComboChoices | None = None
     placeholder: str = ""
     show_in_grid: bool = True
     grid_width: int | None = None
@@ -158,7 +167,12 @@ class AbmWidget(QWidget):
                 return
 
     def clear_form(self) -> None:
-        """Limpia el formulario para crear un registro nuevo."""
+        """Limpia el formulario para crear un registro nuevo.
+
+        Antes de limpiar, re-evalúa los `combo_choices` que sean callables
+        para reflejar cambios en otros tabs sin reconstruir el widget.
+        """
+        self.refresh_combo_choices()
         self._current_record = None
         self._grid_view.clearSelection()
         for fdef in self.config.fields:
@@ -168,6 +182,40 @@ class AbmWidget(QWidget):
         first_editable = self._first_editable_input()
         if first_editable is not None:
             first_editable.setFocus()
+
+    def refresh_combo_choices(self) -> None:
+        """Re-popula los QComboBox del form llamando los callables.
+
+        Preserva el valor seleccionado actual si todavía existe en los
+        nuevos choices; si no, queda en el primer item (o vacío si no hay).
+        Los `combo_choices` que son listas estáticas también se repueblan,
+        pero no cambian — esto es seguro y mantiene la lógica simple.
+        """
+        for fdef in self.config.fields:
+            if fdef.field_type != FieldType.COMBO:
+                continue
+            widget = self._inputs.get(fdef.name)
+            if not isinstance(widget, QComboBox):
+                continue
+            previous = widget.currentData()
+            new_choices = self._resolve_combo_choices(fdef)
+            widget.blockSignals(True)
+            widget.clear()
+            for label, value in new_choices:
+                widget.addItem(label, userData=value)
+            if previous is not None:
+                idx = widget.findData(previous)
+                if idx >= 0:
+                    widget.setCurrentIndex(idx)
+            widget.blockSignals(False)
+
+    def _resolve_combo_choices(self, fdef: FieldDef) -> list[tuple[str, Any]]:
+        choices = fdef.combo_choices
+        if choices is None:
+            return []
+        if callable(choices):
+            return list(choices())
+        return list(choices)
 
     # ------------------------------------------------------------------
     # Construcción de la UI
@@ -298,7 +346,7 @@ class AbmWidget(QWidget):
                 return QCheckBox()
             case FieldType.COMBO:
                 combo = QComboBox()
-                for label, value in fdef.combo_choices or []:
+                for label, value in self._resolve_combo_choices(fdef):
                     combo.addItem(label, userData=value)
                 return combo
 
@@ -450,13 +498,17 @@ class AbmWidget(QWidget):
             return ""
         if fdef.field_type == FieldType.BOOL:
             return self.tr("Sí") if value else self.tr("No")
-        if fdef.field_type == FieldType.COMBO and fdef.combo_choices:
-            for label, val in fdef.combo_choices:
+        if fdef.field_type == FieldType.COMBO:
+            for label, val in self._resolve_combo_choices(fdef):
                 if val == value:
                     return label
         return str(value)
 
     def _populate_form(self, record: Any) -> None:
+        # Asegurar que los combos tengan los choices actuales antes de
+        # intentar seleccionar un valor (puede haberse agregado un item
+        # nuevo en otro tab desde la última vez).
+        self.refresh_combo_choices()
         for fdef in self.config.fields:
             value = getattr(record, fdef.name, None)
             self._set_input_value(fdef, value)

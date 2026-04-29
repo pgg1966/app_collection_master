@@ -53,6 +53,39 @@ def test_collections_abm_validate_requires_code_field_name(qtbot, memory_db, sam
     assert CollectionsRepository(memory_db).list_all() == []
 
 
+def test_collections_combo_reflects_new_headers(qtbot, memory_db, sample_code_header):
+    """Headers creados después de instanciar el ABM aparecen al hacer Nuevo."""
+    from collections_app.core.models import CodeHeader
+    from collections_app.core.repositories import CodesHeadersRepository
+
+    view = CollectionsAbmView(memory_db)
+    qtbot.addWidget(view)
+    view.show()
+
+    combo = view.abm._inputs["code_header_id"]
+    initial_count = combo.count()
+    assert initial_count >= 1  # sample_code_header
+
+    # Crear un nuevo header desde el repo (simula creación en otro tab)
+    CodesHeadersRepository(memory_db).create(CodeHeader(None, "Adrenalyne XL", 5))
+    memory_db.commit()
+
+    # Click en "Nuevo" debe re-evaluar el combo callable
+    qtbot.mouseClick(view.abm._new_button, Qt.MouseButton.LeftButton)
+    assert combo.count() == initial_count + 1
+    labels = [combo.itemText(i) for i in range(combo.count())]
+    assert "Adrenalyne XL" in labels
+
+
+def test_collections_combo_label_is_cabecera_de_codigo(qtbot, memory_db, sample_code_header):
+    """El label del campo de header se llama 'Cabecera de código'."""
+    view = CollectionsAbmView(memory_db)
+    qtbot.addWidget(view)
+    view.show()
+    code_header_field = next(f for f in view.abm.config.fields if f.name == "code_header_id")
+    assert code_header_field.label == "Cabecera de código"
+
+
 def test_collections_abm_validate_premium_requires_license(qtbot, memory_db, sample_code_header):
     view = CollectionsAbmView(memory_db)
     qtbot.addWidget(view)

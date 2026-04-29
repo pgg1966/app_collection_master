@@ -402,3 +402,131 @@ def test_composite_pk_all_editable_when_creating(qtbot):
     number_spin = w._inputs["number"]
     assert code_combo.isEnabled() is True
     assert number_spin.isReadOnly() is False
+
+
+# --------------------------------------------------------------------
+# combo_choices callable + refresh_combo_choices
+# --------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class FakeWithCombo:
+    item_id: int | None
+    name: str
+    code: str | None = None
+
+
+def _build_combo_config(
+    store: list[FakeWithCombo],
+    choices_provider,
+) -> AbmConfig:
+    return AbmConfig(
+        title="With Combo",
+        module_code="WC001",
+        fields=[
+            FieldDef(
+                "item_id",
+                "ID",
+                FieldType.READONLY,
+                is_id=True,
+                is_required=False,
+            ),
+            FieldDef("name", "Nombre", FieldType.TEXT),
+            FieldDef(
+                "code",
+                "Code",
+                FieldType.COMBO,
+                is_required=False,
+                combo_choices=choices_provider,
+            ),
+        ],
+        on_load_all=lambda: list(store),
+        on_save=lambda c: store.append(c) or c,
+        on_delete=lambda c: bool(store.remove(c)) or True,  # noqa: SIM222
+        model_class=FakeWithCombo,
+    )
+
+
+def test_combo_choices_can_be_callable(qtbot):
+    """`combo_choices` acepta una función y la llama al construir el widget."""
+    calls: list[int] = []
+
+    def provider() -> list[tuple[str, object]]:
+        calls.append(1)
+        return [("Argentina", "ARG"), ("Brasil", "BRA")]
+
+    config = _build_combo_config([], provider)
+    w = AbmWidget(config)
+    qtbot.addWidget(w)
+    w.show()
+
+    combo = w._inputs["code"]
+    values = [combo.itemData(i) for i in range(combo.count())]
+    assert set(values) == {"ARG", "BRA"}
+    assert calls  # se llamó al menos una vez
+
+
+def test_refresh_combo_choices_calls_callable_again(qtbot):
+    """Al llamar refresh_combo_choices, el callable se re-evalúa."""
+    state = {"choices": [("A", "a")]}
+
+    def provider() -> list[tuple[str, object]]:
+        return list(state["choices"])
+
+    config = _build_combo_config([], provider)
+    w = AbmWidget(config)
+    qtbot.addWidget(w)
+    w.show()
+    assert w._inputs["code"].count() == 1
+
+    state["choices"] = [("A", "a"), ("B", "b"), ("C", "c")]
+    w.refresh_combo_choices()
+    assert w._inputs["code"].count() == 3
+
+
+def test_refresh_combo_preserves_current_selection(qtbot):
+    """Si el valor seleccionado sigue existiendo, se mantiene seleccionado."""
+    state = {"choices": [("A", "a"), ("B", "b")]}
+
+    config = _build_combo_config([], lambda: list(state["choices"]))
+    w = AbmWidget(config)
+    qtbot.addWidget(w)
+    w.show()
+
+    combo = w._inputs["code"]
+    combo.setCurrentIndex(combo.findData("b"))
+
+    state["choices"] = [("A", "a"), ("B", "b"), ("C", "c")]
+    w.refresh_combo_choices()
+    assert combo.currentData() == "b"
+
+
+def test_refresh_combo_drops_selection_when_value_gone(qtbot):
+    """Si el valor seleccionado ya no está en los nuevos choices, queda en el primero."""
+    state = {"choices": [("A", "a"), ("B", "b")]}
+
+    config = _build_combo_config([], lambda: list(state["choices"]))
+    w = AbmWidget(config)
+    qtbot.addWidget(w)
+    w.show()
+
+    combo = w._inputs["code"]
+    combo.setCurrentIndex(combo.findData("b"))
+
+    state["choices"] = [("A", "a")]
+    w.refresh_combo_choices()
+    assert combo.currentData() == "a"
+
+
+def test_new_clicked_refreshes_combos_first(qtbot):
+    """Click en 'Nuevo' (clear_form) re-evalúa los callables antes de limpiar."""
+    state = {"choices": [("A", "a")]}
+
+    config = _build_combo_config([], lambda: list(state["choices"]))
+    w = AbmWidget(config)
+    qtbot.addWidget(w)
+    w.show()
+
+    state["choices"] = [("A", "a"), ("B", "b")]
+    qtbot.mouseClick(w._new_button, Qt.MouseButton.LeftButton)
+    assert w._inputs["code"].count() == 2

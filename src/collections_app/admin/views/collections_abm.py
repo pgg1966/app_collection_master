@@ -20,11 +20,6 @@ class CollectionsAbmView(QWidget):
         super().__init__(parent)
         self.conn = conn
 
-        headers_repo = CodesHeadersRepository(conn)
-        header_choices: list[tuple[str, object]] = [
-            (h.code_header_name, h.code_header_id) for h in headers_repo.list_all()
-        ]
-
         config = AbmConfig(
             title=self.tr("ABM Colecciones"),
             module_code="COL001",
@@ -68,9 +63,9 @@ class CollectionsAbmView(QWidget):
                 ),
                 FieldDef(
                     "code_header_id",
-                    "Universo de códigos",
+                    "Cabecera de código",
                     FieldType.COMBO,
-                    combo_choices=header_choices,
+                    combo_choices=self._get_header_choices,
                     grid_width=180,
                 ),
                 FieldDef(
@@ -102,6 +97,17 @@ class CollectionsAbmView(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         self.abm = AbmWidget(config)
         layout.addWidget(self.abm)
+
+    def _get_header_choices(self) -> list[tuple[str, object]]:
+        """Choices del combo "Cabecera de código", evaluado en cada uso.
+
+        Pasamos este método como callable a `FieldDef.combo_choices` para
+        que `AbmWidget` lo re-evalúe cada vez que el form se limpia o se
+        carga una fila — así nuevas cabeceras creadas en otros tabs
+        aparecen sin reiniciar la app.
+        """
+        repo = CodesHeadersRepository(self.conn)
+        return [(h.code_header_name, h.code_header_id) for h in repo.list_all()]
 
     def _load(self) -> list[Collection]:
         return CollectionsRepository(self.conn).list_all()
