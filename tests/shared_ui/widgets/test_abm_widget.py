@@ -318,3 +318,87 @@ def test_new_button_clears_form(qtbot, store, widget):
     assert widget._current_record is not None
     qtbot.mouseClick(widget._new_button, Qt.MouseButton.LeftButton)
     assert widget._current_record is None
+
+
+def test_grid_selection_changed_emits_with_model(qtbot, store, widget):
+    saved = store.save(FakeItem(None, "selectable", 0))
+    widget.refresh()
+
+    with qtbot.waitSignal(widget.grid_selection_changed, timeout=1000) as blocker:
+        widget._grid_view.selectRow(0)
+    received = blocker.args[0]
+    assert received.item_id == saved.item_id
+
+
+# --------------------------------------------------------------------
+# Multi-PK readonly al editar (PK compuesta)
+# --------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class FakeComposite:
+    """Modelo con PK compuesta (code + número)."""
+
+    code_id: str
+    number: int
+    name: str
+
+
+def _build_composite_config(store: list[FakeComposite]) -> AbmConfig:
+    return AbmConfig(
+        title="Composite",
+        module_code="CMP001",
+        fields=[
+            FieldDef(
+                name="code_id",
+                label="Code",
+                field_type=FieldType.COMBO,
+                is_id=True,
+                combo_choices=[("ARG", "ARG"), ("BRA", "BRA")],
+            ),
+            FieldDef(name="number", label="Num", field_type=FieldType.INT, is_id=True),
+            FieldDef(name="name", label="Nombre", field_type=FieldType.TEXT),
+        ],
+        on_load_all=lambda: list(store),
+        on_save=lambda c: store.append(c) or c,
+        on_delete=lambda c: bool(store.remove(c)) or True,  # noqa: SIM222
+        model_class=FakeComposite,
+    )
+
+
+def test_composite_pk_all_readonly_when_editing(qtbot):
+    store: list[FakeComposite] = []
+    config = _build_composite_config(store)
+    w = AbmWidget(config)
+    qtbot.addWidget(w)
+    w.show()
+
+    store.append(FakeComposite("ARG", 1, "Messi"))
+    w.refresh()
+    w._grid_view.clicked.emit(w._proxy_model.index(0, 0))
+
+    code_combo = w._inputs["code_id"]
+    number_spin = w._inputs["number"]
+    name_edit = w._inputs["name"]
+    # COMBO: deshabilitado al editar
+    assert code_combo.isEnabled() is False
+    # INT: readonly al editar
+    assert number_spin.isReadOnly() is True
+    # Campo no-id: editable
+    from PySide6.QtWidgets import QLineEdit  # noqa: PLC0415
+
+    assert isinstance(name_edit, QLineEdit)
+    assert name_edit.isReadOnly() is False
+
+
+def test_composite_pk_all_editable_when_creating(qtbot):
+    store: list[FakeComposite] = []
+    config = _build_composite_config(store)
+    w = AbmWidget(config)
+    qtbot.addWidget(w)
+    w.show()
+
+    code_combo = w._inputs["code_id"]
+    number_spin = w._inputs["number"]
+    assert code_combo.isEnabled() is True
+    assert number_spin.isReadOnly() is False

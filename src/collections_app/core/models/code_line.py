@@ -12,8 +12,11 @@ class CodeLine:
         code_id: identificador del código (ej. "ARG", "MR"). Texto libre con
             longitud máxima validada por `CodeHeader.code_max_length`.
         code_name: descripción legible del código (ej. "Argentina", "Mirage").
+        code_order: posición para ordenar manualmente dentro del header.
+            Lower = primero. Default 0 (alfabético si no se configura).
     """
 
     code_header_id: int
     code_id: str
     code_name: str
+    code_order: int = 0

@@ -18,6 +18,7 @@ from enum import StrEnum
 from typing import Any
 
 from PySide6.QtCore import (
+    QItemSelection,
     QModelIndex,
     QSortFilterProxyModel,
     Qt,
@@ -119,6 +120,7 @@ class AbmWidget(QWidget):
 
     record_saved = Signal(object)
     record_deleted = Signal(object)
+    grid_selection_changed = Signal(object)
 
     def __init__(self, config: AbmConfig, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -243,6 +245,7 @@ class AbmWidget(QWidget):
         self._grid_view.verticalHeader().setVisible(False)
         self._grid_view.horizontalHeader().setStretchLastSection(True)
         self._grid_view.clicked.connect(self._on_row_clicked)
+        self._grid_view.selectionModel().selectionChanged.connect(self._on_selection_changed)
         for i, col in enumerate(self._grid_columns):
             if col.grid_width:
                 self._grid_view.horizontalHeader().resizeSection(i, col.grid_width)
@@ -328,6 +331,23 @@ class AbmWidget(QWidget):
         self._current_record = record
         self._populate_form(record)
         self._set_status("", "")
+
+    def _on_selection_changed(
+        self,
+        selected: QItemSelection,
+        deselected: QItemSelection,
+    ) -> None:
+        del deselected  # parámetro requerido por la signature de Qt
+        indexes = selected.indexes()
+        if not indexes:
+            return
+        proxy_idx = indexes[0]
+        if not proxy_idx.isValid():
+            return
+        source_idx = self._proxy_model.mapToSource(proxy_idx)
+        record = self._grid_model.item(source_idx.row(), 0).data(Qt.ItemDataRole.UserRole)
+        if record is not None:
+            self.grid_selection_changed.emit(record)
 
     def _on_save_clicked(self) -> None:
         record, error = self._build_model_from_form()
@@ -501,14 +521,22 @@ class AbmWidget(QWidget):
         return False
 
     def _update_pk_editability(self) -> None:
+        """Hace readonly TODOS los campos `is_id` cuando se edita un existente.
+
+        Soporta PK simple y compuesta. Cada tipo se maneja con la API
+        adecuada: QLineEdit/QSpinBox vía setReadOnly, QComboBox/QCheckBox
+        vía setEnabled (no tienen modo readonly nativo).
+        """
         editing = self._current_record is not None
         for fdef in self.config.fields:
             if not fdef.is_id or fdef.field_type == FieldType.READONLY:
                 continue
             widget = self._inputs[fdef.name]
-            if isinstance(widget, QLineEdit):
+            if isinstance(widget, (QLineEdit, QSpinBox)):
                 widget.setReadOnly(editing)
                 widget.setStyleSheet(f"background-color: {READONLY_BG};" if editing else "")
+            elif isinstance(widget, (QComboBox, QCheckBox)):
+                widget.setEnabled(not editing)
 
     def _first_editable_input(self) -> QWidget | None:
         for fdef in self.config.fields:
@@ -516,6 +544,10 @@ class AbmWidget(QWidget):
                 continue
             widget = self._inputs[fdef.name]
             if isinstance(widget, QLineEdit) and widget.isReadOnly():
+                continue
+            if isinstance(widget, QSpinBox) and widget.isReadOnly():
+                continue
+            if isinstance(widget, (QComboBox, QCheckBox)) and not widget.isEnabled():
                 continue
             return widget
         return None

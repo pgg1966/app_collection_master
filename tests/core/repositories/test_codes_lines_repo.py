@@ -91,3 +91,57 @@ def test_cascade_delete_from_header(memory_db, sample_code_header):
 
     CodesHeadersRepository(memory_db).delete(hid)
     assert lines_repo.list_by_header(hid) == []
+
+
+def test_default_order_is_zero(memory_db, sample_code_header):
+    repo = CodesLinesRepository(memory_db)
+    hid = sample_code_header.code_header_id
+    repo.upsert(CodeLine(hid, "ARG", "Argentina"))
+    line = repo.get(hid, "ARG")
+    assert line is not None
+    assert line.code_order == 0
+
+
+def test_codes_lines_ordered_by_code_order(memory_db, sample_code_header):
+    """list_by_header ordena primero por code_order, después por code_id."""
+    repo = CodesLinesRepository(memory_db)
+    hid = sample_code_header.code_header_id
+    repo.upsert(CodeLine(hid, "ARG", "Argentina", code_order=3))
+    repo.upsert(CodeLine(hid, "BRA", "Brasil", code_order=1))
+    repo.upsert(CodeLine(hid, "CHI", "Chile", code_order=2))
+    codes = [line.code_id for line in repo.list_by_header(hid)]
+    assert codes == ["BRA", "CHI", "ARG"]
+
+
+def test_upsert_preserves_code_order(memory_db, sample_code_header):
+    """Upsert con un code_order explícito lo persiste."""
+    repo = CodesLinesRepository(memory_db)
+    hid = sample_code_header.code_header_id
+    repo.upsert(CodeLine(hid, "ARG", "Argentina", code_order=5))
+    line = repo.get(hid, "ARG")
+    assert line is not None
+    assert line.code_order == 5
+
+
+def test_upsert_updates_code_order(memory_db, sample_code_header):
+    """Upsert sobre un line existente actualiza también su code_order."""
+    repo = CodesLinesRepository(memory_db)
+    hid = sample_code_header.code_header_id
+    repo.upsert(CodeLine(hid, "ARG", "Argentina", code_order=3))
+    repo.upsert(CodeLine(hid, "ARG", "Argentina (updated)", code_order=7))
+    line = repo.get(hid, "ARG")
+    assert line is not None
+    assert line.code_order == 7
+
+
+def test_reorder_changes_order(memory_db, sample_code_header):
+    repo = CodesLinesRepository(memory_db)
+    hid = sample_code_header.code_header_id
+    repo.upsert(CodeLine(hid, "ARG", "Argentina"))
+    repo.upsert(CodeLine(hid, "BRA", "Brasil"))
+    repo.upsert(CodeLine(hid, "CHI", "Chile"))
+
+    repo.reorder(hid, ["CHI", "ARG", "BRA"])
+
+    codes = [line.code_id for line in repo.list_by_header(hid)]
+    assert codes == ["CHI", "ARG", "BRA"]

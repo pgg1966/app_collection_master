@@ -8,11 +8,11 @@ from collections_app.core.db.connection import create_connection
 from collections_app.core.db.migrator import run_migrations
 
 
-def test_migrator_applies_initial_schema():
-    """Verifica que la migración 001 deja el schema en versión 1."""
+def test_migrator_applies_all_migrations():
+    """Verifica que el migrator aplica todas las migraciones disponibles."""
     conn = create_connection(":memory:")
     final_version = run_migrations(conn)
-    assert final_version == 1
+    assert final_version >= 2  # mínimo 001 + 002
 
 
 def test_migrator_creates_all_expected_tables(memory_db: sqlite3.Connection):
@@ -57,3 +57,41 @@ def test_cannot_create_collection_with_invalid_code_header(memory_db: sqlite3.Co
             "VALUES ('Test', 100, 999)"
         )
         memory_db.commit()
+
+
+def test_migration_002_adds_code_order_column(memory_db: sqlite3.Connection):
+    """Migración 002 debe agregar la columna code_order a codes_lines."""
+    cols = {row["name"] for row in memory_db.execute("PRAGMA table_info(codes_lines)").fetchall()}
+    assert "code_order" in cols
+
+
+def test_migration_002_assigns_alphabetical_order_to_existing():
+    """Aplicada en una DB con datos preexistentes, asigna orden alfabético."""
+    conn = create_connection(":memory:")
+    # Aplicar solo migración 001 simulando estado pre-002
+    schema_001 = (
+        "CREATE TABLE schema_version (version INTEGER PRIMARY KEY, "
+        "applied_at TEXT NOT NULL DEFAULT (datetime('now')));"
+        "CREATE TABLE codes_headers ("
+        "  code_header_id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  code_header_name TEXT NOT NULL UNIQUE,"
+        "  code_max_length INTEGER NOT NULL DEFAULT 5);"
+        "CREATE TABLE codes_lines ("
+        "  code_header_id INTEGER NOT NULL,"
+        "  code_id TEXT NOT NULL,"
+        "  code_name TEXT NOT NULL,"
+        "  PRIMARY KEY (code_header_id, code_id),"
+        "  FOREIGN KEY (code_header_id) REFERENCES codes_headers(code_header_id));"
+        "INSERT INTO schema_version (version) VALUES (1);"
+        "INSERT INTO codes_headers (code_header_name) VALUES ('FIFA');"
+        "INSERT INTO codes_lines (code_header_id, code_id, code_name) VALUES "
+        "  (1, 'BRA', 'Brasil'), (1, 'ARG', 'Argentina'), (1, 'CHI', 'Chile');"
+    )
+    conn.executescript(schema_001)
+    conn.commit()
+    # Aplicar todas las migraciones (debería aplicar 002)
+    run_migrations(conn)
+
+    rows = conn.execute("SELECT code_id, code_order FROM codes_lines ORDER BY code_id").fetchall()
+    orders = {r["code_id"]: r["code_order"] for r in rows}
+    assert orders == {"ARG": 1, "BRA": 2, "CHI": 3}

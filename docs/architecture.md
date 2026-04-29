@@ -272,3 +272,61 @@ widget = AbmWidget(config, parent=main_window)
 ```
 
 Más recetas y ejemplos en `docs/abm_widget_guide.md`.
+
+## App Admin
+
+La app admin (`collections-admin`) presenta tres tabs sobre `MainWindowBase`:
+
+```
++-----------------------------------------------------------+
+|  Archivo  Configuración                                    |
++-----------------------------------------------------------+
+|  [ Colecciones | Códigos | Cards ]                         |
++-----------------------------------------------------------+
+|                                                            |
+|  ( contenido del tab seleccionado )                        |
+|                                                            |
++-----------------------------------------------------------+
+|  Colección activa: …                                       |
++-----------------------------------------------------------+
+```
+
+- **Tab Colecciones** (`CollectionsAbmView`): ABM directo sobre
+  `collections`, con combo de `code_header`. Validaciones de negocio:
+  si `requires_code` exige `code_field_name`; si `is_premium` exige
+  `license_key_required`.
+- **Tab Códigos** (`CodesMasterDetailView`): master-detail con dos
+  AbmWidgets apilados verticalmente. El de arriba es ABM de
+  `codes_headers`. Al seleccionar uno, se habilita el de abajo, que
+  muestra sus `codes_lines` y permite alta/baja con `code_order`.
+- **Tab Cards** (`CardsAbmView`): combo arriba para elegir colección,
+  botón "Importar CSV…" y un AbmWidget que se reconstruye al cambiar
+  de colección (porque los choices del combo `code_id` dependen del
+  header de la colección).
+
+### Diagrama master-detail (CodesMasterDetailView)
+
+```
++----------------------------------------------------------+
+|  Headers de Códigos                                       |
+|  ┌────────────────────────┐  ┌────────────────────────┐  |
+|  │ ID │ Nombre   │ Maxlen │  │  Edición Header        │  |
+|  │ 1  │ FIFA     │ 5      │  │  …                     │  |
+|  │ 2  │ Pokemon  │ 4      │  │  [Guardar][Nuevo][Del] │  |
+|  └────────────────────────┘  └────────────────────────┘  |
++----------------------------------------------------------+
+|  Códigos del header: FIFA                                 |
+|  ┌────────────────────────┐  ┌────────────────────────┐  |
+|  │ Code │ Nombre   │ Ord  │  │  Edición Código        │  |
+|  │ ARG  │ Argentina│ 1    │  │  …                     │  |
+|  │ BRA  │ Brasil   │ 2    │  │  [Guardar][Nuevo][Del] │  |
+|  └────────────────────────┘  └────────────────────────┘  |
++----------------------------------------------------------+
+```
+
+El detail usa la señal `grid_selection_changed` del master para
+escuchar cambios de header. Al seleccionar uno, reconfigura
+`on_load_all` y `extra_kwargs` del config del detail (para inyectar
+`code_header_id`) y refresca.
+
+Ver flujo completo en `docs/admin_workflow.md`.

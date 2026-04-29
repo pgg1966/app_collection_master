@@ -4,8 +4,11 @@ import logging
 import sys
 from pathlib import Path
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QTabWidget
 
+from collections_app.admin.views.cards_abm import CardsAbmView
+from collections_app.admin.views.codes_master_detail import CodesMasterDetailView
+from collections_app.admin.views.collections_abm import CollectionsAbmView
 from collections_app.core.utils.logging_setup import setup_logging
 from collections_app.core.utils.paths import get_database_path
 from collections_app.shared_ui import (
@@ -18,11 +21,17 @@ logger = logging.getLogger(__name__)
 
 
 class AdminMainWindow(MainWindowBase):
-    """Ventana principal del admin."""
+    """Ventana principal del admin con tabs Colecciones / Códigos / Cards."""
 
     def __init__(self, db_path: Path) -> None:
         super().__init__(db_path, app_name="Collections — Admin")
-        self.setMinimumSize(1024, 768)
+        self.setMinimumSize(1200, 800)
+
+        self._tabs = QTabWidget()
+        self._tabs.addTab(CollectionsAbmView(self.conn), self.tr("Colecciones"))
+        self._tabs.addTab(CodesMasterDetailView(self.conn), self.tr("Códigos"))
+        self._tabs.addTab(CardsAbmView(self.conn), self.tr("Cards"))
+        self.setCentralWidget(self._tabs)
 
     def _build_menus(self) -> None:
         super()._build_menus()
