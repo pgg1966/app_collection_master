@@ -83,3 +83,100 @@ Decisiones clave del schema:
   cambiar de motor en el futuro.
 - **Migraciones inmutables numeradas**: simplicidad sobre frameworks
   como alembic; el proyecto es chico y las migraciones son lineales.
+
+## Capa de datos
+
+```
++--------------------------------------------------------+
+|                     Services                            |
+|   SettingsService   InventoryService   CollectionsService
+|   (SETTING_KEY_*)   (alta/baja, stats)  (validate, info)
++--------------------------------------------------------+
+                          |
+                          v
++--------------------------------------------------------+
+|                   Repositories                          |
+|   CodesHeadersRepository    CardsRepository             |
+|   CodesLinesRepository      InventoryRepository         |
+|   CollectionsRepository     TransactionsRepository      |
+|                             SettingsRepository          |
++--------------------------------------------------------+
+                          |
+                          v
++--------------------------------------------------------+
+|                    Models (frozen)                      |
+|   CodeHeader, CodeLine, Collection, Card,               |
+|   InventoryItem, Transaction, OperationType             |
++--------------------------------------------------------+
+                          |
+                          v
+                  +-----------------+
+                  |   sqlite3.Connection
+                  +-----------------+
+```
+
+### Manejo de transacciones
+
+Los **repositories** NUNCA llaman a `commit()` o `rollback()`. Solo ejecutan
+SQL. El caller (típicamente un service o el código de UI) decide cuándo
+commitear, lo cual permite agrupar varias operaciones en una transacción
+atómica.
+
+Los **services** que cruzan tablas usan el helper `transaction()` definido
+en `core/db/connection.py`:
+
+```python
+from collections_app.core.db.connection import transaction
+
+with transaction(conn):
+    inventory_repo.adjust_quantity(...)
+    transactions_repo.log(...)
+# commit automático; rollback ante cualquier excepción
+```
+
+`InventoryService.add_card` y `remove_card` siguen este patrón para
+garantizar que el ajuste de inventario y el log de la operación viajen
+juntos.
+
+### Flujo end-to-end
+
+```python
+from collections_app.core.db.connection import create_connection
+from collections_app.core.db.migrator import run_migrations
+from collections_app.core.models import CodeHeader, Collection, Card
+from collections_app.core.repositories import (
+    CodesHeadersRepository, CollectionsRepository, CardsRepository,
+)
+from collections_app.core.services import InventoryService
+
+conn = create_connection("collections.db")
+run_migrations(conn)
+
+# 1) Crear el universo de códigos
+headers = CodesHeadersRepository(conn)
+fifa_codes = headers.create(CodeHeader(None, "FIFA Codes", code_max_length=3))
+
+# 2) Crear la colección
+collections = CollectionsRepository(conn)
+wc26 = collections.create(Collection(
+    None, "FIFA WC 2026", card_count=300, requires_code=True,
+    code_field_name="País", code_header_id=fifa_codes.code_header_id,
+))
+conn.commit()
+
+# 3) Cargar el catálogo de cards (batch)
+cards_repo = CardsRepository(conn)
+cards_repo.bulk_upsert([
+    Card(wc26.collection_id, "ARG", n, f"Card-ARG-{n}") for n in range(1, 31)
+])
+conn.commit()
+
+# 4) Alta de inventario (transaccional)
+inventory = InventoryService(conn)
+inventory.add_card(wc26.collection_id, "ARG", 1, quantity=2)
+
+# 5) Consultar stats
+print(inventory.get_stats(wc26.collection_id))
+```
+
+Ver `docs/data_layer_examples.md` para más recetas copy-paste.
