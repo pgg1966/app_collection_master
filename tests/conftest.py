@@ -2,6 +2,7 @@
 
 import sqlite3
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 
@@ -24,6 +25,21 @@ def memory_db() -> Iterator[sqlite3.Connection]:
         yield conn
     finally:
         conn.close()
+
+
+@pytest.fixture
+def file_db_path(tmp_path: Path) -> Path:
+    """Path a una DB SQLite en archivo, ya migrada al schema actual.
+
+    Útil para tests que necesitan abrir una conexión 'fresca' al mismo
+    archivo y verificar que un commit es visible desde otra conexión.
+    """
+    db_path = tmp_path / "test.db"
+    conn = create_connection(db_path)
+    run_migrations(conn)
+    conn.commit()
+    conn.close()
+    return db_path
 
 
 @pytest.fixture
