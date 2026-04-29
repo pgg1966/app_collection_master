@@ -4,6 +4,7 @@ import logging
 import sqlite3
 from pathlib import Path
 
+from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -59,7 +60,16 @@ class CardsAbmView(QWidget):
         self._abm_container.setContentsMargins(0, 0, 0, 0)
         root.addLayout(self._abm_container, stretch=1)
 
-        self._populate_collection_combo()
+        self.refresh_collections_combo()
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    def showEvent(self, event: QShowEvent) -> None:  # noqa: N802 — Qt naming
+        """Refresca el combo cada vez que el tab se hace visible."""
+        super().showEvent(event)
+        self.refresh_collections_combo()
 
     # ------------------------------------------------------------------
     # Top bar
@@ -83,15 +93,41 @@ class CardsAbmView(QWidget):
         layout.addWidget(self._import_button)
         return layout
 
-    def _populate_collection_combo(self) -> None:
+    def refresh_collections_combo(self) -> None:
+        """Re-popula el combo de colecciones desde la DB.
+
+        Preserva la selección actual si la `collection_id` sigue existiendo
+        (refresca el cache del nombre por si fue editada). Si la colección
+        activa fue borrada, vuelve a "(ninguna)" y el AbmWidget se
+        deshabilita.
+        """
+        previous_id = self._current_collection.collection_id if self._current_collection else None
+
         repo = CollectionsRepository(self.conn)
+        all_collections = repo.list_all()
+        all_ids = {c.collection_id for c in all_collections if c.collection_id is not None}
+
         self._collection_combo.blockSignals(True)
         self._collection_combo.clear()
         self._collection_combo.addItem(self.tr("(seleccione una colección)"), userData=None)
-        for col in repo.list_all():
+        for col in all_collections:
             self._collection_combo.addItem(col.collection_name, userData=col.collection_id)
+
+        if previous_id is not None and previous_id in all_ids:
+            # La colección sigue existiendo: preservar selección y refrescar
+            # el cache local (puede haber cambiado de nombre).
+            idx = self._collection_combo.findData(previous_id)
+            self._collection_combo.setCurrentIndex(idx)
+            self._collection_combo.blockSignals(False)
+            self._current_collection = repo.get_by_id(previous_id)
+            return
+
+        # Sin selección previa, o la selección previa fue borrada.
+        self._collection_combo.setCurrentIndex(0)
         self._collection_combo.blockSignals(False)
-        self._on_collection_changed(self._collection_combo.currentIndex())
+        self._current_collection = None
+        self._import_button.setEnabled(False)
+        self._clear_abm()
 
     # ------------------------------------------------------------------
     # Selección de colección → reconstrucción del AbmWidget

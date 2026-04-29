@@ -27,11 +27,22 @@ class AdminMainWindow(MainWindowBase):
         super().__init__(db_path, app_name="Collections — Admin")
         self.setMinimumSize(1200, 800)
 
+        self._collections_view = CollectionsAbmView(self.conn)
+        self._codes_view = CodesMasterDetailView(self.conn)
+        self._cards_view = CardsAbmView(self.conn)
+
         self._tabs = QTabWidget()
-        self._tabs.addTab(CollectionsAbmView(self.conn), self.tr("Colecciones"))
-        self._tabs.addTab(CodesMasterDetailView(self.conn), self.tr("Códigos"))
-        self._tabs.addTab(CardsAbmView(self.conn), self.tr("Cards"))
+        self._tabs.addTab(self._collections_view, self.tr("Colecciones"))
+        self._tabs.addTab(self._codes_view, self.tr("Códigos"))
+        self._tabs.addTab(self._cards_view, self.tr("Cards"))
         self.setCentralWidget(self._tabs)
+
+        # Cuando se crea/edita o borra una colección, refrescar el combo
+        # de Cards para que vea las novedades sin reiniciar la app.
+        self._collections_view.abm.record_saved.connect(self._cards_view.refresh_collections_combo)
+        self._collections_view.abm.record_deleted.connect(
+            self._cards_view.refresh_collections_combo
+        )
 
     def _build_menus(self) -> None:
         super()._build_menus()

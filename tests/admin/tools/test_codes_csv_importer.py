@@ -118,3 +118,48 @@ def test_import_uses_default_order_when_missing(memory_db, sample_code_header, t
     line = CodesLinesRepository(memory_db).get(sample_code_header.code_header_id, "ARG")
     assert line is not None
     assert line.code_order == 0
+
+
+def test_import_csv_without_max_length_column(memory_db, sample_code_header, tmp_path):
+    """El formato nuevo (3 columnas) importa sin warnings ni errores."""
+    csv = tmp_path / "new_format.csv"
+    csv.write_text(
+        "code_id,code_name,code_order\n" "ARG,Argentina,1\n" "BRA,Brasil,2\n",
+        encoding="utf-8",
+    )
+    result = CodesCsvImporter(memory_db).import_file(csv, sample_code_header.code_header_id)
+    assert result.imported == 2
+    assert result.skipped == 0
+    assert result.errors == []
+
+
+def test_import_csv_with_max_length_column_ignored(memory_db, sample_code_header, tmp_path):
+    """El formato viejo (con code_max_length) sigue importando; la columna se ignora."""
+    csv = tmp_path / "old_format.csv"
+    csv.write_text(
+        "code_id,code_name,code_order,code_max_length\n" "ARG,Argentina,1,5\n" "BRA,Brasil,2,5\n",
+        encoding="utf-8",
+    )
+    result = CodesCsvImporter(memory_db).import_file(csv, sample_code_header.code_header_id)
+    assert result.imported == 2
+    assert result.skipped == 0
+    assert result.errors == []
+    line = CodesLinesRepository(memory_db).get(sample_code_header.code_header_id, "ARG")
+    assert line is not None
+    assert line.code_name == "Argentina"
+    assert line.code_order == 1
+
+
+def test_import_csv_columns_in_different_order(memory_db, sample_code_header, tmp_path):
+    """Con header, las columnas se mapean por nombre, no por posición."""
+    csv = tmp_path / "reordered.csv"
+    csv.write_text(
+        "code_order,code_name,code_id\n" "1,Argentina,ARG\n",
+        encoding="utf-8",
+    )
+    result = CodesCsvImporter(memory_db).import_file(csv, sample_code_header.code_header_id)
+    assert result.imported == 1
+    line = CodesLinesRepository(memory_db).get(sample_code_header.code_header_id, "ARG")
+    assert line is not None
+    assert line.code_name == "Argentina"
+    assert line.code_order == 1
