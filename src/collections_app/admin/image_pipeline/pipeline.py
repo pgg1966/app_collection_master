@@ -4,6 +4,12 @@ Para cada card de la colección: PhotoFinder → SketchGenerator → CardCompose
 → guardar PNG. El procesamiento se hace en batches con callback de progreso.
 Las dependencias (finder/sketch/composer) se inyectan en el constructor para
 que los tests puedan mockearlas.
+
+Threading note: el pipeline normalmente corre dentro de un QThread (ver
+`PipelineWorker`). SQLite no permite compartir conexiones entre threads,
+así que el pipeline NO recibe una conexión: recibe un `db_path` y abre
+una conexión propia dentro de `run_batch()` (ya en el worker thread). La
+cierra al finalizar el run.
 """
 
 import logging
@@ -23,6 +29,8 @@ from collections_app.admin.image_pipeline.photo_finder import (
     PhotoFinder,
 )
 from collections_app.admin.image_pipeline.sketch_generator import SketchGenerator
+from collections_app.core.db.connection import create_connection
+from collections_app.core.db.migrator import run_migrations
 from collections_app.core.repositories import (
     CardsRepository,
     CodesLinesRepository,
@@ -69,18 +77,24 @@ class PipelineResult:
 
 
 class ImagePipeline:
-    """Genera imágenes de cards en batch para una colección."""
+    """Genera imágenes de cards en batch para una colección.
+
+    El constructor recibe un `db_path` (no una conexión): la conexión se
+    abre dentro de `run_batch()`, ya en el thread donde corre, y se cierra
+    al terminar. Esto evita el `sqlite3.ProgrammingError: SQLite objects
+    created in a thread can only be used in that same thread`.
+    """
 
     def __init__(
         self,
-        conn: sqlite3.Connection,
+        db_path: Path,
         collection_id: int,
         photo_finder: PhotoFinder | None = None,
         sketch_generator: SketchGenerator | None = None,
         card_composer: CardComposer | None = None,
         output_dir: Path | None = None,
     ) -> None:
-        self.conn = conn
+        self._db_path = db_path
         self.collection_id = collection_id
         self._photo_finder = photo_finder or PhotoFinder(get_photo_cache_dir())
         self._sketch_generator = sketch_generator or SketchGenerator()
@@ -103,6 +117,9 @@ class ImagePipeline:
     ) -> PipelineResult:
         """Procesa cards generando sus imágenes.
 
+        Abre una conexión SQLite propia (lo que permite ejecutar el método
+        dentro de un QThread) y la cierra al terminar el run.
+
         Args:
             card_keys: lista de "CODE-NUMBER" a procesar. None = todas.
             on_progress: callback `(current, total, label)` para barra de progreso.
@@ -117,20 +134,24 @@ class ImagePipeline:
         self._stop_event.clear()
         result = PipelineResult(output_dir=self._output_dir)
 
-        all_cards = self._load_target_cards(card_keys)
-        result.total = len(all_cards)
+        conn = self._open_connection()
+        try:
+            all_cards = self._load_target_cards(conn, card_keys)
+            result.total = len(all_cards)
 
-        for batch_start in range(0, len(all_cards), batch_size):
-            if self._stop_event.is_set():
-                break
-            batch = all_cards[batch_start : batch_start + batch_size]
-            for i, card in enumerate(batch, start=batch_start + 1):
+            for batch_start in range(0, len(all_cards), batch_size):
                 if self._stop_event.is_set():
                     break
-                self._process_card(card, force, result, on_log)
-                if on_progress is not None:
-                    label = f"{card['card_key']} {card['card_name']}"
-                    on_progress(i, result.total, label)
+                batch = all_cards[batch_start : batch_start + batch_size]
+                for i, card in enumerate(batch, start=batch_start + 1):
+                    if self._stop_event.is_set():
+                        break
+                    self._process_card(card, force, result, on_log)
+                    if on_progress is not None:
+                        label = f"{card['card_key']} {card['card_name']}"
+                        on_progress(i, result.total, label)
+        finally:
+            conn.close()
 
         return result
 
@@ -143,27 +164,40 @@ class ImagePipeline:
         return self._output_dir / f"{card_key}.png"
 
     def get_existing_count(self) -> int:
-        """Cuántas imágenes ya están generadas para esta colección."""
+        """Cuántas imágenes ya están generadas para esta colección.
+
+        No requiere DB; lee el filesystem.
+        """
         return sum(1 for p in self._output_dir.glob("*.png"))
 
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
 
-    def _load_target_cards(self, card_keys: list[str] | None) -> list[_CardJob]:
+    def _open_connection(self) -> sqlite3.Connection:
+        """Abre y retorna una nueva conexión a la DB. Migra por las dudas."""
+        conn = create_connection(self._db_path)
+        run_migrations(conn)
+        return conn
+
+    def _load_target_cards(
+        self,
+        conn: sqlite3.Connection,
+        card_keys: list[str] | None,
+    ) -> list[_CardJob]:
         """Carga las cards de la colección (con código del header) y filtra."""
-        col = CollectionsRepository(self.conn).get_by_id(self.collection_id)
+        col = CollectionsRepository(conn).get_by_id(self.collection_id)
         if col is None:
             raise ValueError(f"Collection {self.collection_id} no existe")
 
-        cards = CardsRepository(self.conn).list_by_collection(self.collection_id)
+        cards = CardsRepository(conn).list_by_collection(self.collection_id)
         lines = {
             line.code_id: line.code_name
-            for line in CodesLinesRepository(self.conn).list_by_header(col.code_header_id)
+            for line in CodesLinesRepository(conn).list_by_header(col.code_header_id)
         }
         inv_owned = {
             (i.code_id, i.card_number)
-            for i in InventoryRepository(self.conn).list_owned(self.collection_id)
+            for i in InventoryRepository(conn).list_owned(self.collection_id)
         }
 
         if card_keys is not None:

@@ -26,6 +26,7 @@ from collections_app.core.repositories import (
     CardsRepository,
     CollectionsRepository,
 )
+from collections_app.core.utils.paths import get_database_path
 from collections_app.shared_ui.theme import Spacing, StatusColor
 
 logger = logging.getLogger(__name__)
@@ -164,7 +165,7 @@ class ImageGeneratorView(QWidget):
             self._set_buttons_enabled(False)
             return
         total = CardsRepository(self.conn).count_by_collection(cid)
-        existing = ImagePipeline(self.conn, cid).get_existing_count()
+        existing = ImagePipeline(get_database_path(), cid).get_existing_count()
         pct = (existing / total * 100) if total > 0 else 0.0
         self._state_label.setText(
             self.tr("Imágenes generadas: {e} / {t} ({p:.1f}%)").format(e=existing, t=total, p=pct)
@@ -205,7 +206,9 @@ class ImageGeneratorView(QWidget):
         cid = self._current_collection_id()
         if cid is None:
             return
-        pipeline = ImagePipeline(self.conn, cid)
+        # ImagePipeline recibe db_path (no conn) porque corre en QThread:
+        # SQLite no permite usar una conexión cross-thread.
+        pipeline = ImagePipeline(get_database_path(), cid)
         self._worker = PipelineWorker(pipeline, force=force, parent=self)
         self._worker.progress.connect(self._on_progress)
         self._worker.log_entry.connect(self._on_log_entry)
