@@ -14,6 +14,14 @@ def parent_widget(qtbot):
     return w
 
 
+def _ensure_focus(qtbot, widget) -> None:
+    """Setea foco y espera a que efectivamente lo tenga (resiliente a flakiness)."""
+    widget.window().activateWindow()
+    widget.window().raise_()
+    widget.setFocus(Qt.FocusReason.OtherFocusReason)
+    qtbot.waitUntil(widget.hasFocus, timeout=500)
+
+
 def test_enter_advances_to_next_widget(qtbot, parent_widget):
     a = QLineEdit(parent_widget)
     b = QLineEdit(parent_widget)
@@ -24,7 +32,7 @@ def test_enter_advances_to_next_widget(qtbot, parent_widget):
     nav.set_chain([a, b])
     nav.install()
 
-    a.setFocus()
+    _ensure_focus(qtbot, a)
     qtbot.keyClick(a, Qt.Key.Key_Return)
     assert b.hasFocus()
 
@@ -41,7 +49,7 @@ def test_enter_on_last_calls_callback(qtbot, parent_widget):
     nav.on_last_enter = lambda: calls.append(True)
     nav.install()
 
-    b.setFocus()
+    _ensure_focus(qtbot, b)
     qtbot.keyClick(b, Qt.Key.Key_Return)
     assert calls == [True]
 
@@ -58,7 +66,7 @@ def test_navigator_with_combobox(qtbot, parent_widget):
     nav.set_chain([a, combo, spin])
     nav.install()
 
-    a.setFocus()
+    _ensure_focus(qtbot, a)
     qtbot.keyClick(a, Qt.Key.Key_Return)
     assert combo.hasFocus()
     qtbot.keyClick(combo, Qt.Key.Key_Return)
@@ -84,7 +92,7 @@ def test_navigator_uninstall_removes_filters(qtbot, parent_widget):
     nav.install()
     nav.uninstall()
 
-    a.setFocus()
+    _ensure_focus(qtbot, a)
     qtbot.keyClick(a, Qt.Key.Key_Return)
     # Sin filter, Enter no salta a b
     assert not b.hasFocus()
@@ -100,6 +108,6 @@ def test_navigator_keypad_enter_also_works(qtbot, parent_widget):
     nav.set_chain([a, b])
     nav.install()
 
-    a.setFocus()
+    _ensure_focus(qtbot, a)
     qtbot.keyClick(a, Qt.Key.Key_Enter)
     assert b.hasFocus()

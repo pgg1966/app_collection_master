@@ -39,3 +39,30 @@ def get_logs_dir() -> Path:
 def get_schema_dir() -> Path:
     """Path al directorio con los SQLs de migración (dentro del paquete)."""
     return Path(__file__).resolve().parent.parent / "db" / "schema"
+
+
+def get_photo_cache_dir() -> Path:
+    """Directorio compartido donde el admin cachea fotos descargadas de internet.
+
+    Las fotos crudas viven acá (no por colección): si el mismo jugador aparece
+    en dos colecciones, se reusa la foto si la card_key coincide.
+    """
+    d = get_app_data_dir() / "photo_cache"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def get_generated_cards_dir(collection_id: int) -> Path:
+    """Directorio donde el admin guarda los sketches generados por colección.
+
+    Cada colección tiene su propio subdirectorio bajo
+    `{app_data}/generated_cards/{collection_id}/`.
+    """
+    d = get_app_data_dir() / "generated_cards" / str(collection_id)
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def get_generated_card_path(collection_id: int, card_key: str) -> Path:
+    """Path al sketch generado para una card específica (puede no existir aún)."""
+    return get_generated_cards_dir(collection_id) / f"{card_key}.png"
