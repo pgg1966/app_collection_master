@@ -5,6 +5,7 @@ from datetime import datetime
 
 from collections_app.core.db.connection import transaction
 from collections_app.core.models import (
+    Card,
     InventoryItem,
     OperationType,
     Transaction,
@@ -14,6 +15,14 @@ from collections_app.core.repositories import (
     InventoryRepository,
     TransactionsRepository,
 )
+
+
+class AmbiguousCardError(Exception):
+    """Lanzado cuando una búsqueda por número devuelve múltiples cards."""
+
+    def __init__(self, matches: list[Card]) -> None:
+        self.matches = matches
+        super().__init__(f"{len(matches)} cards con ese número")
 
 
 class InventoryService:
@@ -101,6 +110,49 @@ class InventoryService:
                 )
             )
         return updated
+
+    def add_card_by_number(
+        self,
+        collection_id: int,
+        card_number: int,
+        quantity: int = 1,
+    ) -> InventoryItem:
+        """Alta usando solo el número (cuando la colección no requiere código).
+
+        Resuelve el `code_id` vía `CardsRepository.find_by_number`.
+
+        Raises:
+            ValueError: si `quantity <= 0` o no hay cards con ese número.
+            AmbiguousCardError: si hay >1 card con ese número en distintos
+                códigos. La excepción incluye `matches` para que la UI
+                pueda pedir al usuario que elija uno.
+        """
+        if quantity <= 0:
+            raise ValueError(f"quantity debe ser > 0 (recibido: {quantity})")
+        matches = self._cards.find_by_number(collection_id, card_number)
+        if not matches:
+            raise ValueError(f"Card número {card_number} no existe en collection {collection_id}")
+        if len(matches) > 1:
+            raise AmbiguousCardError(matches)
+        card = matches[0]
+        return self.add_card(collection_id, card.code_id, card.card_number, quantity)
+
+    def remove_card_by_number(
+        self,
+        collection_id: int,
+        card_number: int,
+        quantity: int = 1,
+    ) -> InventoryItem:
+        """Baja usando solo el número. Misma semántica que add_card_by_number."""
+        if quantity <= 0:
+            raise ValueError(f"quantity debe ser > 0 (recibido: {quantity})")
+        matches = self._cards.find_by_number(collection_id, card_number)
+        if not matches:
+            raise ValueError(f"Card número {card_number} no existe en collection {collection_id}")
+        if len(matches) > 1:
+            raise AmbiguousCardError(matches)
+        card = matches[0]
+        return self.remove_card(collection_id, card.code_id, card.card_number, quantity)
 
     def get_stats(self, collection_id: int) -> dict[str, int | float]:
         """Estadísticas agregadas para una colección.

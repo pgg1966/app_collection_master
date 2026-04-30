@@ -112,3 +112,30 @@ def test_cascade_delete_from_collection(memory_db, sample_cards, sample_collecti
     cards_repo = CardsRepository(memory_db)
     CollectionsRepository(memory_db).delete(sample_collection.collection_id)
     assert cards_repo.list_by_collection(sample_collection.collection_id) == []
+
+
+def test_find_by_number_returns_match(memory_db, sample_cards, sample_collection):
+    """Si hay un solo card con ese número, lo retorna."""
+    repo = CardsRepository(memory_db)
+    cid = sample_collection.collection_id
+    # sample_cards tiene FRA-1 (número 1 en code "FRA"). ARG-1, BRA-1 también.
+    matches = repo.find_by_number(cid, 1)
+    assert len(matches) == 3  # ARG-1, BRA-1, FRA-1
+    codes = {c.code_id for c in matches}
+    assert codes == {"ARG", "BRA", "FRA"}
+
+
+def test_find_by_number_returns_empty_when_not_exists(memory_db, sample_cards, sample_collection):
+    repo = CardsRepository(memory_db)
+    assert repo.find_by_number(sample_collection.collection_id, 9999) == []
+
+
+def test_find_by_number_returns_multiple_when_ambiguous(memory_db, sample_collection):
+    """Cuando varias cards comparten número en distintos códigos, retorna todas."""
+    repo = CardsRepository(memory_db)
+    cid = sample_collection.collection_id
+    repo.upsert(Card(cid, "ARG", 24, "Messi"))
+    repo.upsert(Card(cid, "BRA", 24, "Vinicius"))
+    matches = repo.find_by_number(cid, 24)
+    assert len(matches) == 2
+    assert {m.code_id for m in matches} == {"ARG", "BRA"}

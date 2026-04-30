@@ -1,9 +1,18 @@
-"""Tests del CardLoaderView."""
+"""Tests del CardLoaderView.
+
+Reescritos tras rediseño en el cual:
+- Se removió el checkbox "Tiene código de prefijo".
+- Se removió el DEFAULT_CODE = "NON" hardcodeado.
+- requires_code=False → solo Número/Cantidad, búsqueda por find_by_number.
+- requires_code=True → Código siempre obligatorio.
+- Ambigüedad (>1 match en find_by_number) muestra combo limitado.
+"""
 
 import pytest
 from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QCheckBox
 
-from collections_app.client.views.card_loader import DEFAULT_CODE, CardLoaderView
+from collections_app.client.views.card_loader import CardLoaderView
 from collections_app.core.models import Card, CodeLine, Collection
 from collections_app.core.repositories import (
     CardsRepository,
@@ -19,229 +28,252 @@ from collections_app.core.services import InventoryService
 
 
 @pytest.fixture
-def loader_collection(memory_db, sample_code_header):
-    """Collection (requires_code=True) con codes_lines + cards."""
+def collection_no_code(memory_db, sample_code_header):
+    """Collection con requires_code=False y cards de ejemplo.
+
+    Los códigos del header son `ARG`, `BRA`, `MR`. Hay un número repetido
+    (24) en ARG y BRA para tests de ambigüedad.
+    """
     hid = sample_code_header.code_header_id
     lines_repo = CodesLinesRepository(memory_db)
-    for code, name in [
-        (DEFAULT_CODE, "Sin prefijo"),
-        ("ARG", "Argentina"),
-        ("MR", "Master Rookies"),
-    ]:
+    for code, name in [("ARG", "ARGENTINA"), ("BRA", "BRAZIL"), ("MR", "MASTER ROOKIES")]:
         lines_repo.upsert(CodeLine(hid, code, name))
 
     col = CollectionsRepository(memory_db).create(
         Collection(
             collection_id=None,
-            collection_name="Test WC",
+            collection_name="Adrenalyne",
             card_count=100,
-            requires_code=True,
-            code_field_name="País",
+            requires_code=False,  # ← clave del nuevo diseño
+            code_field_name=None,
             code_header_id=hid,
         )
     )
-
     cards_repo = CardsRepository(memory_db)
-    cards_repo.upsert(Card(col.collection_id, DEFAULT_CODE, 24, "LIONEL MESSI"))
-    cards_repo.upsert(Card(col.collection_id, DEFAULT_CODE, 25, "EMILIANO MARTINEZ"))
-    cards_repo.upsert(Card(col.collection_id, "ARG", 1, "ARG STUFF"))
-    cards_repo.upsert(Card(col.collection_id, "MR", 1, "PAZ"))
+    cards_repo.upsert(Card(col.collection_id, "ARG", 24, "LIONEL MESSI"))
+    cards_repo.upsert(Card(col.collection_id, "BRA", 24, "VINICIUS"))  # ambiguo con ARG-24
+    cards_repo.upsert(Card(col.collection_id, "ARG", 1, "GOLDEN BALLERS"))
+    cards_repo.upsert(Card(col.collection_id, "MR", 5, "PAZ"))
     memory_db.commit()
     return col
 
 
 @pytest.fixture
-def free_collection(memory_db, sample_code_header):
-    """Collection con requires_code=False (todas las cards usan DEFAULT_CODE)."""
+def collection_with_code(memory_db, sample_code_header):
+    """Collection con requires_code=True (modo Stickers Panini)."""
     hid = sample_code_header.code_header_id
-    CodesLinesRepository(memory_db).upsert(CodeLine(hid, DEFAULT_CODE, "Sin prefijo"))
+    lines_repo = CodesLinesRepository(memory_db)
+    for code, name in [("S1", "Set 1"), ("S2", "Set 2")]:
+        lines_repo.upsert(CodeLine(hid, code, name))
+
     col = CollectionsRepository(memory_db).create(
         Collection(
             collection_id=None,
-            collection_name="Free",
-            card_count=10,
-            requires_code=False,
-            code_field_name=None,
+            collection_name="Stickers",
+            card_count=20,
+            requires_code=True,
+            code_field_name="Set",
             code_header_id=hid,
         )
     )
-    CardsRepository(memory_db).upsert(Card(col.collection_id, DEFAULT_CODE, 1, "First"))
+    CardsRepository(memory_db).upsert(Card(col.collection_id, "S1", 1, "Sticker A"))
+    CardsRepository(memory_db).upsert(Card(col.collection_id, "S2", 1, "Sticker B"))
     memory_db.commit()
     return col
 
 
-@pytest.fixture
-def loader(qtbot, memory_db, loader_collection):
-    view = CardLoaderView(memory_db, loader_collection)
-    qtbot.addWidget(view)
-    view.show()
-    qtbot.waitExposed(view)
-    return view
-
-
 # ----------------------------------------------------------------------
-# Tests
+# Tests de visibilidad y foco
 # ----------------------------------------------------------------------
 
 
-def test_loader_default_focus_on_number(qtbot, loader):
-    qtbot.wait(50)
-    assert loader._number_input.hasFocus()
-
-
-def test_checkbox_hidden_when_collection_does_not_require_code(qtbot, memory_db, free_collection):
-    view = CardLoaderView(memory_db, free_collection)
+def test_no_checkbox_visible(qtbot, memory_db, collection_no_code):
+    """El checkbox de prefijo ya no existe en ningún caso."""
+    view = CardLoaderView(memory_db, collection_no_code)
     qtbot.addWidget(view)
     view.show()
-    assert view._has_code_checkbox.isVisible() is False
+    checkboxes = view.findChildren(QCheckBox)
+    assert checkboxes == []
 
 
-def test_checkbox_toggles_code_field_visibility(qtbot, loader):
-    assert loader._code_combo.isVisible() is False
-    loader._has_code_checkbox.setChecked(True)
-    assert loader._code_combo.isVisible() is True
-    loader._has_code_checkbox.setChecked(False)
-    assert loader._code_combo.isVisible() is False
+def test_no_code_field_when_requires_code_false(qtbot, memory_db, collection_no_code):
+    view = CardLoaderView(memory_db, collection_no_code)
+    qtbot.addWidget(view)
+    view.show()
+    assert view._code_combo.isVisible() is False
+    assert view._code_label.isVisible() is False
 
 
-def test_loader_focus_moves_to_code_when_checkbox_marked(qtbot, loader):
-    loader._has_code_checkbox.setChecked(True)
+def test_code_field_always_visible_when_requires_code_true(qtbot, memory_db, collection_with_code):
+    view = CardLoaderView(memory_db, collection_with_code)
+    qtbot.addWidget(view)
+    view.show()
+    assert view._code_combo.isVisible() is True
+    assert view._code_label.isVisible() is True
+
+
+def test_focus_on_number_when_requires_code_false(qtbot, memory_db, collection_no_code):
+    view = CardLoaderView(memory_db, collection_no_code)
+    qtbot.addWidget(view)
+    view.show()
     qtbot.wait(50)
-    assert loader._code_combo.hasFocus()
+    assert view._number_input.hasFocus()
 
 
-def test_typing_number_validates_and_shows_card_info(qtbot, loader):
-    loader._number_input.setText("24")
-    assert loader._name_input.text() == "LIONEL MESSI"
-    assert "Nueva" in loader._status_label.text()
+def test_focus_on_code_when_requires_code_true(qtbot, memory_db, collection_with_code):
+    view = CardLoaderView(memory_db, collection_with_code)
+    qtbot.addWidget(view)
+    view.show()
+    qtbot.wait(50)
+    assert view._code_combo.hasFocus()
 
 
-def test_invalid_number_shows_invalid_status(qtbot, loader):
-    loader._number_input.setText("9999")
-    assert "no existe" in loader._status_label.text().lower()
-    assert loader._name_input.text() == ""
+# ----------------------------------------------------------------------
+# Validación con find_by_number (requires_code=False)
+# ----------------------------------------------------------------------
 
 
-def test_existing_card_shows_repetida_status_with_quantity(
-    qtbot, memory_db, loader, loader_collection
-):
-    InventoryService(memory_db).add_card(loader_collection.collection_id, DEFAULT_CODE, 24, 2)
-    loader._number_input.setText("24")
-    assert "Repetida" in loader._status_label.text()
-    assert "2" in loader._status_label.text()
+def test_find_by_number_when_requires_code_false(qtbot, memory_db, collection_no_code):
+    """Con número único MR-5, autocompleta país/nombre y muestra Nueva."""
+    view = CardLoaderView(memory_db, collection_no_code)
+    qtbot.addWidget(view)
+    view.show()
+    view._number_input.setText("5")
+    assert view._name_input.text() == "PAZ"
+    assert "MASTER ROOKIES" in view._country_input.text()
+    assert "Nueva" in view._status_label.text()
 
 
-def test_new_card_shows_nueva_status(qtbot, loader):
-    loader._number_input.setText("24")
-    assert "Nueva" in loader._status_label.text()
+def test_unknown_number_shows_clear_message(qtbot, memory_db, collection_no_code):
+    view = CardLoaderView(memory_db, collection_no_code)
+    qtbot.addWidget(view)
+    view.show()
+    view._number_input.setText("9999")
+    assert "9999" in view._status_label.text()
+    assert "no existe" in view._status_label.text().lower()
+    assert view._name_input.text() == ""
 
 
-def test_enter_in_number_focuses_qty(qtbot, loader):
-    loader._number_input.setText("24")
-    qtbot.keyClick(loader._number_input, Qt.Key.Key_Return)
-    assert loader._qty_input.hasFocus()
-
-
-def test_enter_in_qty_saves_card_alta(qtbot, memory_db, loader, loader_collection):
-    loader._number_input.setText("24")
-    loader._qty_input.setText("1")
-    qtbot.keyClick(loader._qty_input, Qt.Key.Key_Return)
-
-    item = InventoryRepository(memory_db).get(loader_collection.collection_id, DEFAULT_CODE, 24)
-    assert item is not None
-    assert item.quantity == 1
-
-
-def test_save_alta_increments_inventory(qtbot, memory_db, loader, loader_collection):
-    loader._number_input.setText("24")
-    loader._qty_input.setText("3")
-    qtbot.keyClick(loader._qty_input, Qt.Key.Key_Return)
-    item = InventoryRepository(memory_db).get(loader_collection.collection_id, DEFAULT_CODE, 24)
-    assert item is not None
-    assert item.quantity == 3
-
-
-def test_enter_in_qty_saves_card_baja(qtbot, memory_db, loader, loader_collection):
-    InventoryService(memory_db).add_card(loader_collection.collection_id, DEFAULT_CODE, 24, 5)
-    loader._baja_radio.setChecked(True)
-    loader._number_input.setText("24")
-    loader._qty_input.setText("2")
-    qtbot.keyClick(loader._qty_input, Qt.Key.Key_Return)
-    item = InventoryRepository(memory_db).get(loader_collection.collection_id, DEFAULT_CODE, 24)
-    assert item is not None
-    assert item.quantity == 3
-
-
-def test_save_baja_decrements_inventory(qtbot, memory_db, loader, loader_collection):
-    InventoryService(memory_db).add_card(loader_collection.collection_id, DEFAULT_CODE, 24, 2)
-    loader._baja_radio.setChecked(True)
-    loader._number_input.setText("24")
-    loader._qty_input.setText("1")
-    qtbot.keyClick(loader._qty_input, Qt.Key.Key_Return)
-    item = InventoryRepository(memory_db).get(loader_collection.collection_id, DEFAULT_CODE, 24)
-    assert item is not None
-    assert item.quantity == 1
-
-
-def test_save_baja_when_zero_shows_error(qtbot, memory_db, loader):
-    loader._baja_radio.setChecked(True)
-    loader._number_input.setText("24")
-    loader._qty_input.setText("1")
-    qtbot.keyClick(loader._qty_input, Qt.Key.Key_Return)
-    # No hay inventario → error
+def test_ambiguous_number_shows_code_selector(qtbot, memory_db, collection_no_code):
+    """Número 24 está en ARG y BRA → debe mostrar combo y pedir código."""
+    view = CardLoaderView(memory_db, collection_no_code)
+    qtbot.addWidget(view)
+    view.show()
+    view._number_input.setText("24")
+    assert view._has_ambiguity is True
+    assert view._code_combo.isVisible() is True
+    # El combo solo debe contener los códigos ambiguos (ARG y BRA, no MR)
+    values = {view._code_combo.itemData(i) for i in range(view._code_combo.count())}
+    assert values == {"ARG", "BRA"}
     assert (
-        "inventario" in loader._status_label.text().lower()
-        or "insuficiente" in loader._status_label.text().lower()
+        "especificá" in view._status_label.text().lower()
+        or "especifica" in view._status_label.text().lower()
     )
 
 
-def test_form_resets_after_save(qtbot, loader):
-    loader._number_input.setText("24")
-    loader._qty_input.setText("2")
-    qtbot.keyClick(loader._qty_input, Qt.Key.Key_Return)
-    qtbot.wait(50)
-    assert loader._number_input.text() == ""
-    assert loader._qty_input.text() == "1"
-    assert loader._country_input.text() == ""
-    assert loader._name_input.text() == ""
+def test_choosing_code_after_ambiguity_validates_correctly(qtbot, memory_db, collection_no_code):
+    view = CardLoaderView(memory_db, collection_no_code)
+    qtbot.addWidget(view)
+    view.show()
+    view._number_input.setText("24")
+    # Elegir ARG en el combo
+    idx = view._code_combo.findData("ARG")
+    view._code_combo.setCurrentIndex(idx)
+    assert view._name_input.text() == "LIONEL MESSI"
+    assert "ARGENTINA" in view._country_input.text()
+    assert "Nueva" in view._status_label.text()
 
 
-def test_focus_returns_to_first_field_after_save(qtbot, loader):
-    loader._number_input.setText("24")
-    loader._qty_input.setText("1")
-    qtbot.keyClick(loader._qty_input, Qt.Key.Key_Return)
-    qtbot.wait(50)
-    assert loader._number_input.hasFocus()
+# ----------------------------------------------------------------------
+# Save: dispatch correcto entre by_number y con código
+# ----------------------------------------------------------------------
 
 
-def test_save_with_code_prefix_uses_combo_value(qtbot, memory_db, loader, loader_collection):
-    """Marcar checkbox + elegir 'MR' + número '1' → guarda PAZ."""
-    loader._has_code_checkbox.setChecked(True)
-    # Setear el combo a "MR — Master Rookies" (index del combo)
-    idx = loader._code_combo.findData("MR")
-    loader._code_combo.setCurrentIndex(idx)
-    loader._number_input.setText("1")
-    assert loader._name_input.text() == "PAZ"
-    qtbot.keyClick(loader._number_input, Qt.Key.Key_Return)
-    qtbot.keyClick(loader._qty_input, Qt.Key.Key_Return)
+def test_save_uses_add_card_by_number_when_unambiguous(qtbot, memory_db, collection_no_code):
+    """Caso Adrenalyn: número único → save sin pedir código."""
+    view = CardLoaderView(memory_db, collection_no_code)
+    qtbot.addWidget(view)
+    view.show()
+    view._number_input.setText("5")
+    qtbot.keyClick(view._number_input, Qt.Key.Key_Return)
+    qtbot.keyClick(view._qty_input, Qt.Key.Key_Return)
 
-    item = InventoryRepository(memory_db).get(loader_collection.collection_id, "MR", 1)
+    item = InventoryRepository(memory_db).get(collection_no_code.collection_id, "MR", 5)
     assert item is not None
     assert item.quantity == 1
 
 
-def test_set_active_collection_refreshes_combo(qtbot, memory_db, loader, sample_code_header):
-    """Cambiar de colección refresca el combo y la visibilidad del checkbox."""
-    free = CollectionsRepository(memory_db).create(
-        Collection(
-            collection_id=None,
-            collection_name="OtherFree",
-            card_count=1,
-            requires_code=False,
-            code_field_name=None,
-            code_header_id=sample_code_header.code_header_id,
-        )
-    )
-    memory_db.commit()
-    loader.set_active_collection(free)
-    assert loader._has_code_checkbox.isVisible() is False
+def test_save_uses_add_card_when_user_specified_code(qtbot, memory_db, collection_no_code):
+    """Tras desambiguar, el save usa el código elegido."""
+    view = CardLoaderView(memory_db, collection_no_code)
+    qtbot.addWidget(view)
+    view.show()
+    view._number_input.setText("24")
+    # Ambigüedad: el combo aparece. Elegir BRA.
+    idx = view._code_combo.findData("BRA")
+    view._code_combo.setCurrentIndex(idx)
+    qtbot.keyClick(view._qty_input, Qt.Key.Key_Return)
+
+    item_arg = InventoryRepository(memory_db).get(collection_no_code.collection_id, "ARG", 24)
+    item_bra = InventoryRepository(memory_db).get(collection_no_code.collection_id, "BRA", 24)
+    assert item_arg is None or item_arg.quantity == 0
+    assert item_bra is not None
+    assert item_bra.quantity == 1
+
+
+def test_save_alta_increments_inventory_correctly(qtbot, memory_db, collection_no_code):
+    view = CardLoaderView(memory_db, collection_no_code)
+    qtbot.addWidget(view)
+    view.show()
+    view._number_input.setText("5")
+    view._qty_input.setText("3")
+    qtbot.keyClick(view._qty_input, Qt.Key.Key_Return)
+    item = InventoryRepository(memory_db).get(collection_no_code.collection_id, "MR", 5)
+    assert item is not None
+    assert item.quantity == 3
+
+
+def test_save_baja_decrements_inventory_correctly(qtbot, memory_db, collection_no_code):
+    InventoryService(memory_db).add_card_by_number(collection_no_code.collection_id, 5, 3)
+    view = CardLoaderView(memory_db, collection_no_code)
+    qtbot.addWidget(view)
+    view.show()
+    view._baja_radio.setChecked(True)
+    view._number_input.setText("5")
+    view._qty_input.setText("2")
+    qtbot.keyClick(view._qty_input, Qt.Key.Key_Return)
+    item = InventoryRepository(memory_db).get(collection_no_code.collection_id, "MR", 5)
+    assert item is not None
+    assert item.quantity == 1
+
+
+def test_form_resets_after_save_keeping_focus(qtbot, memory_db, collection_no_code):
+    view = CardLoaderView(memory_db, collection_no_code)
+    qtbot.addWidget(view)
+    view.show()
+    view._number_input.setText("5")
+    qtbot.keyClick(view._qty_input, Qt.Key.Key_Return)
+    qtbot.wait(50)
+    assert view._number_input.text() == ""
+    assert view._qty_input.text() == "1"
+    assert view._country_input.text() == ""
+    assert view._number_input.hasFocus()
+
+
+# ----------------------------------------------------------------------
+# Regresión: bug original (NON-24 hardcodeado)
+# ----------------------------------------------------------------------
+
+
+def test_typing_number_24_finds_messi_in_adrenalyn_like_setup(qtbot, memory_db, collection_no_code):
+    """Reproduce el bug: con requires_code=False, tipear '24' debe encontrar
+    la card sin importar el código (vía find_by_number, no NON-24)."""
+    view = CardLoaderView(memory_db, collection_no_code)
+    qtbot.addWidget(view)
+    view.show()
+    view._number_input.setText("24")
+    # No debe decir "NON-24 no existe"; o muestra info (si fuera unívoco)
+    # o pide desambiguar (este caso, es ambiguo).
+    msg = view._status_label.text().lower()
+    assert "non-24" not in msg
+    assert "no existe" not in msg or "especificá" in msg

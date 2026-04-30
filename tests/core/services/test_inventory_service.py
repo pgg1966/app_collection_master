@@ -121,6 +121,68 @@ def test_get_stats_with_data(memory_db, sample_cards, sample_collection):
     assert stats["total_duplicate_copies"] == 3
 
 
+def test_add_card_by_number_unique_match(memory_db, sample_cards, sample_collection):
+    """Cuando find_by_number retorna 1, alta_by_number agrega normalmente."""
+    from collections_app.core.models import Card
+    from collections_app.core.repositories import CardsRepository
+
+    svc = InventoryService(memory_db)
+    cid = sample_collection.collection_id
+    # Insertar una card con número único
+    CardsRepository(memory_db).upsert(Card(cid, "FRA", 99, "Único"))
+    memory_db.commit()
+    item = svc.add_card_by_number(cid, 99, quantity=3)
+    assert item.quantity == 3
+    assert item.code_id == "FRA"
+    assert item.card_number == 99
+
+
+def test_add_card_by_number_zero_matches_raises_value_error(memory_db, sample_collection):
+    svc = InventoryService(memory_db)
+    with pytest.raises(ValueError, match="no existe"):
+        svc.add_card_by_number(sample_collection.collection_id, 9999)
+
+
+def test_add_card_by_number_ambiguous_raises(memory_db, sample_cards, sample_collection):
+    """Si hay >1 card con ese número (en distintos códigos), AmbiguousCardError."""
+    from collections_app.core.services import AmbiguousCardError
+
+    svc = InventoryService(memory_db)
+    cid = sample_collection.collection_id
+    # En sample_cards, número 1 aparece en ARG, BRA, FRA → ambiguo
+    with pytest.raises(AmbiguousCardError) as exc_info:
+        svc.add_card_by_number(cid, 1)
+    assert len(exc_info.value.matches) == 3
+
+
+def test_remove_card_by_number_unique_match(memory_db, sample_cards, sample_collection):
+    from collections_app.core.models import Card
+    from collections_app.core.repositories import CardsRepository
+
+    svc = InventoryService(memory_db)
+    cid = sample_collection.collection_id
+    CardsRepository(memory_db).upsert(Card(cid, "FRA", 99, "Único"))
+    memory_db.commit()
+    svc.add_card_by_number(cid, 99, quantity=5)
+    item = svc.remove_card_by_number(cid, 99, quantity=2)
+    assert item.quantity == 3
+
+
+def test_remove_card_by_number_zero_matches_raises(memory_db, sample_collection):
+    svc = InventoryService(memory_db)
+    with pytest.raises(ValueError, match="no existe"):
+        svc.remove_card_by_number(sample_collection.collection_id, 9999)
+
+
+def test_remove_card_by_number_ambiguous_raises(memory_db, sample_cards, sample_collection):
+    from collections_app.core.services import AmbiguousCardError
+
+    svc = InventoryService(memory_db)
+    cid = sample_collection.collection_id
+    with pytest.raises(AmbiguousCardError):
+        svc.remove_card_by_number(cid, 1)
+
+
 def test_add_card_inside_transaction_does_not_partial_commit(
     memory_db, sample_cards, sample_collection
 ):

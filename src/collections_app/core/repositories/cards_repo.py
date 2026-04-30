@@ -64,6 +64,21 @@ class CardsRepository(BaseRepository):
         count: int = row["c"]
         return count
 
+    def find_by_number(self, collection_id: int, card_number: int) -> list[Card]:
+        """Busca cards en la colección por número, sin filtrar por code_id.
+
+        Útil cuando `Collection.requires_code=False` y el usuario solo
+        ingresa el número. Retorna lista para soportar el caso edge de
+        múltiples cards con el mismo número en distintos códigos.
+        """
+        rows = self.conn.execute(
+            "SELECT collection_id, code_id, card_number, card_name FROM cards "
+            "WHERE collection_id = ? AND card_number = ? "
+            "ORDER BY code_id",
+            (collection_id, card_number),
+        ).fetchall()
+        return [_row_to_card(r) for r in rows]
+
     def list_by_code(self, collection_id: int, code_id: str) -> list[Card]:
         """Retorna las cards de una colección filtradas por code_id."""
         rows = self.conn.execute(
