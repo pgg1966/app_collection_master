@@ -25,10 +25,11 @@ class FontSize:
 class StatusColor:
     """Colores semánticos sutiles para mensajes (no agresivos)."""
 
-    SUCCESS = "#3B6D11"  # verde tenue
-    INFO = "#1F4E79"  # azul tenue
-    WARNING = "#854F0B"  # ámbar tenue
-    ERROR = "#A32D2D"  # rojo tenue
+    SUCCESS = "#3B6D11"  # verde tenue (alta exitosa, "Nueva")
+    INFO = "#1F4E79"  # azul tenue (info general)
+    REPEATED = "#993C1D"  # coral tenue (card repetida en inventario)
+    WARNING = "#854F0B"  # ámbar tenue (validación, input inválido)
+    ERROR = "#A32D2D"  # rojo tenue (error de save, baja sin stock)
 
 
 # Colores estructurales (header del ABM, fondos, etc.)
