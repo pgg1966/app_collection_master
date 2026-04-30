@@ -1,9 +1,10 @@
 """Tests del TransactionsRepository."""
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from collections_app.core.models import OperationType, Transaction
 from collections_app.core.repositories import TransactionsRepository
+from collections_app.core.utils.datetime_helpers import utc_now
 
 
 def _txn(cid: int, op: OperationType = OperationType.ALTA, qty: int = 1) -> Transaction:
@@ -14,7 +15,7 @@ def _txn(cid: int, op: OperationType = OperationType.ALTA, qty: int = 1) -> Tran
         card_number=1,
         operation=op,
         quantity=qty,
-        transaction_date=datetime.now(),
+        transaction_date=utc_now(),
     )
 
 
@@ -79,9 +80,10 @@ def test_list_by_date_range(memory_db, sample_collection):
     repo = TransactionsRepository(memory_db)
     cid = sample_collection.collection_id
     repo.log(_txn(cid))
-    # Rango amplio para tolerar TZ: SQLite usa UTC, datetime.now() es local.
-    now = datetime.now()
-    txns = repo.list_by_date_range(now - timedelta(days=1), now + timedelta(days=1))
+    now = utc_now()
+    # Ahora que la DB y Python están unificados en UTC, una ventana
+    # estrecha (±1 minuto) basta.
+    txns = repo.list_by_date_range(now - timedelta(minutes=1), now + timedelta(minutes=1))
     assert len(txns) == 1
 
 
@@ -89,8 +91,8 @@ def test_list_by_date_range_excludes_outside(memory_db, sample_collection):
     repo = TransactionsRepository(memory_db)
     cid = sample_collection.collection_id
     repo.log(_txn(cid))
-    future_start = datetime.now() + timedelta(days=2)
-    future_end = datetime.now() + timedelta(days=3)
+    future_start = utc_now() + timedelta(hours=1)
+    future_end = utc_now() + timedelta(hours=2)
     assert repo.list_by_date_range(future_start, future_end) == []
 
 
@@ -98,12 +100,19 @@ def test_list_by_date_range_filtered_by_collection(memory_db, sample_collection)
     repo = TransactionsRepository(memory_db)
     cid = sample_collection.collection_id
     repo.log(_txn(cid))
-    now = datetime.now()
+    now = utc_now()
     same_collection = repo.list_by_date_range(
-        now - timedelta(days=1), now + timedelta(days=1), collection_id=cid
+        now - timedelta(minutes=1), now + timedelta(minutes=1), collection_id=cid
     )
     other_collection = repo.list_by_date_range(
-        now - timedelta(days=1), now + timedelta(days=1), collection_id=999
+        now - timedelta(minutes=1), now + timedelta(minutes=1), collection_id=999
     )
     assert len(same_collection) == 1
     assert other_collection == []
+
+
+def test_log_returns_transaction_with_utc_tzinfo(memory_db, sample_collection):
+    """Las transacciones leídas siempre vienen con tzinfo=UTC."""
+    repo = TransactionsRepository(memory_db)
+    saved = repo.log(_txn(sample_collection.collection_id))
+    assert saved.transaction_date.tzinfo is UTC

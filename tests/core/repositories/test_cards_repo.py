@@ -139,3 +139,36 @@ def test_find_by_number_returns_multiple_when_ambiguous(memory_db, sample_collec
     matches = repo.find_by_number(cid, 24)
     assert len(matches) == 2
     assert {m.code_id for m in matches} == {"ARG", "BRA"}
+
+
+def test_get_stats_by_code(memory_db, sample_cards, sample_collection):
+    """Para cada code: total de cards y cuántas tiene el usuario."""
+    from collections_app.core.models import CodeLine, InventoryItem
+    from collections_app.core.repositories import (
+        CodesLinesRepository,
+        InventoryRepository,
+    )
+
+    repo = CardsRepository(memory_db)
+    inv = InventoryRepository(memory_db)
+    lines = CodesLinesRepository(memory_db)
+    cid = sample_collection.collection_id
+    hid = sample_collection.code_header_id
+
+    lines.upsert(CodeLine(hid, "ARG", "Argentina"))
+    lines.upsert(CodeLine(hid, "BRA", "Brasil"))
+    lines.upsert(CodeLine(hid, "FRA", "Francia"))
+    # sample_cards: ARG-1, ARG-2, BRA-1, BRA-2, FRA-1.
+    # El usuario tiene ARG-1 y FRA-1.
+    inv.upsert(InventoryItem(cid, "ARG", 1, quantity=1))
+    inv.upsert(InventoryItem(cid, "FRA", 1, quantity=2))
+    memory_db.commit()
+
+    stats = repo.get_stats_by_code(cid)
+    by_code = {s["code_id"]: s for s in stats}
+    assert by_code["ARG"]["total"] == 2
+    assert by_code["ARG"]["owned"] == 1
+    assert by_code["ARG"]["percentage"] == 50.0
+    assert by_code["BRA"]["owned"] == 0
+    assert by_code["FRA"]["percentage"] == 100.0
+    assert by_code["FRA"]["code_name"] == "Francia"

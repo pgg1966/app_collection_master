@@ -5,17 +5,10 @@ from datetime import datetime
 
 from collections_app.core.models import OperationType, Transaction
 from collections_app.core.repositories.base import BaseRepository
-
-_DB_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
-
-
-def _parse_db_date(value: str) -> datetime:
-    """Parsea un timestamp de SQLite (formato `datetime('now')`)."""
-    # SQLite puede devolver con o sin microsegundos según la fuente
-    try:
-        return datetime.strptime(value, _DB_DATE_FORMAT)
-    except ValueError:
-        return datetime.fromisoformat(value)
+from collections_app.core.utils.datetime_helpers import (
+    format_for_db,
+    parse_db_datetime,
+)
 
 
 def _row_to_transaction(row: sqlite3.Row) -> Transaction:
@@ -26,7 +19,7 @@ def _row_to_transaction(row: sqlite3.Row) -> Transaction:
         card_number=row["card_number"],
         operation=OperationType(row["operation"]),
         quantity=row["quantity"],
-        transaction_date=_parse_db_date(row["transaction_date"]),
+        transaction_date=parse_db_datetime(row["transaction_date"]),
     )
 
 
@@ -83,9 +76,13 @@ class TransactionsRepository(BaseRepository):
         end: datetime,
         collection_id: int | None = None,
     ) -> list[Transaction]:
-        """Transacciones en un rango [start, end] inclusivo, opcionalmente filtradas."""
-        start_str = start.strftime(_DB_DATE_FORMAT)
-        end_str = end.strftime(_DB_DATE_FORMAT)
+        """Transacciones en un rango [start, end] inclusivo, opcionalmente filtradas.
+
+        `start` y `end` se convierten a UTC antes de comparar contra los
+        timestamps de la DB (también UTC).
+        """
+        start_str = format_for_db(start)
+        end_str = format_for_db(end)
         if collection_id is None:
             rows = self.conn.execute(
                 f"SELECT {_SELECT_COLS} FROM transactions "  # noqa: S608

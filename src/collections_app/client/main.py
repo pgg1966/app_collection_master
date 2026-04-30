@@ -9,6 +9,9 @@ from PySide6.QtWidgets import QApplication, QLabel, QTabWidget, QWidget
 
 from collections_app.client.dialogs.client_settings_dialog import ClientSettingsDialog
 from collections_app.client.views.card_loader import CardLoaderView
+from collections_app.client.views.inventory_view import InventoryView
+from collections_app.client.views.reports_view import ReportsView
+from collections_app.client.views.stats_view import StatsView
 from collections_app.core.utils.logging_setup import setup_logging
 from collections_app.core.utils.paths import get_database_path
 from collections_app.shared_ui import MainWindowBase, apply_app_style
@@ -88,11 +91,21 @@ class ClientMainWindow(MainWindowBase):
 
         tabs = QTabWidget()
         self._card_loader = CardLoaderView(self.conn, active)
+        self._inventory_view = InventoryView(self.conn, active)
+        self._stats_view = StatsView(self.conn, active)
+        self._reports_view = ReportsView(self.conn, active)
+
         tabs.addTab(self._card_loader, self.tr("Cargar Cards"))
-        tabs.addTab(self._placeholder_widget(), self.tr("Inventario"))
-        tabs.addTab(self._placeholder_widget(), self.tr("Álbum"))
-        tabs.addTab(self._placeholder_widget(), self.tr("Estadísticas"))
+        tabs.addTab(self._inventory_view, self.tr("Inventario"))
+        tabs.addTab(self._stats_view, self.tr("Estadísticas"))
+        tabs.addTab(self._reports_view, self.tr("Reportes"))
         self.setCentralWidget(tabs)
+
+        # Auto-refresh de vistas afectadas tras una alta/baja en CardLoader.
+        # Reports queda fuera: el usuario lo refresca explícitamente al
+        # cambiar filtros (período estable durante una sesión).
+        self._card_loader.card_changed.connect(self._inventory_view.refresh)
+        self._card_loader.card_changed.connect(self._stats_view.refresh)
 
     def _build_placeholder(self) -> None:
         placeholder = QLabel(

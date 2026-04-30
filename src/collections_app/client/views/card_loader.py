@@ -16,7 +16,7 @@ Comportamiento según `Collection.requires_code`:
 import logging
 import sqlite3
 
-from PySide6.QtCore import QEvent, QObject, Qt
+from PySide6.QtCore import QEvent, QObject, Qt, Signal
 from PySide6.QtGui import QIntValidator
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -46,6 +46,10 @@ logger = logging.getLogger(__name__)
 
 class CardLoaderView(QWidget):
     """Pantalla principal del cliente: alta/baja rápida de cards."""
+
+    # Emitida después de cada save exitoso. Las otras vistas (Inventario,
+    # Estadísticas) la conectan para auto-refrescarse.
+    card_changed = Signal()
 
     def __init__(
         self,
@@ -437,6 +441,7 @@ class CardLoaderView(QWidget):
             StatusColor.SUCCESS,
         )
         self._reset_form()
+        self.card_changed.emit()
 
     def _dispatch_save(
         self,

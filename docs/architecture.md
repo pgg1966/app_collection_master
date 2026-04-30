@@ -330,3 +330,47 @@ escuchar cambios de header. Al seleccionar uno, reconfigura
 `code_header_id`) y refresca.
 
 Ver flujo completo en `docs/admin_workflow.md`.
+
+## Vistas del cliente
+
+`collections-client` presenta cuatro tabs sobre `MainWindowBase`:
+
+```
++-----------------------------------------------------------+
+|  Archivo  Configuración                                    |
++-----------------------------------------------------------+
+|  [ Cargar Cards | Inventario | Estadísticas | Reportes ]   |
++-----------------------------------------------------------+
+```
+
+- **Cargar Cards** (`CardLoaderView`): pantalla de carga rápida con Enter
+  navigation. Emite `card_changed` después de cada save exitoso.
+- **Inventario** (`InventoryView`): lista todas las cards del catálogo
+  con su estado (Tengo / Repetida / Falta), filtros por estado, código y
+  búsqueda por nombre. Color de fondo por fila según estado. Status bar
+  inferior con totales.
+- **Estadísticas** (`StatsView`): barra de progreso global, barras por
+  código, top 10 repetidas y resumen de inventario.
+- **Reportes** (`ReportsView`): bitácora de transacciones con presets de
+  período (Hoy, últimos 7/30 días, este mes, mes anterior, custom),
+  filtro de operación (Alta/Baja/Todas) y export a CSV.
+
+`Inventario` y `Estadísticas` se auto-refrescan vía la señal
+`card_changed` del `CardLoaderView`. `Reportes` no se auto-refresca: el
+usuario fija un período y refresca explícitamente al cambiar filtros.
+
+### Política de timestamps
+
+Todos los `datetime` en código tienen `tzinfo=UTC`. La DB también
+guarda UTC (SQLite `datetime('now')`). La conversión a hora local sucede
+SOLO al mostrar al usuario, vía `format_for_display()` y `to_local()` en
+`core/utils/datetime_helpers.py`. Esto evita el problema clásico de
+"funciona en mi máquina pero falla en otra zona horaria".
+
+Helpers disponibles:
+- `utc_now()` — datetime actual con tzinfo=UTC.
+- `parse_db_datetime(s)` — parsea timestamp de SQLite a datetime UTC.
+- `format_for_db(dt)` — formatea datetime para SQL (siempre UTC).
+- `format_for_display(dt, with_seconds=False)` — formatea para mostrar
+  al usuario, en hora local.
+- `to_local(dt)` — convierte UTC a local (para uso en exports).

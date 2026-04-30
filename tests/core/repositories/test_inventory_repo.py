@@ -150,3 +150,28 @@ def test_inventory_item_is_owned_property():
 def test_inventory_item_has_duplicates_property():
     assert InventoryItem(1, "X", 1, quantity=1).has_duplicates is False
     assert InventoryItem(1, "X", 1, quantity=2).has_duplicates is True
+
+
+def test_get_top_duplicates(memory_db, sample_cards, sample_collection):
+    repo = InventoryRepository(memory_db)
+    cid = sample_collection.collection_id
+    repo.upsert(_item(cid, "ARG", 1, qty=5))
+    repo.upsert(_item(cid, "ARG", 2, qty=3))
+    repo.upsert(_item(cid, "BRA", 1, qty=2))
+    repo.upsert(_item(cid, "BRA", 2, qty=1))  # no es duplicada
+    top = repo.get_top_duplicates(cid)
+    assert [(t.code_id, t.card_number, t.quantity) for t in top] == [
+        ("ARG", 1, 5),
+        ("ARG", 2, 3),
+        ("BRA", 1, 2),
+    ]
+
+
+def test_get_top_duplicates_respects_limit(memory_db, sample_cards, sample_collection):
+    repo = InventoryRepository(memory_db)
+    cid = sample_collection.collection_id
+    repo.upsert(_item(cid, "ARG", 1, qty=5))
+    repo.upsert(_item(cid, "ARG", 2, qty=4))
+    repo.upsert(_item(cid, "BRA", 1, qty=3))
+    top = repo.get_top_duplicates(cid, limit=2)
+    assert len(top) == 2

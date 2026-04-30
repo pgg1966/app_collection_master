@@ -63,6 +63,21 @@ class InventoryRepository(BaseRepository):
         ).fetchall()
         return [_row_to_item(r) for r in rows]
 
+    def get_top_duplicates(
+        self,
+        collection_id: int,
+        limit: int = 10,
+    ) -> list[InventoryItem]:
+        """Las cards con mayor cantidad (quantity > 1), ordenadas desc."""
+        rows = self.conn.execute(
+            "SELECT collection_id, code_id, card_number, quantity, image_path "
+            "FROM inventory WHERE collection_id = ? AND quantity > 1 "
+            "ORDER BY quantity DESC, code_id, card_number "
+            "LIMIT ?",
+            (collection_id, limit),
+        ).fetchall()
+        return [_row_to_item(r) for r in rows]
+
     def list_duplicates(self, collection_id: int) -> list[InventoryItem]:
         """Solo los items con quantity > 1."""
         rows = self.conn.execute(

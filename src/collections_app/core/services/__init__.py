@@ -11,6 +11,10 @@ from collections_app.core.services.license_service import (
     LicenseValidator,
     LocalHashLicenseValidator,
 )
+from collections_app.core.services.reports_service import (
+    ReportsService,
+    TransactionWithCard,
+)
 from collections_app.core.services.settings_service import (
     SETTING_KEY_ACTIVE_COLLECTION,
     SettingsService,
@@ -25,5 +29,7 @@ __all__ = [
     "LicenseService",
     "LicenseValidator",
     "LocalHashLicenseValidator",
+    "ReportsService",
     "SettingsService",
+    "TransactionWithCard",
 ]

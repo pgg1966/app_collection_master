@@ -1,7 +1,6 @@
 """Servicio que coordina inventory + transactions de forma consistente."""
 
 import sqlite3
-from datetime import datetime
 
 from collections_app.core.db.connection import transaction
 from collections_app.core.models import (
@@ -15,6 +14,7 @@ from collections_app.core.repositories import (
     InventoryRepository,
     TransactionsRepository,
 )
+from collections_app.core.utils.datetime_helpers import utc_now
 
 
 class AmbiguousCardError(Exception):
@@ -65,7 +65,7 @@ class InventoryService:
                     card_number=card_number,
                     operation=OperationType.ALTA,
                     quantity=quantity,
-                    transaction_date=datetime.now(),
+                    transaction_date=utc_now(),
                 )
             )
         return updated
@@ -106,7 +106,7 @@ class InventoryService:
                     card_number=card_number,
                     operation=OperationType.BAJA,
                     quantity=quantity,
-                    transaction_date=datetime.now(),
+                    transaction_date=utc_now(),
                 )
             )
         return updated
