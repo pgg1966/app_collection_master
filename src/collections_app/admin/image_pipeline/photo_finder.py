@@ -2,18 +2,19 @@
 
 Estrategia (`find_photo`):
 1. Caché local (`data/photo_cache/{card_key}.jpg`) — si existe, se usa.
-2. DuckDuckGo image search — varias queries variadas (full name, apellido,
-   español, con `site:` hints). UA rotation + rate limiting suave entre
-   queries. Cada URL descargada se valida por tamaño mínimo Y por
-   contener una cara detectable; si no, se prueba la siguiente.
-3. Wikipedia API (`page/summary`).
-4. Placeholder local generado con PIL.
+2. Wikipedia API (`page/summary`) — fuente más estable, sin rate limit.
+3. DuckDuckGo image search — varias queries variadas (full name,
+   apellido, español, con `site:` hints). UA rotation + rate limiting
+   suave entre queries. Cada URL descargada se valida por tamaño mínimo
+   Y por contener una cara detectable; si no, se prueba la siguiente.
+4. Google Custom Search — último recurso (cuota 100/día). Solo se
+   intenta si el contador `google_calls_used` no superó `google_quota`
+   y si las env vars `GOOGLE_API_KEY`/`GOOGLE_CSE_ID` están configuradas.
+5. Placeholder local generado con PIL.
 
-`find_photo` NO usa Google — su uso está reservado para
-`run_google_fill` (modo opt-in con cuota diaria de 99 llamadas), porque
-la API tiene un límite de 100 queries gratis por día y queremos
-gastarlas solo cuando DDG y Wikipedia ya fallaron sobre placeholders.
-La búsqueda Google se expone vía `search_google_only(player, country)`.
+El contador `google_calls_used` es por instancia y empieza en 0. El
+caller (típicamente `ImagePipeline.run_google_fill`) lo resetea entre
+runs y ajusta `google_quota` según necesite.
 """
 
 import logging
@@ -47,6 +48,9 @@ HTTP_TIMEOUT = 15
 WIKI_TIMEOUT = 8
 GOOGLE_TIMEOUT = 8
 DDG_QUERY_DELAY_SEC = 0.2  # rate-limit suave entre queries
+
+# Cuota diaria default: 100 (límite de la free tier de Google Custom Search).
+DEFAULT_GOOGLE_QUOTA = 100
 
 # Env vars donde leer las credenciales de Google Custom Search.
 GOOGLE_API_KEY_ENV = "GOOGLE_API_KEY"
@@ -88,7 +92,11 @@ def _random_ua() -> str:
 class PhotoFinder:
     """Busca fotos con fallback en cascada y validación por face detection."""
 
-    def __init__(self, cache_dir: Path) -> None:
+    def __init__(
+        self,
+        cache_dir: Path,
+        google_quota: int = DEFAULT_GOOGLE_QUOTA,
+    ) -> None:
         self.cache_dir = cache_dir
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         cascade_path = (
@@ -96,6 +104,11 @@ class PhotoFinder:
             + "haarcascade_frontalface_default.xml"
         )
         self._face_cascade = cv2.CascadeClassifier(cascade_path)
+        # Contador de llamadas a Google CSE por instancia. Se incrementa
+        # cada vez que find_photo decide consultar Google. El caller
+        # puede resetearlo entre runs (`finder.google_calls_used = 0`).
+        self.google_quota = google_quota
+        self.google_calls_used = 0
 
     def find_photo(
         self,
@@ -103,7 +116,12 @@ class PhotoFinder:
         country_name: str,
         card_key: str,
     ) -> PhotoResult:
-        """Busca y devuelve la mejor foto disponible para esa card."""
+        """Busca y devuelve la mejor foto disponible para esa card.
+
+        Cascada: cache → Wikipedia → DuckDuckGo → Google CSE → placeholder.
+        Wikipedia primero porque es la fuente más estable y sin cuota.
+        Google al final porque tiene límite de 100 queries/día.
+        """
         dest = self.cache_dir / f"{card_key}.jpg"
         if dest.exists():
             return PhotoResult(
@@ -114,7 +132,15 @@ class PhotoFinder:
                 success=True,
             )
 
-        # 1) DuckDuckGo: varias queries hasta encontrar una imagen válida con cara.
+        # 1) Wikipedia: estable y sin rate limiting. Aceptamos aunque el
+        # cascade no detecte cara (los thumbs son chicos y a veces el
+        # detector falla por ángulo).
+        wiki_url = self._search_wikipedia(player_name)
+        if wiki_url and self._download_image(wiki_url, dest):
+            return PhotoResult(player_name, wiki_url, dest, SOURCE_WIKIPEDIA, True)
+        dest.unlink(missing_ok=True)
+
+        # 2) DuckDuckGo: varias queries hasta encontrar una imagen válida con cara.
         for query in self._build_queries(player_name, country_name):
             urls = self._search_duckduckgo(query)
             for url in urls[:MAX_URLS_PER_QUERY]:
@@ -124,13 +150,15 @@ class PhotoFinder:
                 # parcial para que la próxima URL no tenga side-effects.
                 dest.unlink(missing_ok=True)
 
-        # 2) Wikipedia: aceptamos aunque el cascade no detecte cara (los
-        # thumbs son chicos y a veces el detector falla por ángulo).
-        wiki_url = self._search_wikipedia(player_name)
-        if wiki_url and self._download_image(wiki_url, dest):
-            return PhotoResult(player_name, wiki_url, dest, SOURCE_WIKIPEDIA, True)
+        # 3) Google CSE como último recurso (cuota diaria de 100).
+        if self._is_google_enabled():
+            self.google_calls_used += 1
+            for url in self.search_google_only(player_name, country_name)[:MAX_URLS_PER_QUERY]:
+                if self._download_image(url, dest) and self._image_has_face(dest):
+                    return PhotoResult(player_name, url, dest, SOURCE_GOOGLE, True)
+                dest.unlink(missing_ok=True)
 
-        # 3) Placeholder local
+        # 4) Placeholder local
         placeholder_path = self._use_placeholder(card_key)
         return PhotoResult(
             player_name=player_name,
@@ -140,6 +168,17 @@ class PhotoFinder:
             success=True,
             error="Photo not found online",
         )
+
+    def _is_google_enabled(self) -> bool:
+        """¿Tiene sentido intentar Google?
+
+        True si las env vars están configuradas Y el contador de llamadas
+        no superó la cuota. Si Google no está configurado, la cascada
+        salta directo a placeholder (sin gastar una llamada falsa).
+        """
+        if self.google_calls_used >= self.google_quota:
+            return False
+        return bool(os.environ.get(GOOGLE_API_KEY_ENV)) and bool(os.environ.get(GOOGLE_CSE_ID_ENV))
 
     # ------------------------------------------------------------------
     # Queries

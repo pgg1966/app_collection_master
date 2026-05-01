@@ -1,5 +1,6 @@
 """Tests del PhotoFinder con mocks de internet."""
 
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -9,8 +10,11 @@ import responses
 from PIL import Image
 
 from collections_app.admin.image_pipeline.photo_finder import (
+    GOOGLE_API_KEY_ENV,
+    GOOGLE_CSE_ID_ENV,
     SOURCE_CACHE,
     SOURCE_DUCKDUCKGO,
+    SOURCE_GOOGLE,
     SOURCE_PLACEHOLDER,
     SOURCE_WIKIPEDIA,
     PhotoFinder,
@@ -233,21 +237,20 @@ def test_image_without_face_triggers_next_url(tmp_path):
     assert call_count["n"] >= 2
 
 
-def test_all_urls_without_face_falls_back_to_wikipedia(tmp_path):
-    """Si ninguna URL de DDG tiene cara, va a Wikipedia."""
+def test_wikipedia_used_first_when_available(tmp_path):
+    """Wiki es la fuente prioritaria: si retorna URL, no se intenta DDG."""
     finder = PhotoFinder(tmp_path)
-    no_face_url = "https://example.com/noface.jpg"
     wiki_url = "https://upload.wikimedia.org/portrait.jpg"
     with responses.RequestsMock() as rsps:
-        rsps.add(responses.GET, no_face_url, body=_fake_image_bytes(200, 200), status=200)
         rsps.add(responses.GET, wiki_url, body=_fake_image_bytes(200, 200), status=200)
+        ddg_mock = patch.object(finder, "_search_duckduckgo")
         with (
-            patch.object(finder, "_search_duckduckgo", return_value=[no_face_url]),
+            ddg_mock as ddg,
             patch.object(finder, "_search_wikipedia", return_value=wiki_url),
-            patch.object(finder, "_image_has_face", return_value=False),
         ):
             result = finder.find_photo("Player", "Country", "ABC-2")
     assert result.source == SOURCE_WIKIPEDIA
+    ddg.assert_not_called()
 
 
 def test_image_has_face_rejects_blank_image(tmp_path):
@@ -280,8 +283,128 @@ def test_finder_tries_multiple_queries(tmp_path):
         rsps.add(responses.GET, fake_url, body=_fake_image_bytes(200, 200), status=200)
         with (
             patch.object(finder, "_search_duckduckgo", side_effect=fake_ddg),
+            patch.object(finder, "_search_wikipedia", return_value=None),
             patch.object(finder, "_image_has_face", return_value=True),
         ):
             result = finder.find_photo("Lionel Messi", "Argentina", "ARG-24")
     assert result.source == SOURCE_DUCKDUCKGO
     assert len(queries_called) >= 2
+
+
+# ----------------------------------------------------------------------
+# Cascada Wiki → DDG → Google + cuota Google
+# ----------------------------------------------------------------------
+
+
+def test_cascade_order_wikipedia_before_duckduckgo(tmp_path):
+    """Wiki se intenta antes que DDG: si wiki retorna URL, no se llama DDG."""
+    finder = PhotoFinder(tmp_path)
+    wiki_url = "https://upload.wikimedia.org/portrait.jpg"
+    with responses.RequestsMock() as rsps:
+        rsps.add(responses.GET, wiki_url, body=_fake_image_bytes(200, 200), status=200)
+        with (
+            patch.object(finder, "_search_wikipedia", return_value=wiki_url),
+            patch.object(finder, "_search_duckduckgo") as ddg,
+        ):
+            result = finder.find_photo("Player", "Country", "ABC-1")
+    assert result.source == SOURCE_WIKIPEDIA
+    ddg.assert_not_called()
+
+
+def test_cascade_order_google_after_duckduckgo(tmp_path):
+    """Google se intenta solo si Wiki Y DDG fallaron."""
+    finder = PhotoFinder(tmp_path)
+    google_url = "https://google.example/img.jpg"
+    with responses.RequestsMock() as rsps:
+        rsps.add(responses.GET, google_url, body=_fake_image_bytes(200, 200), status=200)
+        with (
+            patch.dict(
+                os.environ,
+                {GOOGLE_API_KEY_ENV: "fake_key", GOOGLE_CSE_ID_ENV: "fake_cse"},
+            ),
+            patch.object(finder, "_search_wikipedia", return_value=None),
+            patch.object(finder, "_search_duckduckgo", return_value=[]),
+            patch.object(finder, "search_google_only", return_value=[google_url]),
+            patch.object(finder, "_image_has_face", return_value=True),
+        ):
+            result = finder.find_photo("Player", "Country", "ABC-2")
+    assert result.source == SOURCE_GOOGLE
+    assert finder.google_calls_used == 1
+
+
+def test_google_skipped_when_quota_exhausted(tmp_path):
+    """Si google_calls_used >= google_quota, Google no se intenta."""
+    finder = PhotoFinder(tmp_path, google_quota=0)
+    with (
+        patch.dict(
+            os.environ,
+            {GOOGLE_API_KEY_ENV: "fake_key", GOOGLE_CSE_ID_ENV: "fake_cse"},
+        ),
+        patch.object(finder, "_search_wikipedia", return_value=None),
+        patch.object(finder, "_search_duckduckgo", return_value=[]),
+        patch.object(finder, "search_google_only") as google_mock,
+    ):
+        result = finder.find_photo("Player", "Country", "ABC-3")
+    assert result.source == SOURCE_PLACEHOLDER
+    google_mock.assert_not_called()
+    assert finder.google_calls_used == 0
+
+
+def test_google_skipped_when_env_not_configured(tmp_path):
+    """Sin env vars, Google no se intenta y la cascada termina en placeholder."""
+    finder = PhotoFinder(tmp_path)
+    # Asegurar que las env vars NO están seteadas
+    env = {k: v for k, v in os.environ.items() if k not in (GOOGLE_API_KEY_ENV, GOOGLE_CSE_ID_ENV)}
+    with (
+        patch.dict(os.environ, env, clear=True),
+        patch.object(finder, "_search_wikipedia", return_value=None),
+        patch.object(finder, "_search_duckduckgo", return_value=[]),
+        patch.object(finder, "search_google_only") as google_mock,
+    ):
+        result = finder.find_photo("Player", "Country", "ABC-4")
+    assert result.source == SOURCE_PLACEHOLDER
+    google_mock.assert_not_called()
+    assert finder.google_calls_used == 0
+
+
+def test_google_counter_increments_each_call(tmp_path):
+    """Cada vez que find_photo decide consultar Google, el counter sube."""
+    finder = PhotoFinder(tmp_path, google_quota=10)
+    google_url = "https://google.example/img.jpg"
+    with responses.RequestsMock() as rsps:
+        rsps.add(responses.GET, google_url, body=_fake_image_bytes(200, 200), status=200)
+        rsps.add(responses.GET, google_url, body=_fake_image_bytes(200, 200), status=200)
+        with (
+            patch.dict(
+                os.environ,
+                {GOOGLE_API_KEY_ENV: "fake_key", GOOGLE_CSE_ID_ENV: "fake_cse"},
+            ),
+            patch.object(finder, "_search_wikipedia", return_value=None),
+            patch.object(finder, "_search_duckduckgo", return_value=[]),
+            patch.object(finder, "search_google_only", return_value=[google_url]),
+            patch.object(finder, "_image_has_face", return_value=True),
+        ):
+            finder.find_photo("Player", "Country", "ABC-A")
+            finder.find_photo("Player", "Country", "ABC-B")
+    assert finder.google_calls_used == 2
+
+
+def test_is_google_enabled_combines_env_and_quota(tmp_path):
+    """`_is_google_enabled` requiere quota disponible Y env vars seteadas."""
+    finder = PhotoFinder(tmp_path, google_quota=2)
+    # Sin env: deshabilitado aunque haya cuota
+    env_no_google = {
+        k: v for k, v in os.environ.items() if k not in (GOOGLE_API_KEY_ENV, GOOGLE_CSE_ID_ENV)
+    }
+    with patch.dict(os.environ, env_no_google, clear=True):
+        assert finder._is_google_enabled() is False
+
+    # Con env y cuota: habilitado
+    with patch.dict(
+        os.environ,
+        {GOOGLE_API_KEY_ENV: "k", GOOGLE_CSE_ID_ENV: "c"},
+    ):
+        assert finder._is_google_enabled() is True
+        # Si la cuota se agota, deshabilitado
+        finder.google_calls_used = 2
+        assert finder._is_google_enabled() is False

@@ -33,7 +33,7 @@ BOTTOM_MARGIN_RATIO = 0.40  # +40% abajo
 
 # Parámetros del Nivel 4 (Line Art)
 SKETCH_BLUR_KERNEL = 111  # impar; más grande = líneas más suaves
-SKETCH_THRESHOLD = 215    # mayor = fondo más blanco, menos grises
+SKETCH_THRESHOLD = 215  # mayor = fondo más blanco, menos grises
 SKETCH_LINE_THICKNESS = 1  # 0 = no engrosar; 1 = engrosar 1 iteración
 
 

@@ -423,48 +423,63 @@ def _seed_placeholders(setup_collection, out_dir: Path, n: int = 5) -> ImagePipe
     return pipe
 
 
-def _fake_finder_with_google(
+def _fake_finder_for_cascade(
     cache_dir: Path,
-    google_urls_per_call: list[str] | None = None,
+    sources_seq: list[str] | None = None,
 ) -> MagicMock:
-    """Finder configurado para test de run_google_fill.
+    """Finder que simula la cascada (Wiki/DDG/Google) per-card.
 
-    `search_google_only` retorna una URL ficticia. `_download_image` crea
-    un JPG válido en `dest`. `_image_has_face` retorna True. El test
-    chequea cuántas veces se llamó a `search_google_only`.
+    `sources_seq` indica qué `source` retornar por cada llamada a
+    find_photo (uno por card en el orden en que el pipeline las procesa).
+    Si una llamada simula `SOURCE_GOOGLE`, incrementa
+    `finder.google_calls_used` (respeta `google_quota` y degrada a
+    placeholder si la cuota está agotada).
     """
     finder = MagicMock()
     finder.cache_dir = cache_dir
     cache_dir.mkdir(parents=True, exist_ok=True)
-    urls = google_urls_per_call or ["https://google.example/photo.jpg"]
+    finder.google_calls_used = 0
+    finder.google_quota = 100
+    sequence = list(sources_seq or [SOURCE_GOOGLE])
+    call_idx = {"n": 0}
 
-    def fake_search(player_name: str, country_name: str) -> list[str]:
-        del player_name, country_name
-        return list(urls)
+    def fake_find_photo(player_name: str, country_name: str, card_key: str) -> PhotoResult:
+        del country_name
+        idx = call_idx["n"]
+        call_idx["n"] += 1
+        intended = sequence[idx] if idx < len(sequence) else SOURCE_PLACEHOLDER
 
-    def fake_download(url: str, dest: Path) -> bool:
-        del url
-        # Crear JPEG válido mínimo
+        # Simular cuota Google: si se intenta google y no hay quota, cae a placeholder.
+        if intended == SOURCE_GOOGLE:
+            if finder.google_calls_used >= finder.google_quota:
+                intended = SOURCE_PLACEHOLDER
+            else:
+                finder.google_calls_used += 1
+
+        dest = cache_dir / f"{card_key}.jpg"
         arr = np.full((200, 200, 3), 200, dtype=np.uint8)
-        from PIL import Image as _Img
+        cv2.imwrite(str(dest), arr)
+        return PhotoResult(
+            player_name=player_name,
+            source_url=f"https://{intended}.example/{card_key}.jpg",
+            local_path=dest,
+            source=intended,
+            success=True,
+        )
 
-        _Img.fromarray(arr).save(dest, format="JPEG")
-        return True
-
-    finder.search_google_only.side_effect = fake_search
-    finder._download_image.side_effect = fake_download
-    finder._image_has_face.return_value = True
+    finder.find_photo.side_effect = fake_find_photo
     return finder
 
 
 def test_google_limit_respected_in_run_google_fill(setup_collection, tmp_path):
-    """El daily_limit corta el procesamiento aunque haya más placeholders."""
+    """Cuando se llega al daily_limit, los siguientes intentos caen a placeholder."""
     db_path, cid = setup_collection
     out = tmp_path / "out"
     cache = tmp_path / "photo_cache"
     _seed_placeholders(setup_collection, out, n=5)
 
-    finder = _fake_finder_with_google(cache)
+    # 5 cards intentan Google. Con limit=2, solo 2 lo logran y 3 quedan placeholder.
+    finder = _fake_finder_for_cascade(cache, sources_seq=[SOURCE_GOOGLE] * 5)
     pipe = ImagePipeline(
         db_path=db_path,
         collection_id=cid,
@@ -476,20 +491,19 @@ def test_google_limit_respected_in_run_google_fill(setup_collection, tmp_path):
     result = pipe.run_google_fill(daily_limit=2)
 
     assert result.google_calls_used == 2
-    assert finder.search_google_only.call_count == 2
     assert result.google_quota_exhausted is True
-    # Y se contabilizaron como Google
     assert result.from_google == 2
+    assert result.from_placeholder == 3
 
 
 def test_google_not_called_beyond_daily_limit(setup_collection, tmp_path):
-    """Si daily_limit > placeholders, solo se llama lo necesario."""
+    """Si daily_limit cubre todas las cards, solo se llama lo necesario."""
     db_path, cid = setup_collection
     out = tmp_path / "out"
     cache = tmp_path / "photo_cache"
     _seed_placeholders(setup_collection, out, n=5)
 
-    finder = _fake_finder_with_google(cache)
+    finder = _fake_finder_for_cascade(cache, sources_seq=[SOURCE_GOOGLE] * 5)
     pipe = ImagePipeline(
         db_path=db_path,
         collection_id=cid,
@@ -500,22 +514,21 @@ def test_google_not_called_beyond_daily_limit(setup_collection, tmp_path):
     )
     result = pipe.run_google_fill(daily_limit=99)
 
-    # Solo 5 placeholders → 5 calls, sin agotar cuota
     assert result.google_calls_used == 5
-    assert finder.search_google_only.call_count == 5
     assert result.google_quota_exhausted is False
     assert result.from_google == 5
+    assert result.from_placeholder == 0
 
 
 def test_google_fill_skips_when_no_placeholders(setup_collection, tmp_path):
-    """Si no hay placeholders, run_google_fill retorna sin llamar a Google."""
+    """Si no hay placeholders, run_google_fill retorna sin llamar al finder."""
     db_path, cid = setup_collection
     out = tmp_path / "out"
     cache = tmp_path / "photo_cache"
     pipe = _make_pipeline(db_path, cid, out, photo_source=SOURCE_DUCKDUCKGO)
     pipe.run_batch()
 
-    finder = _fake_finder_with_google(cache)
+    finder = _fake_finder_for_cascade(cache)
     pipe2 = ImagePipeline(
         db_path=db_path,
         collection_id=cid,
@@ -526,17 +539,27 @@ def test_google_fill_skips_when_no_placeholders(setup_collection, tmp_path):
     )
     result = pipe2.run_google_fill()
     assert result.total == 0
-    finder.search_google_only.assert_not_called()
+    finder.find_photo.assert_not_called()
 
 
-def test_google_fill_updates_index_to_google_source(setup_collection, tmp_path):
-    """Las cards rellenadas vía Google quedan con source=google en _index.json."""
+def test_google_fill_breakdown_by_source(setup_collection, tmp_path):
+    """run_google_fill reporta cuántas cards salvó cada fuente."""
     db_path, cid = setup_collection
     out = tmp_path / "out"
     cache = tmp_path / "photo_cache"
     _seed_placeholders(setup_collection, out, n=5)
 
-    finder = _fake_finder_with_google(cache)
+    # Cascada simulada: 2 wiki, 2 ddg, 1 google
+    finder = _fake_finder_for_cascade(
+        cache,
+        sources_seq=[
+            SOURCE_WIKIPEDIA,
+            SOURCE_WIKIPEDIA,
+            SOURCE_DUCKDUCKGO,
+            SOURCE_DUCKDUCKGO,
+            SOURCE_GOOGLE,
+        ],
+    )
     pipe = ImagePipeline(
         db_path=db_path,
         collection_id=cid,
@@ -545,12 +568,108 @@ def test_google_fill_updates_index_to_google_source(setup_collection, tmp_path):
         card_composer=_fake_composer([]),
         output_dir=out,
     )
-    pipe.run_google_fill(daily_limit=99)
+    result = pipe.run_google_fill()
+
+    assert result.from_wikipedia == 2
+    assert result.from_duckduckgo == 2
+    assert result.from_google == 1
+    assert result.from_placeholder == 0
+    assert result.google_calls_used == 1
+    # Reemplazadas = wiki + ddg + google = 5
+    assert result.from_wikipedia + result.from_duckduckgo + result.from_google == 5
+
+
+def test_google_fill_leaves_unrecoverable_as_placeholder(setup_collection, tmp_path):
+    """Las cards que no pudo rescatar ninguna fuente se quedan como placeholder."""
+    db_path, cid = setup_collection
+    out = tmp_path / "out"
+    cache = tmp_path / "photo_cache"
+    _seed_placeholders(setup_collection, out, n=5)
+
+    # 3 quedan placeholder (la cascada falla), 2 se rellenan vía wiki
+    finder = _fake_finder_for_cascade(
+        cache,
+        sources_seq=[
+            SOURCE_WIKIPEDIA,
+            SOURCE_WIKIPEDIA,
+            SOURCE_PLACEHOLDER,
+            SOURCE_PLACEHOLDER,
+            SOURCE_PLACEHOLDER,
+        ],
+    )
+    pipe = ImagePipeline(
+        db_path=db_path,
+        collection_id=cid,
+        photo_finder=finder,
+        sketch_generator=_fake_sketch_generator(),
+        card_composer=_fake_composer([]),
+        output_dir=out,
+    )
+    result = pipe.run_google_fill()
+
+    assert result.from_wikipedia == 2
+    assert result.from_placeholder == 3
+    # Las 3 que siguieron como placeholder permanecen en el index
+    assert len(pipe.get_placeholder_card_keys()) == 3
+
+
+def test_google_fill_updates_index_to_actual_source(setup_collection, tmp_path):
+    """Cada card actualiza su entry del index con la fuente real que la rescató."""
+    db_path, cid = setup_collection
+    out = tmp_path / "out"
+    cache = tmp_path / "photo_cache"
+    _seed_placeholders(setup_collection, out, n=5)
+
+    finder = _fake_finder_for_cascade(
+        cache,
+        sources_seq=[
+            SOURCE_WIKIPEDIA,
+            SOURCE_DUCKDUCKGO,
+            SOURCE_GOOGLE,
+            SOURCE_GOOGLE,
+            SOURCE_PLACEHOLDER,
+        ],
+    )
+    pipe = ImagePipeline(
+        db_path=db_path,
+        collection_id=cid,
+        photo_finder=finder,
+        sketch_generator=_fake_sketch_generator(),
+        card_composer=_fake_composer([]),
+        output_dir=out,
+    )
+    pipe.run_google_fill()
 
     # Reinstanciar para forzar recarga del index desde disco
     pipe2 = _make_pipeline(db_path, cid, out, photo_source=SOURCE_PLACEHOLDER)
-    google_keys = [k for k, v in pipe2._index.items() if v.get("source") == SOURCE_GOOGLE]
-    assert len(google_keys) == 5
+    sources = sorted(v["source"] for v in pipe2._index.values())
+    assert sources == sorted(
+        [SOURCE_WIKIPEDIA, SOURCE_DUCKDUCKGO, SOURCE_GOOGLE, SOURCE_GOOGLE, SOURCE_PLACEHOLDER]
+    )
+
+
+def test_google_fill_resets_counter_at_start(setup_collection, tmp_path):
+    """Cada invocación de run_google_fill resetea el contador del finder."""
+    db_path, cid = setup_collection
+    out = tmp_path / "out"
+    cache = tmp_path / "photo_cache"
+    _seed_placeholders(setup_collection, out, n=5)
+
+    finder = _fake_finder_for_cascade(cache, sources_seq=[SOURCE_GOOGLE] * 5)
+    finder.google_calls_used = 50  # estado pre-existente
+
+    pipe = ImagePipeline(
+        db_path=db_path,
+        collection_id=cid,
+        photo_finder=finder,
+        sketch_generator=_fake_sketch_generator(),
+        card_composer=_fake_composer([]),
+        output_dir=out,
+    )
+    pipe.run_google_fill(daily_limit=10)
+    # Después del run, el counter refleja SOLO las llamadas de este run
+    assert finder.google_calls_used == 5
+    assert finder.google_quota == 10
 
 
 def test_run_resketch_skips_placeholders(setup_collection, tmp_path):

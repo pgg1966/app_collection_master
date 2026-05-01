@@ -104,6 +104,7 @@ class ImageGeneratorView(QWidget):
         super().__init__(parent)
         self.conn = conn
         self._worker: PipelineWorker | None = None
+        self._last_mode: str = "batch"  # batch | placeholders | sketches | google_fill
         self._build_ui()
         self._populate_collections_combo()
 
@@ -176,7 +177,9 @@ class ImageGeneratorView(QWidget):
         )
         self._resketch_button.clicked.connect(self._regenerate_sketches)
         self._google_fill_button = QPushButton(
-            self.tr("🔍 Rellenar con Google (max {n} hoy)").format(n=GOOGLE_DAILY_LIMIT)
+            self.tr("🔍 Rellenar placeholders (cascada + Google max {n})").format(
+                n=GOOGLE_DAILY_LIMIT
+            )
         )
         self._google_fill_button.clicked.connect(self._google_fill)
         secondary_row.addWidget(self._resketch_button)
@@ -308,7 +311,7 @@ class ImageGeneratorView(QWidget):
         self._launch_worker(force=False, regenerate_sketches_only=True)
 
     def _google_fill(self) -> None:
-        """Rellena placeholders usando Google Custom Search (max 99 hoy)."""
+        """Rellena placeholders con cascada Wiki → DDG → Google (max 100/día)."""
         cid = self._current_collection_id()
         if cid is None:
             return
@@ -317,18 +320,18 @@ class ImageGeneratorView(QWidget):
         if n == 0:
             QMessageBox.information(
                 self,
-                self.tr("Rellenar con Google"),
+                self.tr("Rellenar placeholders"),
                 self.tr("No hay cards en placeholder para rellenar."),
             )
             return
-        target = min(n, GOOGLE_DAILY_LIMIT)
         confirmed = QMessageBox.question(
             self,
-            self.tr("Rellenar con Google"),
+            self.tr("Rellenar placeholders"),
             self.tr(
-                "Se procesarán hasta {n} placeholders usando Google Custom Search. "
-                "Cada card consume 1 query de la cuota diaria. ¿Continuar?"
-            ).format(n=target),
+                "Se intentará rellenar {n} placeholders con la cascada completa "
+                "(Wikipedia → DuckDuckGo → Google). Google se usará solo cuando los "
+                "primeros fallen, hasta un máximo de {q} queries hoy."
+            ).format(n=n, q=GOOGLE_DAILY_LIMIT),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.Yes,
         )
@@ -363,17 +366,21 @@ class ImageGeneratorView(QWidget):
         self._worker.start()
         self._set_buttons_enabled(True)
         if regenerate_placeholders_only:
+            self._last_mode = "placeholders"
             self._append_log(self.tr("Inicio de regeneración de placeholders"), "info")
         elif regenerate_sketches_only:
+            self._last_mode = "sketches"
             self._append_log(self.tr("Inicio de regeneración de sketches (sin internet)"), "info")
         elif google_fill_only:
+            self._last_mode = "google_fill"
             self._append_log(
-                self.tr("Inicio de rellenado con Google (max {n} hoy)").format(
+                self.tr("Inicio de rellenado con cascada completa (Google max {n} hoy)").format(
                     n=GOOGLE_DAILY_LIMIT
                 ),
                 "info",
             )
         else:
+            self._last_mode = "batch"
             self._append_log(self.tr("Inicio de generación (force=") + str(force) + ")", "info")
 
     def _stop_worker(self) -> None:
@@ -401,33 +408,61 @@ class ImageGeneratorView(QWidget):
         self._append_log(line, level)
 
     def _on_finished(self, result: PipelineResult) -> None:
-        self._append_log(
-            self.tr(
-                "Fin: {ok} ok, {fail} errores · DDG={d} Wiki={w} Google={g} "
-                "Cache={c} Placeholder={p}"
-            ).format(
-                ok=result.succeeded,
-                fail=result.failed,
-                d=result.from_duckduckgo,
-                w=result.from_wikipedia,
-                g=result.from_google,
-                c=result.from_cache,
-                p=result.from_placeholder,
-            ),
-            "info",
-        )
-        if result.google_calls_used:
+        if self._last_mode == "google_fill":
+            replaced = result.from_wikipedia + result.from_duckduckgo + result.from_google
             self._append_log(
-                self.tr("Google: {used} queries usadas en esta sesión").format(
-                    used=result.google_calls_used
+                self.tr(
+                    "Reemplazadas: {r} (de las cuales: {w} wikipedia, {d} duckduckgo, "
+                    "{g} google)"
+                ).format(
+                    r=replaced,
+                    w=result.from_wikipedia,
+                    d=result.from_duckduckgo,
+                    g=result.from_google,
                 ),
                 "info",
             )
-        if result.google_quota_exhausted:
             self._append_log(
-                self.tr("⚠ Cuota diaria de Google alcanzada — quedan placeholders sin rellenar"),
-                "warn",
+                self.tr("Siguen como placeholder: {n}").format(n=result.from_placeholder),
+                "warn" if result.from_placeholder else "info",
             )
+            self._append_log(
+                self.tr("Cuota Google usada: {used}/{quota}").format(
+                    used=result.google_calls_used, quota=GOOGLE_DAILY_LIMIT
+                ),
+                "info",
+            )
+            if result.google_quota_exhausted:
+                self._append_log(
+                    self.tr(
+                        "⚠ Cuota diaria de Google alcanzada — reintentar mañana "
+                        "para rellenar los restantes"
+                    ),
+                    "warn",
+                )
+        else:
+            self._append_log(
+                self.tr(
+                    "Fin: {ok} ok, {fail} errores · Wiki={w} DDG={d} Google={g} "
+                    "Cache={c} Placeholder={p}"
+                ).format(
+                    ok=result.succeeded,
+                    fail=result.failed,
+                    w=result.from_wikipedia,
+                    d=result.from_duckduckgo,
+                    g=result.from_google,
+                    c=result.from_cache,
+                    p=result.from_placeholder,
+                ),
+                "info",
+            )
+            if result.google_calls_used:
+                self._append_log(
+                    self.tr("Google: {used} queries usadas en esta sesión").format(
+                        used=result.google_calls_used
+                    ),
+                    "info",
+                )
         self._worker = None
         self._on_collection_changed(self._collection_combo.currentIndex())
 
