@@ -49,13 +49,16 @@ def test_uses_cache_if_exists(tmp_path):
 
 
 def test_duckduckgo_primary_source(tmp_path):
-    """Si DDG devuelve URLs y la descarga es OK, usa esa fuente."""
+    """Si DDG devuelve URLs, la descarga es OK y la imagen tiene cara, usa esa fuente."""
     finder = PhotoFinder(tmp_path)
     fake_url = "https://example.com/messi.jpg"
     img_bytes = _fake_image_bytes()
     with responses.RequestsMock() as rsps:
         rsps.add(responses.GET, fake_url, body=img_bytes, status=200)
-        with patch.object(finder, "_search_duckduckgo", return_value=[fake_url]):
+        with (
+            patch.object(finder, "_search_duckduckgo", return_value=[fake_url]),
+            patch.object(finder, "_image_has_face", return_value=True),
+        ):
             result = finder.find_photo("Lionel Messi", "Argentina", "ARG-24")
     assert result.source == SOURCE_DUCKDUCKGO
     assert result.success is True
@@ -96,7 +99,10 @@ def test_download_validates_minimum_image_size(tmp_path):
     with responses.RequestsMock() as rsps:
         rsps.add(responses.GET, tiny_url, body=_fake_image_bytes(50, 50), status=200)
         rsps.add(responses.GET, big_url, body=_fake_image_bytes(200, 200), status=200)
-        with patch.object(finder, "_search_duckduckgo", return_value=[tiny_url, big_url]):
+        with (
+            patch.object(finder, "_search_duckduckgo", return_value=[tiny_url, big_url]),
+            patch.object(finder, "_image_has_face", return_value=True),
+        ):
             result = finder.find_photo("Player", "Country", "ABC-1")
     assert result.source == SOURCE_DUCKDUCKGO
     # La elegida fue la grande, no la chica
@@ -170,3 +176,112 @@ def test_placeholder_generation_creates_valid_image(tmp_path):
     img = cv2.imread(str(result.local_path))
     assert img is not None
     assert img.shape[0] > 0 and img.shape[1] > 0
+
+
+# ----------------------------------------------------------------------
+# Mejoras: queries múltiples y validación por face detection
+# ----------------------------------------------------------------------
+
+
+def test_build_queries_includes_lastname_and_spanish(tmp_path):
+    """Las queries incluyen variantes con apellido solo y español."""
+    finder = PhotoFinder(tmp_path)
+    queries = finder._build_queries("Lionel Messi", "Argentina")
+    joined = " | ".join(queries)
+    # Apellido solo
+    assert any(q.startswith("Messi ") or " Messi" in q for q in queries)
+    # Variante en español
+    assert "futbolista" in joined
+    # Site hints
+    assert "site:transfermarkt.com" in joined
+
+
+def test_build_queries_with_single_word_name(tmp_path):
+    finder = PhotoFinder(tmp_path)
+    queries = finder._build_queries("Pele", "Brazil")
+    # No debería romper con un solo nombre
+    assert all(isinstance(q, str) and q for q in queries)
+
+
+def test_image_without_face_triggers_next_url(tmp_path):
+    """Si la primera URL devuelve imagen sin cara, prueba la siguiente."""
+    finder = PhotoFinder(tmp_path)
+    no_face_url = "https://example.com/noface.jpg"
+    with_face_url = "https://example.com/face.jpg"
+
+    call_count = {"n": 0}
+
+    def fake_has_face(_path):
+        call_count["n"] += 1
+        # Primera vez False (rechazar), segunda True (aceptar)
+        return call_count["n"] >= 2
+
+    with responses.RequestsMock() as rsps:
+        rsps.add(responses.GET, no_face_url, body=_fake_image_bytes(200, 200), status=200)
+        rsps.add(responses.GET, with_face_url, body=_fake_image_bytes(200, 200), status=200)
+        with (
+            patch.object(
+                finder,
+                "_search_duckduckgo",
+                return_value=[no_face_url, with_face_url],
+            ),
+            patch.object(finder, "_image_has_face", side_effect=fake_has_face),
+        ):
+            result = finder.find_photo("Player", "Country", "ABC-1")
+    assert result.source == SOURCE_DUCKDUCKGO
+    # Probó al menos 2 imágenes (la primera rechazada por face)
+    assert call_count["n"] >= 2
+
+
+def test_all_urls_without_face_falls_back_to_wikipedia(tmp_path):
+    """Si ninguna URL de DDG tiene cara, va a Wikipedia."""
+    finder = PhotoFinder(tmp_path)
+    no_face_url = "https://example.com/noface.jpg"
+    wiki_url = "https://upload.wikimedia.org/portrait.jpg"
+    with responses.RequestsMock() as rsps:
+        rsps.add(responses.GET, no_face_url, body=_fake_image_bytes(200, 200), status=200)
+        rsps.add(responses.GET, wiki_url, body=_fake_image_bytes(200, 200), status=200)
+        with (
+            patch.object(finder, "_search_duckduckgo", return_value=[no_face_url]),
+            patch.object(finder, "_search_wikipedia", return_value=wiki_url),
+            patch.object(finder, "_image_has_face", return_value=False),
+        ):
+            result = finder.find_photo("Player", "Country", "ABC-2")
+    assert result.source == SOURCE_WIKIPEDIA
+
+
+def test_image_has_face_rejects_blank_image(tmp_path):
+    """Una imagen plana (sin caras reales) retorna False en _image_has_face."""
+    finder = PhotoFinder(tmp_path)
+    blank = tmp_path / "blank.jpg"
+    arr = np.full((300, 300, 3), 200, dtype=np.uint8)
+    cv2.imwrite(str(blank), arr)
+    assert finder._image_has_face(blank) is False
+
+
+def test_image_has_face_returns_false_when_path_invalid(tmp_path):
+    finder = PhotoFinder(tmp_path)
+    assert finder._image_has_face(tmp_path / "missing.jpg") is False
+
+
+def test_finder_tries_multiple_queries(tmp_path):
+    """Si la primera query no devuelve URLs, prueba la siguiente."""
+    finder = PhotoFinder(tmp_path)
+    fake_url = "https://example.com/found.jpg"
+
+    queries_called: list[str] = []
+
+    def fake_ddg(query: str) -> list[str]:
+        queries_called.append(query)
+        # Primera query vacía, segunda devuelve URL
+        return [fake_url] if len(queries_called) >= 2 else []
+
+    with responses.RequestsMock() as rsps:
+        rsps.add(responses.GET, fake_url, body=_fake_image_bytes(200, 200), status=200)
+        with (
+            patch.object(finder, "_search_duckduckgo", side_effect=fake_ddg),
+            patch.object(finder, "_image_has_face", return_value=True),
+        ):
+            result = finder.find_photo("Lionel Messi", "Argentina", "ARG-24")
+    assert result.source == SOURCE_DUCKDUCKGO
+    assert len(queries_called) >= 2

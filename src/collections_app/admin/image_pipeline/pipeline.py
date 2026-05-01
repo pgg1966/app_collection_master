@@ -12,6 +12,7 @@ una conexión propia dentro de `run_batch()` (ya en el worker thread). La
 cierra al finalizar el run.
 """
 
+import json
 import logging
 import sqlite3
 from collections.abc import Callable
@@ -45,6 +46,7 @@ from collections_app.core.utils.paths import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_BATCH_SIZE = 100
+INDEX_FILE_NAME = "_index.json"
 
 ProgressCallback = Callable[[int, int, str], None]
 LogCallback = Callable[[str, str, str], None]  # card_key, source, status
@@ -102,6 +104,10 @@ class ImagePipeline:
         self._output_dir = output_dir or get_generated_cards_dir(collection_id)
         self._output_dir.mkdir(parents=True, exist_ok=True)
         self._stop_event = Event()
+        # `_index.json` mapea card_key → {"source": ..., "url": ...}.
+        # Persistido en el output_dir para sobrevivir entre runs.
+        self._index_path = self._output_dir / INDEX_FILE_NAME
+        self._index: dict[str, dict[str, str]] = self._load_index()
 
     # ------------------------------------------------------------------
     # API pública
@@ -150,7 +156,10 @@ class ImagePipeline:
                     if on_progress is not None:
                         label = f"{card['card_key']} {card['card_name']}"
                         on_progress(i, result.total, label)
+                # Persistir el index al cerrar cada batch para sobrevivir a stops
+                self._save_index()
         finally:
+            self._save_index()
             conn.close()
 
         return result
@@ -166,9 +175,54 @@ class ImagePipeline:
     def get_existing_count(self) -> int:
         """Cuántas imágenes ya están generadas para esta colección.
 
-        No requiere DB; lee el filesystem.
+        No requiere DB; lee el filesystem (solo cuenta `*.png`).
         """
         return sum(1 for p in self._output_dir.glob("*.png"))
+
+    def get_placeholder_card_keys(self) -> list[str]:
+        """Card keys cuya imagen actual fue generada vía placeholder.
+
+        Útil para `regenerate_placeholders()`. Si el index no existe aún
+        (corrida vieja sin _index.json), devuelve lista vacía.
+        """
+        return sorted(
+            key for key, info in self._index.items() if info.get("source") == SOURCE_PLACEHOLDER
+        )
+
+    def regenerate_placeholders(
+        self,
+        on_progress: ProgressCallback | None = None,
+        on_log: LogCallback | None = None,
+    ) -> PipelineResult:
+        """Borra los PNGs de cards que cayeron a placeholder y los reprocesa.
+
+        El reprocesamiento usa la lógica normal del pipeline (incluyendo
+        las queries mejoradas y la validación por face detection), por lo
+        que un jugador que la primera vez fue placeholder puede ahora
+        encontrar foto real.
+
+        También limpia las fotos crudas del caché de esos cards (si no,
+        el pipeline volvería a leer la imagen vieja desde caché).
+        """
+        keys = self.get_placeholder_card_keys()
+        if not keys:
+            return PipelineResult(output_dir=self._output_dir)
+
+        # Borrar PNGs y fotos crudas para forzar re-búsqueda
+        for key in keys:
+            png = self.get_output_path(key)
+            png.unlink(missing_ok=True)
+            cached_photo = self._photo_finder.cache_dir / f"{key}.jpg"
+            cached_photo.unlink(missing_ok=True)
+            self._index.pop(key, None)
+        self._save_index()
+
+        return self.run_batch(
+            card_keys=keys,
+            on_progress=on_progress,
+            on_log=on_log,
+            force=True,
+        )
 
     # ------------------------------------------------------------------
     # Internals
@@ -179,6 +233,27 @@ class ImagePipeline:
         conn = create_connection(self._db_path)
         run_migrations(conn)
         return conn
+
+    def _load_index(self) -> dict[str, dict[str, str]]:
+        """Carga el `_index.json` del output_dir o retorna dict vacío."""
+        if not self._index_path.exists():
+            return {}
+        try:
+            with self._index_path.open(encoding="utf-8") as fh:
+                data = json.load(fh)
+            if isinstance(data, dict):
+                return data
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("No se pudo leer %s: %s", self._index_path, exc)
+        return {}
+
+    def _save_index(self) -> None:
+        """Guarda el `_index.json` con las entradas actuales."""
+        try:
+            with self._index_path.open("w", encoding="utf-8") as fh:
+                json.dump(self._index, fh, indent=2, ensure_ascii=False)
+        except OSError as exc:
+            logger.warning("No se pudo escribir %s: %s", self._index_path, exc)
 
     def _load_target_cards(
         self,
@@ -249,6 +324,10 @@ class ImagePipeline:
             self._composer.save(image, out_path)
             self._count_source(photo.source, result)
             result.succeeded += 1
+            self._index[card_key] = {
+                "source": photo.source,
+                "url": photo.source_url,
+            }
             if on_log is not None:
                 on_log(card_key, photo.source, "ok")
         except Exception as exc:  # noqa: BLE001

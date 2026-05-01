@@ -1,9 +1,16 @@
 """Búsqueda y descarga de fotos de jugadores con fallback en cascada.
 
-Estrategia: DuckDuckGo image search → Wikipedia API → placeholder local.
+Estrategia:
+1. Caché local (`data/photo_cache/{card_key}.jpg`) — si existe, se usa.
+2. DuckDuckGo image search — varias queries variadas (full name, apellido,
+   español, con `site:` hints). Cada URL descargada se valida por tamaño
+   mínimo Y por contener una cara detectable; si no, se prueba la siguiente.
+3. Wikipedia API (`page/summary`).
+4. Placeholder local generado con PIL.
 
-Las fotos se cachean en `data/photo_cache/{card_key}.jpg` (path absoluto
-configurable). Antes de bajar nada se verifica el caché.
+La validación por cara usa el mismo Haar Cascade que `SketchGenerator`,
+para que las imágenes que pasan el filtro acá también funcionen bien
+en la etapa de sketch.
 """
 
 import logging
@@ -19,14 +26,23 @@ logger = logging.getLogger(__name__)
 
 USER_AGENT = "CollectionsApp/1.0"
 MIN_IMAGE_DIM = 100
-MAX_DDG_ATTEMPTS = 3
-HTTP_TIMEOUT = 10
+MAX_URLS_PER_QUERY = 3
+HTTP_TIMEOUT = 15  # antes 10, ahora más generoso para fotos grandes
 WIKI_TIMEOUT = 8
 
 SOURCE_CACHE = "cache"
 SOURCE_DUCKDUCKGO = "duckduckgo"
 SOURCE_WIKIPEDIA = "wikipedia"
 SOURCE_PLACEHOLDER = "placeholder"
+
+# Sitios con buenas fotos de futbolistas; incluidos como `site:` hint en una query.
+PREFERRED_SITES = [
+    "transfermarkt.com",
+    "wikipedia.org",
+    "soccerway.com",
+    "goal.com",
+    "sofascore.com",
+]
 
 
 @dataclass(frozen=True)
@@ -36,22 +52,22 @@ class PhotoResult:
     player_name: str
     source_url: str
     local_path: Path
-    source: str  # SOURCE_* constants
+    source: str
     success: bool
     error: str | None = None
 
 
 class PhotoFinder:
-    """Busca fotos de jugadores con fallback en cascada.
-
-    Las llamadas a DDG y Wikipedia se hacen lazy (solo si no hay caché)
-    y son tolerantes a fallos: cualquier excepción se traga y dispara
-    el siguiente fallback.
-    """
+    """Busca fotos con fallback en cascada y validación por face detection."""
 
     def __init__(self, cache_dir: Path) -> None:
         self.cache_dir = cache_dir
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        cascade_path = (
+            cv2.data.haarcascades  # type: ignore[attr-defined]
+            + "haarcascade_frontalface_default.xml"
+        )
+        self._face_cascade = cv2.CascadeClassifier(cascade_path)
 
     def find_photo(
         self,
@@ -59,11 +75,7 @@ class PhotoFinder:
         country_name: str,
         card_key: str,
     ) -> PhotoResult:
-        """Busca y devuelve un PhotoResult, descargando si hace falta.
-
-        El `card_key` (ej. "ARG-24") se usa como nombre de archivo en el
-        caché. Si ya existe, no se vuelve a descargar.
-        """
+        """Busca y devuelve la mejor foto disponible para esa card."""
         dest = self.cache_dir / f"{card_key}.jpg"
         if dest.exists():
             return PhotoResult(
@@ -74,13 +86,18 @@ class PhotoFinder:
                 success=True,
             )
 
-        # 1) DuckDuckGo
-        query = f"{player_name} {country_name} footballer face portrait"
-        for url in self._search_duckduckgo(query)[:MAX_DDG_ATTEMPTS]:
-            if self._download_image(url, dest):
-                return PhotoResult(player_name, url, dest, SOURCE_DUCKDUCKGO, True)
+        # 1) DuckDuckGo: varias queries hasta encontrar una imagen válida con cara.
+        for query in self._build_queries(player_name, country_name):
+            urls = self._search_duckduckgo(query)
+            for url in urls[:MAX_URLS_PER_QUERY]:
+                if self._download_image(url, dest) and self._image_has_face(dest):
+                    return PhotoResult(player_name, url, dest, SOURCE_DUCKDUCKGO, True)
+                # Si descargó pero no pasó la validación, limpiar el archivo
+                # parcial para que la próxima URL no tenga side-effects.
+                dest.unlink(missing_ok=True)
 
-        # 2) Wikipedia
+        # 2) Wikipedia: aceptamos aunque el cascade no detecte cara (los
+        # thumbs son chicos y a veces el detector falla por ángulo).
         wiki_url = self._search_wikipedia(player_name)
         if wiki_url and self._download_image(wiki_url, dest):
             return PhotoResult(player_name, wiki_url, dest, SOURCE_WIKIPEDIA, True)
@@ -97,11 +114,37 @@ class PhotoFinder:
         )
 
     # ------------------------------------------------------------------
-    # Backends de búsqueda (extension points para tests)
+    # Queries
+    # ------------------------------------------------------------------
+
+    def _build_queries(self, player_name: str, country_name: str) -> list[str]:
+        """Construye múltiples queries para maximizar el match.
+
+        Las primeras son las más específicas. Las últimas son rescatistas
+        (apellido solo, español, sites preferidos).
+        """
+        name = player_name.title().strip()
+        country = country_name.title().strip()
+        parts = name.split()
+        last_name = parts[-1] if len(parts) > 1 else name
+
+        queries = [
+            f"{name} {country} footballer face",
+            f"{name} footballer portrait",
+            f"{last_name} {country} football player",
+            f"{last_name} footballer",
+            f"{name} futbolista",  # español
+            f"{last_name} soccer player portrait",
+        ]
+        sites = " OR ".join(f"site:{s}" for s in PREFERRED_SITES)
+        queries.append(f"{name} {country} footballer ({sites})")
+        return queries
+
+    # ------------------------------------------------------------------
+    # Backends de búsqueda
     # ------------------------------------------------------------------
 
     def _search_duckduckgo(self, query: str) -> list[str]:
-        """Retorna lista de URLs de imágenes encontradas (puede estar vacía)."""
         try:
             from duckduckgo_search import DDGS  # noqa: PLC0415
 
@@ -109,11 +152,10 @@ class PhotoFinder:
                 results = list(ddgs.images(query, max_results=5, type_image="photo"))
             return [r["image"] for r in results if r.get("image")]
         except Exception as exc:  # noqa: BLE001
-            logger.debug("DuckDuckGo search failed: %s", exc)
+            logger.debug("DuckDuckGo search failed for %r: %s", query, exc)
             return []
 
     def _search_wikipedia(self, player_name: str) -> str | None:
-        """Retorna URL de la imagen de Wikipedia o None."""
         try:
             name_encoded = player_name.title().replace(" ", "_")
             url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{name_encoded}"
@@ -128,8 +170,12 @@ class PhotoFinder:
             logger.debug("Wikipedia lookup failed for %s: %s", player_name, exc)
         return None
 
+    # ------------------------------------------------------------------
+    # Descarga y validación
+    # ------------------------------------------------------------------
+
     def _download_image(self, url: str, dest: Path) -> bool:
-        """Descarga una imagen a `dest`. Valida que sea decodificable y >= 50px."""
+        """Descarga `url` a `dest` y valida tamaño mínimo (≥100x100)."""
         try:
             r = requests.get(
                 url,
@@ -151,8 +197,22 @@ class PhotoFinder:
             dest.unlink(missing_ok=True)
         return False
 
+    def _image_has_face(self, img_path: Path) -> bool:
+        """Verifica que la imagen contenga al menos una cara detectable."""
+        img = cv2.imread(str(img_path))
+        if img is None:
+            return False
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        faces = self._face_cascade.detectMultiScale(
+            gray, scaleFactor=1.1, minNeighbors=4, minSize=(30, 30)
+        )
+        return len(faces) > 0
+
+    # ------------------------------------------------------------------
+    # Placeholder
+    # ------------------------------------------------------------------
+
     def _use_placeholder(self, card_key: str) -> Path:
-        """Copia (o genera) el placeholder oficial al caché para `card_key`."""
         dest = self.cache_dir / f"{card_key}.jpg"
         official = (
             Path(__file__).resolve().parent.parent.parent.parent
@@ -167,10 +227,8 @@ class PhotoFinder:
         return dest
 
     def _generate_placeholder(self, dest: Path) -> None:
-        """Genera un placeholder B&W mínimo (copa simplificada + signo de pregunta)."""
         img = Image.new("L", (280, 320), 240)
         draw = ImageDraw.Draw(img)
-        # Copa simplificada
         draw.polygon([(140, 60), (80, 200), (200, 200)], fill=180, outline=100)
         draw.rectangle([110, 200, 170, 230], fill=180, outline=100)
         draw.rectangle([90, 225, 190, 240], fill=180, outline=100)

@@ -1,12 +1,13 @@
 """Conversión de fotos a sketch B&W usando OpenCV.
 
-Pipeline (Nivel 3):
-  cargar → detectar cara → recortar con margen → edge-preserve + pencil
-  dodge & burn + bordes Canny reforzados → suavizar artefactos.
+Pipeline (Nivel 3 mejorado):
+  cargar → detectar cara → recortar con margen amplio → limpiar fondo
+  (blur fuera de la cara) → edge-preserving + pencil dodge & burn +
+  bordes Canny reforzados → CLAHE → suavizar → resize.
 
-La detección usa Haar Cascade frontalface por simplicidad y porque viene
-empacado con `opencv-python`. Si no detecta cara, se usa la imagen
-completa.
+La detección usa Haar Cascade frontalface (viene con `opencv-python`).
+Si no detecta cara, se usa la imagen completa y se aplica un blur
+suavizado en los bordes igualmente.
 """
 
 import logging
@@ -17,41 +18,39 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# Tamaño objetivo para el slot de la card. Definido acá para evitar circular
-# imports con CardComposer.
+# Tamaño objetivo para el slot de la card
 DEFAULT_TARGET_W = 260
 DEFAULT_TARGET_H = 310
 
-# Márgenes adicionales sobre la cara detectada (porcentaje del bounding box)
-TOP_MARGIN_RATIO = 0.40  # +40% arriba (cabello)
-SIDE_MARGIN_RATIO = 0.20  # +20% a cada lado
-BOTTOM_MARGIN_RATIO = 0.10  # +10% abajo (mentón)
+# Márgenes generosos sobre la cara detectada para que el sketch parezca
+# una "figurita" (incluye cabello, hombros, cuello).
+TOP_MARGIN_RATIO = 0.60  # +60% arriba
+SIDE_MARGIN_RATIO = 0.30  # +30% a cada lado
+BOTTOM_MARGIN_RATIO = 0.40  # +40% abajo
 
 
 class SketchGenerator:
-    """Convierte fotos a sketch artístico B&W usando OpenCV (Nivel 3)."""
+    """Convierte fotos a sketch artístico B&W con limpieza de fondo."""
 
     def __init__(self) -> None:
-        # cv2.data está disponible en runtime pero no expuesto al type checker
-        cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"  # type: ignore[attr-defined]
+        cascade_path = (
+            cv2.data.haarcascades  # type: ignore[attr-defined]
+            + "haarcascade_frontalface_default.xml"
+        )
         self._face_cascade = cv2.CascadeClassifier(cascade_path)
         if self._face_cascade.empty():
             logger.warning("Haar cascade vacío en %s", cascade_path)
 
     def generate_sketch(self, image_path: Path) -> np.ndarray:
-        """Pipeline end-to-end: carga → detecta cara → recorta → sketch.
-
-        Returns:
-            Imagen numpy 2D en grayscale (uint8). Si la imagen no se puede
-            cargar, retorna un array gris uniforme del tamaño objetivo.
-        """
+        """Pipeline end-to-end."""
         img = cv2.imread(str(image_path))
         if img is None:
             logger.warning("No se pudo cargar imagen: %s", image_path)
             return np.full((DEFAULT_TARGET_H, DEFAULT_TARGET_W), 220, dtype=np.uint8)
 
         cropped = self._detect_and_crop_face(img)
-        sketch = self._apply_sketch_level3(cropped)
+        cleaned = self._clean_background(cropped)
+        sketch = self._apply_sketch_level3(cleaned)
         return self._resize_for_card(sketch)
 
     # ------------------------------------------------------------------
@@ -59,11 +58,7 @@ class SketchGenerator:
     # ------------------------------------------------------------------
 
     def _detect_and_crop_face(self, img: np.ndarray) -> np.ndarray:
-        """Detecta la cara más grande y recorta con márgenes generosos.
-
-        Si no detecta cara, retorna la imagen tal cual (el resize final la
-        ajusta al slot de la card).
-        """
+        """Detecta la cara más grande y recorta con márgenes generosos."""
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         faces = self._face_cascade.detectMultiScale(
             gray, scaleFactor=1.1, minNeighbors=5, minSize=(40, 40)
@@ -71,7 +66,6 @@ class SketchGenerator:
         if len(faces) == 0:
             return img
 
-        # Elegir la cara con mayor área (suele ser la del foreground)
         x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
         h_img, w_img = img.shape[:2]
         x0 = max(0, int(x - SIDE_MARGIN_RATIO * w))
@@ -81,32 +75,84 @@ class SketchGenerator:
         return img[y0:y1, x0:x1]
 
     # ------------------------------------------------------------------
-    # Sketch nivel 3
+    # Background cleanup
+    # ------------------------------------------------------------------
+
+    def _clean_background(self, img: np.ndarray) -> np.ndarray:
+        """Suaviza el fondo para que no genere ruido en el sketch.
+
+        Si detecta cara: blur fuerte fuera de una elipse alrededor de la
+        cara, blend suave en los bordes.
+        Si no detecta cara: blur en los bordes asumiendo que el sujeto
+        está al centro.
+        """
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        faces = self._face_cascade.detectMultiScale(
+            gray, scaleFactor=1.1, minNeighbors=4, minSize=(50, 50)
+        )
+        h_img, w_img = img.shape[:2]
+
+        if len(faces) == 0:
+            mask = np.zeros((h_img, w_img), dtype=np.uint8)
+            cv2.ellipse(
+                mask,
+                (w_img // 2, h_img // 2),
+                (max(1, w_img // 3), max(1, h_img // 2)),
+                0,
+                0,
+                360,
+                255,
+                -1,
+            )
+        else:
+            x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
+            margin_x = int(w * 0.4)
+            margin_y_top = int(h * 0.7)
+            margin_y_bot = int(h * 0.5)
+            x1 = max(0, x - margin_x)
+            y1 = max(0, y - margin_y_top)
+            x2 = min(w_img, x + w + margin_x)
+            y2 = min(h_img, y + h + margin_y_bot)
+            mask = np.zeros((h_img, w_img), dtype=np.uint8)
+            cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+            axes = (max(1, (x2 - x1) // 2), max(1, (y2 - y1) // 2))
+            cv2.ellipse(mask, (cx, cy), axes, 0, 0, 360, 255, -1)
+
+        # Difumina los bordes de la máscara para un blend suave
+        mask_blurred = cv2.GaussianBlur(mask, (61, 61), 0)
+        mask_3ch = cv2.merge([mask_blurred, mask_blurred, mask_blurred]).astype(np.float32) / 255.0
+
+        blurred = cv2.GaussianBlur(img, (51, 51), 0)
+        out: np.ndarray = (img * mask_3ch + blurred * (1 - mask_3ch)).astype(np.uint8)
+        return out
+
+    # ------------------------------------------------------------------
+    # Sketch nivel 3 mejorado
     # ------------------------------------------------------------------
 
     def _apply_sketch_level3(self, img: np.ndarray) -> np.ndarray:
-        """Edge-preserving + pencil dodge & burn + bordes Canny reforzados."""
-        # 1. Edge-preserving filter sobre la imagen color (suaviza zonas planas
-        #    sin perder bordes).
+        """Edge-preserving + pencil dodge & burn + Canny + CLAHE."""
         smoothed_color = cv2.edgePreservingFilter(img, sigma_s=60, sigma_r=0.4)
         gray = cv2.cvtColor(smoothed_color, cv2.COLOR_BGR2GRAY)
 
-        # 2. Pencil dodge & burn
+        # Pencil dodge & burn con blur más fuerte (líneas más suaves)
         inv = cv2.bitwise_not(gray)
-        blur = cv2.GaussianBlur(inv, (21, 21), 0)
-        # divide produce el efecto típico de pencil sketch
+        blur = cv2.GaussianBlur(inv, (25, 25), 0)
         sketch = cv2.divide(gray, cv2.bitwise_not(blur), scale=256.0)
 
-        # 3. Detección de bordes y refuerzo
-        edges = cv2.Canny(gray, 30, 100)
-        edges = cv2.dilate(edges, np.ones((2, 2), np.uint8), iterations=1)
+        # Canny con umbrales más altos: solo bordes importantes (menos ruido)
+        edges = cv2.Canny(gray, 50, 150)
+        edges_dilated = cv2.dilate(edges, np.ones((2, 2), np.uint8), iterations=1)
 
-        # 4. Oscurecer donde hay borde (sin underflow)
-        darkened = sketch.astype(np.int16)
-        darkened[edges > 0] -= 60
+        # Oscurecer bordes más sutilmente (40 en vez de 60)
+        darkened = sketch.astype(np.int32)
+        darkened[edges_dilated > 0] -= 40
         sketch = np.clip(darkened, 0, 255).astype(np.uint8)
 
-        # 5. Suavizar artefactos
+        # CLAHE: contraste local sin amplificar ruido
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        sketch = clahe.apply(sketch)
+
         return cv2.GaussianBlur(sketch, (3, 3), 0)
 
     # ------------------------------------------------------------------
@@ -119,7 +165,7 @@ class SketchGenerator:
         target_w: int = DEFAULT_TARGET_W,
         target_h: int = DEFAULT_TARGET_H,
     ) -> np.ndarray:
-        """Escala manteniendo aspect ratio y rellena con blanco (fondo card)."""
+        """Escala manteniendo aspect ratio y rellena con blanco."""
         h, w = sketch.shape[:2]
         if h == 0 or w == 0:
             return np.full((target_h, target_w), 245, dtype=np.uint8)

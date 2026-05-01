@@ -85,3 +85,50 @@ def test_resize_handles_zero_dimensions(generator):
     arr = np.zeros((0, 0), dtype=np.uint8)
     out = generator._resize_for_card(arr)
     assert out.shape == (DEFAULT_TARGET_H, DEFAULT_TARGET_W)
+
+
+# ----------------------------------------------------------------------
+# Mejoras: limpieza de fondo + CLAHE + crop generoso
+# ----------------------------------------------------------------------
+
+
+def test_clean_background_returns_same_shape(generator):
+    """`_clean_background` no cambia las dimensiones de la imagen."""
+    img = np.full((400, 300, 3), 100, dtype=np.uint8)
+    out = generator._clean_background(img)
+    assert out.shape == img.shape
+    assert out.dtype == np.uint8
+
+
+def test_clean_background_blurs_outside_center(generator):
+    """En las regiones de los bordes la varianza disminuye tras la limpieza."""
+    img = np.full((400, 300, 3), 128, dtype=np.uint8)
+    rng = np.random.default_rng(42)
+    img[:50, :, :] = rng.integers(0, 256, size=(50, 300, 3), dtype=np.uint8)
+    img[-50:, :, :] = rng.integers(0, 256, size=(50, 300, 3), dtype=np.uint8)
+
+    out = generator._clean_background(img)
+    border_in = img[:50, :, :].std()
+    border_out = out[:50, :, :].std()
+    assert border_out < border_in
+
+
+def test_pipeline_calls_clean_background(generator, tmp_path):
+    """`generate_sketch` invoca `_clean_background` en el flow."""
+    from unittest.mock import patch
+
+    img_path = tmp_path / "input.jpg"
+    arr = np.full((500, 400, 3), 150, dtype=np.uint8)
+    cv2.imwrite(str(img_path), arr)
+    with patch.object(generator, "_clean_background", wraps=generator._clean_background) as cb:
+        generator.generate_sketch(img_path)
+    assert cb.call_count == 1
+
+
+def test_crop_uses_generous_margins():
+    """Los márgenes del crop son generosos (≥30% lados, ≥60% arriba, ≥40% abajo)."""
+    from collections_app.admin.image_pipeline import sketch_generator as sg
+
+    assert sg.SIDE_MARGIN_RATIO >= 0.30
+    assert sg.TOP_MARGIN_RATIO >= 0.60
+    assert sg.BOTTOM_MARGIN_RATIO >= 0.40

@@ -315,3 +315,93 @@ def test_pipeline_closes_connection_after_run(setup_collection, tmp_path):
     conn = captured[0]
     with pytest.raises(sqlite3.ProgrammingError):
         conn.execute("SELECT 1")
+
+
+# ----------------------------------------------------------------------
+# Mejoras: _index.json y regenerate_placeholders
+# ----------------------------------------------------------------------
+
+
+def test_index_json_records_sources(setup_collection, tmp_path):
+    """Tras run_batch, `_index.json` lista las fuentes por card."""
+    import json as _json
+
+    db_path, cid = setup_collection
+    out = tmp_path / "out"
+    pipe = _make_pipeline(db_path, cid, out, photo_source=SOURCE_PLACEHOLDER)
+    pipe.run_batch()
+    index_path = out / "_index.json"
+    assert index_path.exists()
+    data = _json.loads(index_path.read_text(encoding="utf-8"))
+    assert len(data) == 5
+    for entry in data.values():
+        assert entry["source"] == SOURCE_PLACEHOLDER
+
+
+def test_get_placeholder_card_keys_filters_correctly(setup_collection, tmp_path):
+    """get_placeholder_card_keys() devuelve solo las cards con source=placeholder."""
+    db_path, cid = setup_collection
+    out = tmp_path / "out"
+    pipe = _make_pipeline(db_path, cid, out, photo_source=SOURCE_PLACEHOLDER)
+    pipe.run_batch()
+    keys = pipe.get_placeholder_card_keys()
+    assert sorted(keys) == ["ARG-1", "ARG-2", "ARG-3", "BRA-1", "BRA-2"]
+
+    # Reinstanciar el pipeline (para forzar recarga del index desde disco) y
+    # comparar.
+    pipe2 = _make_pipeline(db_path, cid, out, photo_source=SOURCE_PLACEHOLDER)
+    assert sorted(pipe2.get_placeholder_card_keys()) == sorted(keys)
+
+
+def test_regenerate_placeholders_only_reprocesses_placeholders(setup_collection, tmp_path):
+    """regenerate_placeholders borra solo los PNGs de placeholder y los reprocesa."""
+    db_path, cid = setup_collection
+    out = tmp_path / "out"
+
+    # Primera corrida: todos como placeholder
+    saved_first: list[Path] = []
+    pipe = _make_pipeline(db_path, cid, out, saved_first, SOURCE_PLACEHOLDER)
+    pipe.run_batch()
+    assert len(saved_first) == 5
+
+    # Marcar 2 cards como "exitosas" (DDG) en el index, manualmente, simulando
+    # que algunas no eran placeholder.
+    import json as _json
+
+    index_path = out / "_index.json"
+    data = _json.loads(index_path.read_text(encoding="utf-8"))
+    data["ARG-1"]["source"] = SOURCE_DUCKDUCKGO
+    data["BRA-1"]["source"] = SOURCE_DUCKDUCKGO
+    index_path.write_text(_json.dumps(data), encoding="utf-8")
+
+    # Reinstanciar pipeline (lee el index modificado) con composer fresh
+    saved_regen: list[Path] = []
+    pipe2 = _make_pipeline(db_path, cid, out, saved_regen, SOURCE_DUCKDUCKGO)
+    result = pipe2.regenerate_placeholders()
+
+    # Solo las 3 que seguían como placeholder se reprocesan
+    assert result.total == 3
+    saved_keys = sorted(p.stem for p in saved_regen)
+    assert saved_keys == ["ARG-2", "ARG-3", "BRA-2"]
+
+
+def test_regenerate_placeholders_when_none(setup_collection, tmp_path):
+    """Sin placeholders, regenerate_placeholders no hace nada."""
+    db_path, cid = setup_collection
+    pipe = _make_pipeline(db_path, cid, tmp_path / "out", photo_source=SOURCE_DUCKDUCKGO)
+    pipe.run_batch()  # todos exitosos como DDG
+    result = pipe.regenerate_placeholders()
+    assert result.total == 0
+
+
+def test_index_persists_between_runs(setup_collection, tmp_path):
+    """El index sobrevive entre instancias del pipeline."""
+    db_path, cid = setup_collection
+    out = tmp_path / "out"
+    pipe = _make_pipeline(db_path, cid, out, photo_source=SOURCE_WIKIPEDIA)
+    pipe.run_batch()
+    # Reinstanciar y verificar que el index ya está cargado
+    pipe2 = _make_pipeline(db_path, cid, out, photo_source=SOURCE_DUCKDUCKGO)
+    assert len(pipe2._index) == 5
+    for entry in pipe2._index.values():
+        assert entry["source"] == SOURCE_WIKIPEDIA

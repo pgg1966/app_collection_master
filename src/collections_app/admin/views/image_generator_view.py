@@ -45,19 +45,27 @@ class PipelineWorker(QThread):
         self,
         pipeline: ImagePipeline,
         force: bool = False,
+        regenerate_placeholders_only: bool = False,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._pipeline = pipeline
         self._force = force
+        self._regenerate_placeholders_only = regenerate_placeholders_only
 
     def run(self) -> None:
         try:
-            result = self._pipeline.run_batch(
-                on_progress=self._emit_progress,
-                on_log=self._emit_log,
-                force=self._force,
-            )
+            if self._regenerate_placeholders_only:
+                result = self._pipeline.regenerate_placeholders(
+                    on_progress=self._emit_progress,
+                    on_log=self._emit_log,
+                )
+            else:
+                result = self._pipeline.run_batch(
+                    on_progress=self._emit_progress,
+                    on_log=self._emit_log,
+                    force=self._force,
+                )
         except Exception as exc:  # noqa: BLE001
             logger.exception("Error en PipelineWorker")
             result = PipelineResult(errors=[str(exc)])
@@ -125,12 +133,17 @@ class ImageGeneratorView(QWidget):
         buttons_row = QHBoxLayout()
         self._start_button = QPushButton(self.tr("▶ Generar pendientes"))
         self._start_button.clicked.connect(self._start_pending)
+        self._regen_placeholders_button = QPushButton(
+            self.tr("🔄 Regenerar placeholders (con mejoras)")
+        )
+        self._regen_placeholders_button.clicked.connect(self._regenerate_placeholders)
         self._regen_button = QPushButton(self.tr("↺ Regenerar todas"))
         self._regen_button.clicked.connect(self._regenerate_all)
         self._stop_button = QPushButton(self.tr("⏹ Detener"))
         self._stop_button.setEnabled(False)
         self._stop_button.clicked.connect(self._stop_worker)
         buttons_row.addWidget(self._start_button)
+        buttons_row.addWidget(self._regen_placeholders_button)
         buttons_row.addWidget(self._regen_button)
         buttons_row.addWidget(self._stop_button)
         buttons_row.addStretch()
@@ -181,6 +194,7 @@ class ImageGeneratorView(QWidget):
         running = self._worker is not None and self._worker.isRunning()
         self._start_button.setEnabled(enabled and not running)
         self._regen_button.setEnabled(enabled and not running)
+        self._regen_placeholders_button.setEnabled(enabled and not running)
         self._stop_button.setEnabled(running)
 
     # ------------------------------------------------------------------
@@ -202,20 +216,59 @@ class ImageGeneratorView(QWidget):
             return
         self._launch_worker(force=True)
 
-    def _launch_worker(self, force: bool) -> None:
+    def _regenerate_placeholders(self) -> None:
+        cid = self._current_collection_id()
+        if cid is None:
+            return
+        pipeline = ImagePipeline(get_database_path(), cid)
+        n = len(pipeline.get_placeholder_card_keys())
+        if n == 0:
+            QMessageBox.information(
+                self,
+                self.tr("Regenerar placeholders"),
+                self.tr("No hay cards generadas como placeholder en esta colección."),
+            )
+            return
+        confirmed = QMessageBox.question(
+            self,
+            self.tr("Regenerar placeholders"),
+            self.tr(
+                "Se reintentará la búsqueda online de {n} cards que cayeron a "
+                "placeholder. Esto puede tardar varios minutos."
+            ).format(n=n),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if confirmed != QMessageBox.StandardButton.Yes:
+            return
+        self._launch_worker(force=False, regenerate_placeholders_only=True)
+
+    def _launch_worker(
+        self,
+        force: bool,
+        regenerate_placeholders_only: bool = False,
+    ) -> None:
         cid = self._current_collection_id()
         if cid is None:
             return
         # ImagePipeline recibe db_path (no conn) porque corre en QThread:
         # SQLite no permite usar una conexión cross-thread.
         pipeline = ImagePipeline(get_database_path(), cid)
-        self._worker = PipelineWorker(pipeline, force=force, parent=self)
+        self._worker = PipelineWorker(
+            pipeline,
+            force=force,
+            regenerate_placeholders_only=regenerate_placeholders_only,
+            parent=self,
+        )
         self._worker.progress.connect(self._on_progress)
         self._worker.log_entry.connect(self._on_log_entry)
         self._worker.result_ready.connect(self._on_finished)
         self._worker.start()
         self._set_buttons_enabled(True)
-        self._append_log(self.tr("Inicio de generación (force=") + str(force) + ")", "info")
+        if regenerate_placeholders_only:
+            self._append_log(self.tr("Inicio de regeneración de placeholders"), "info")
+        else:
+            self._append_log(self.tr("Inicio de generación (force=") + str(force) + ")", "info")
 
     def _stop_worker(self) -> None:
         if self._worker is not None:
