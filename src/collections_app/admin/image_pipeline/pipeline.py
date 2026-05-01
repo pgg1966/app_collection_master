@@ -23,8 +23,10 @@ from typing import TypedDict
 
 from collections_app.admin.image_pipeline.card_composer import CardComposer
 from collections_app.admin.image_pipeline.photo_finder import (
+    MAX_URLS_PER_QUERY,
     SOURCE_CACHE,
     SOURCE_DUCKDUCKGO,
+    SOURCE_GOOGLE,
     SOURCE_PLACEHOLDER,
     SOURCE_WIKIPEDIA,
     PhotoFinder,
@@ -47,6 +49,14 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_BATCH_SIZE = 100
 INDEX_FILE_NAME = "_index.json"
+
+# Google Custom Search free tier permite 100 queries/día. Reservamos 1
+# para nosotros (margen de error / debug) y dejamos 99 para el modo
+# `run_google_fill`. El contador es por sesión (no persistido en disco):
+# si la app se reinicia el mismo día y se vuelve a invocar
+# `run_google_fill`, el contador arranca en 0 — la responsabilidad de no
+# exceder la cuota real de Google queda en el operador.
+GOOGLE_DAILY_LIMIT = 99
 
 ProgressCallback = Callable[[int, int, str], None]
 LogCallback = Callable[[str, str, str], None]  # card_key, source, status
@@ -73,7 +83,10 @@ class PipelineResult:
     from_cache: int = 0
     from_duckduckgo: int = 0
     from_wikipedia: int = 0
+    from_google: int = 0
     from_placeholder: int = 0
+    google_calls_used: int = 0
+    google_quota_exhausted: bool = False
     errors: list[str] = field(default_factory=list)
     output_dir: Path | None = None
 
@@ -224,6 +237,97 @@ class ImagePipeline:
             force=True,
         )
 
+    def run_google_fill(
+        self,
+        on_progress: ProgressCallback | None = None,
+        on_log: LogCallback | None = None,
+        daily_limit: int = GOOGLE_DAILY_LIMIT,
+    ) -> PipelineResult:
+        """Procesa SOLO las cards que actualmente son placeholder usando Google.
+
+        Por cada placeholder, gasta 1 query a Google Custom Search. Se
+        detiene apenas se alcanza `daily_limit` (default 99 — la API
+        free permite 100/día y reservamos 1 de margen). Si el download
+        o la validación fallan, igual se cuenta el call (porque la API
+        ya nos cobró la query) y se deja el placeholder como estaba.
+
+        Si Google no está configurado (`GOOGLE_API_KEY`/`GOOGLE_CSE_ID`
+        no presentes en env), retorna inmediatamente sin tocar nada.
+        """
+        self._stop_event.clear()
+        result = PipelineResult(output_dir=self._output_dir)
+        keys = self.get_placeholder_card_keys()
+        if not keys:
+            return result
+
+        conn = self._open_connection()
+        try:
+            jobs = self._load_target_cards(conn, keys)
+            jobs_by_key = {j["card_key"]: j for j in jobs}
+            result.total = len(keys)
+            calls_used = 0
+
+            for i, key in enumerate(keys, start=1):
+                if self._stop_event.is_set():
+                    break
+                if calls_used >= daily_limit:
+                    result.google_quota_exhausted = True
+                    break
+                job = jobs_by_key.get(key)
+                if job is None:
+                    continue
+                calls_used += 1
+                self._google_fill_one(job, result, on_log)
+                if on_progress is not None:
+                    label = f"{key} {job['card_name']} (Google {calls_used}/{daily_limit})"
+                    on_progress(i, result.total, label)
+            self._save_index()
+        finally:
+            self._save_index()
+            conn.close()
+
+        result.google_calls_used = calls_used
+        return result
+
+    def run_resketch(
+        self,
+        on_progress: ProgressCallback | None = None,
+        on_log: LogCallback | None = None,
+    ) -> PipelineResult:
+        """Re-aplica el algoritmo de sketch a las fotos cacheadas.
+
+        Útil tras cambiar el algoritmo de sketch (p.ej. Nivel 3 → Nivel 4):
+        regenera el PNG final usando la foto cruda en `photo_cache/` sin
+        salir a internet. Se saltan los placeholders (su sketch se
+        regenera con `regenerate_placeholders` o `run_google_fill`).
+        """
+        self._stop_event.clear()
+        result = PipelineResult(output_dir=self._output_dir)
+
+        # Cards con foto real cacheada (cualquier source que no sea placeholder).
+        target_keys = sorted(
+            key
+            for key, info in self._index.items()
+            if info.get("source") and info["source"] != SOURCE_PLACEHOLDER
+        )
+        if not target_keys:
+            return result
+
+        conn = self._open_connection()
+        try:
+            jobs = self._load_target_cards(conn, target_keys)
+            result.total = len(jobs)
+            for i, job in enumerate(jobs, start=1):
+                if self._stop_event.is_set():
+                    break
+                self._resketch_one(job, result, on_log)
+                if on_progress is not None:
+                    on_progress(i, result.total, f"{job['card_key']} {job['card_name']}")
+        finally:
+            conn.close()
+
+        return result
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
@@ -337,6 +441,101 @@ class ImagePipeline:
             if on_log is not None:
                 on_log(card_key, "error", str(exc))
 
+    def _google_fill_one(
+        self,
+        card: _CardJob,
+        result: PipelineResult,
+        on_log: LogCallback | None,
+    ) -> None:
+        """Procesa una card vía Google. Cada llamada gasta 1 query."""
+        card_key = card["card_key"]
+        cached_jpg = self._photo_finder.cache_dir / f"{card_key}.jpg"
+        urls = self._photo_finder.search_google_only(
+            player_name=card["card_name"], country_name=card["code_name"]
+        )
+
+        # Si Google no devolvió nada (no configurado o sin resultados),
+        # mantenemos el placeholder y reportamos error suave.
+        if not urls:
+            result.failed += 1
+            if on_log is not None:
+                on_log(card_key, SOURCE_GOOGLE, "no_results")
+            return
+
+        # Probamos hasta MAX_URLS_PER_QUERY URLs candidatas.
+        for url in urls[:MAX_URLS_PER_QUERY]:
+            # Borrar el placeholder cacheado antes de intentar el download
+            # nuevo (si no, _download_image podría no sobreescribirlo).
+            cached_jpg.unlink(missing_ok=True)
+            if not self._photo_finder._download_image(url, cached_jpg):
+                continue
+            if not self._photo_finder._image_has_face(cached_jpg):
+                cached_jpg.unlink(missing_ok=True)
+                continue
+            try:
+                sketch = self._sketch_generator.generate_sketch(cached_jpg)
+                image = self._composer.compose(
+                    sketch=sketch,
+                    card_number=card["card_number"],
+                    player_name=card["card_name"],
+                    code_name=card["code_name"],
+                    owned=card["owned"],
+                )
+                self._composer.save(image, self.get_output_path(card_key))
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Google fill: error procesando %s", card_key)
+                result.failed += 1
+                result.errors.append(f"{card_key}: {exc}")
+                if on_log is not None:
+                    on_log(card_key, SOURCE_GOOGLE, str(exc))
+                return
+            result.from_google += 1
+            result.succeeded += 1
+            self._index[card_key] = {"source": SOURCE_GOOGLE, "url": url}
+            if on_log is not None:
+                on_log(card_key, SOURCE_GOOGLE, "ok")
+            return
+
+        # Todas las URLs candidatas fallaron download/validación.
+        result.failed += 1
+        if on_log is not None:
+            on_log(card_key, SOURCE_GOOGLE, "all_urls_invalid")
+
+    def _resketch_one(
+        self,
+        card: _CardJob,
+        result: PipelineResult,
+        on_log: LogCallback | None,
+    ) -> None:
+        """Re-aplica sketch+compose a una card que ya tiene foto cacheada."""
+        card_key = card["card_key"]
+        cached_jpg = self._photo_finder.cache_dir / f"{card_key}.jpg"
+        if not cached_jpg.exists():
+            # El index dice que tiene foto pero el archivo no está; saltar.
+            result.failed += 1
+            if on_log is not None:
+                on_log(card_key, "resketch", "no_cached_photo")
+            return
+        try:
+            sketch = self._sketch_generator.generate_sketch(cached_jpg)
+            image = self._composer.compose(
+                sketch=sketch,
+                card_number=card["card_number"],
+                player_name=card["card_name"],
+                code_name=card["code_name"],
+                owned=card["owned"],
+            )
+            self._composer.save(image, self.get_output_path(card_key))
+            result.succeeded += 1
+            if on_log is not None:
+                on_log(card_key, "resketch", "ok")
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Resketch: error procesando %s", card_key)
+            result.failed += 1
+            result.errors.append(f"{card_key}: {exc}")
+            if on_log is not None:
+                on_log(card_key, "resketch", str(exc))
+
     @staticmethod
     def _count_source(source: str, result: PipelineResult) -> None:
         if source == SOURCE_CACHE:
@@ -345,5 +544,7 @@ class ImagePipeline:
             result.from_duckduckgo += 1
         elif source == SOURCE_WIKIPEDIA:
             result.from_wikipedia += 1
+        elif source == SOURCE_GOOGLE:
+            result.from_google += 1
         elif source == SOURCE_PLACEHOLDER:
             result.from_placeholder += 1

@@ -1,13 +1,16 @@
 """Conversión de fotos a sketch B&W usando OpenCV.
 
-Pipeline (Nivel 3 mejorado):
+Pipeline (Nivel 4 — Line Art):
   cargar → detectar cara → recortar con margen amplio → limpiar fondo
-  (blur fuera de la cara) → edge-preserving + pencil dodge & burn +
-  bordes Canny reforzados → CLAHE → suavizar → resize.
+  (blur fuera de la cara) → bilateral filter + dodge blend con kernel
+  grande + threshold → erode (=engrosar líneas) → resize.
+
+Resultado: líneas negras limpias sobre fondo blanco puro, estilo retrato
+a lápiz fino. El threshold final fuerza el fondo a 255 (blanco) y borra
+los grises medios que generaban ruido en el Nivel 3.
 
 La detección usa Haar Cascade frontalface (viene con `opencv-python`).
-Si no detecta cara, se usa la imagen completa y se aplica un blur
-suavizado en los bordes igualmente.
+Si no detecta cara, se procesa la imagen completa.
 """
 
 import logging
@@ -28,6 +31,11 @@ TOP_MARGIN_RATIO = 0.60  # +60% arriba
 SIDE_MARGIN_RATIO = 0.30  # +30% a cada lado
 BOTTOM_MARGIN_RATIO = 0.40  # +40% abajo
 
+# Parámetros del Nivel 4 (Line Art)
+SKETCH_BLUR_KERNEL = 111  # impar; más grande = líneas más suaves
+SKETCH_THRESHOLD = 215    # mayor = fondo más blanco, menos grises
+SKETCH_LINE_THICKNESS = 1  # 0 = no engrosar; 1 = engrosar 1 iteración
+
 
 class SketchGenerator:
     """Convierte fotos a sketch artístico B&W con limpieza de fondo."""
@@ -42,15 +50,15 @@ class SketchGenerator:
             logger.warning("Haar cascade vacío en %s", cascade_path)
 
     def generate_sketch(self, image_path: Path) -> np.ndarray:
-        """Pipeline end-to-end."""
+        """Pipeline end-to-end (Nivel 4 Line Art)."""
         img = cv2.imread(str(image_path))
         if img is None:
             logger.warning("No se pudo cargar imagen: %s", image_path)
-            return np.full((DEFAULT_TARGET_H, DEFAULT_TARGET_W), 220, dtype=np.uint8)
+            return np.full((DEFAULT_TARGET_H, DEFAULT_TARGET_W), 255, dtype=np.uint8)
 
         cropped = self._detect_and_crop_face(img)
         cleaned = self._clean_background(cropped)
-        sketch = self._apply_sketch_level3(cleaned)
+        sketch = self._apply_sketch_level4(cleaned)
         return self._resize_for_card(sketch)
 
     # ------------------------------------------------------------------
@@ -127,33 +135,42 @@ class SketchGenerator:
         return out
 
     # ------------------------------------------------------------------
-    # Sketch nivel 3 mejorado
+    # Sketch nivel 4 (Line Art)
     # ------------------------------------------------------------------
 
-    def _apply_sketch_level3(self, img: np.ndarray) -> np.ndarray:
-        """Edge-preserving + pencil dodge & burn + Canny + CLAHE."""
-        smoothed_color = cv2.edgePreservingFilter(img, sigma_s=60, sigma_r=0.4)
-        gray = cv2.cvtColor(smoothed_color, cv2.COLOR_BGR2GRAY)
+    def _apply_sketch_level4(self, img: np.ndarray) -> np.ndarray:
+        """Line Art: líneas negras limpias sobre fondo blanco puro.
 
-        # Pencil dodge & burn con blur más fuerte (líneas más suaves)
-        inv = cv2.bitwise_not(gray)
-        blur = cv2.GaussianBlur(inv, (25, 25), 0)
-        sketch = cv2.divide(gray, cv2.bitwise_not(blur), scale=256.0)
+        Pipeline:
+        1. Bilateral filter para suavizar preservando bordes.
+        2. Dodge blend con GaussianBlur de kernel grande (más natural).
+        3. Threshold binario para forzar fondo blanco puro.
+        4. Erode opcional para engrosar las líneas (en imagen invertida
+           sería dilate; sobre la imagen blanca, erode achica los blancos
+           y por ende engrosa las líneas negras).
+        """
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-        # Canny con umbrales más altos: solo bordes importantes (menos ruido)
-        edges = cv2.Canny(gray, 50, 150)
-        edges_dilated = cv2.dilate(edges, np.ones((2, 2), np.uint8), iterations=1)
+        # Suavizar preservando bordes
+        smoothed = cv2.bilateralFilter(gray, d=9, sigmaColor=75, sigmaSpace=75)
 
-        # Oscurecer bordes más sutilmente (40 en vez de 60)
-        darkened = sketch.astype(np.int32)
-        darkened[edges_dilated > 0] -= 40
-        sketch = np.clip(darkened, 0, 255).astype(np.uint8)
+        # Dodge blend con blur grande
+        inv = cv2.bitwise_not(smoothed)
+        kernel = SKETCH_BLUR_KERNEL
+        if kernel % 2 == 0:  # OpenCV exige kernel impar
+            kernel += 1
+        blur = cv2.GaussianBlur(inv, (kernel, kernel), 0)
+        sketch = cv2.divide(smoothed, cv2.bitwise_not(blur), scale=256.0)
 
-        # CLAHE: contraste local sin amplificar ruido
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        sketch = clahe.apply(sketch)
+        # Threshold para forzar fondo blanco puro (limpia los grises medios)
+        _, clean = cv2.threshold(sketch, SKETCH_THRESHOLD, 255, cv2.THRESH_BINARY)
 
-        return cv2.GaussianBlur(sketch, (3, 3), 0)
+        # Engrosar las líneas negras (erode sobre fondo blanco)
+        if SKETCH_LINE_THICKNESS > 0:
+            line_kernel = np.ones((2, 2), np.uint8)
+            clean = cv2.erode(clean, line_kernel, iterations=SKETCH_LINE_THICKNESS)
+
+        return clean
 
     # ------------------------------------------------------------------
     # Resize final
@@ -165,17 +182,17 @@ class SketchGenerator:
         target_w: int = DEFAULT_TARGET_W,
         target_h: int = DEFAULT_TARGET_H,
     ) -> np.ndarray:
-        """Escala manteniendo aspect ratio y rellena con blanco."""
+        """Escala manteniendo aspect ratio y rellena con blanco puro."""
         h, w = sketch.shape[:2]
         if h == 0 or w == 0:
-            return np.full((target_h, target_w), 245, dtype=np.uint8)
+            return np.full((target_h, target_w), 255, dtype=np.uint8)
 
         scale = min(target_w / w, target_h / h)
         new_w = max(1, int(w * scale))
         new_h = max(1, int(h * scale))
         resized = cv2.resize(sketch, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
-        canvas = np.full((target_h, target_w), 245, dtype=np.uint8)
+        canvas = np.full((target_h, target_w), 255, dtype=np.uint8)
         x0 = (target_w - new_w) // 2
         y0 = (target_h - new_h) // 2
         canvas[y0 : y0 + new_h, x0 : x0 + new_w] = resized

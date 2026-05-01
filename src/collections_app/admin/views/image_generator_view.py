@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from collections_app.admin.image_pipeline.pipeline import (
+    GOOGLE_DAILY_LIMIT,
     ImagePipeline,
     PipelineResult,
 )
@@ -46,17 +47,31 @@ class PipelineWorker(QThread):
         pipeline: ImagePipeline,
         force: bool = False,
         regenerate_placeholders_only: bool = False,
+        regenerate_sketches_only: bool = False,
+        google_fill_only: bool = False,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._pipeline = pipeline
         self._force = force
         self._regenerate_placeholders_only = regenerate_placeholders_only
+        self._regenerate_sketches_only = regenerate_sketches_only
+        self._google_fill_only = google_fill_only
 
     def run(self) -> None:
         try:
             if self._regenerate_placeholders_only:
                 result = self._pipeline.regenerate_placeholders(
+                    on_progress=self._emit_progress,
+                    on_log=self._emit_log,
+                )
+            elif self._regenerate_sketches_only:
+                result = self._pipeline.run_resketch(
+                    on_progress=self._emit_progress,
+                    on_log=self._emit_log,
+                )
+            elif self._google_fill_only:
+                result = self._pipeline.run_google_fill(
                     on_progress=self._emit_progress,
                     on_log=self._emit_log,
                 )
@@ -122,6 +137,11 @@ class ImageGeneratorView(QWidget):
         self._overall_bar.setRange(0, 100)
         layout.addWidget(self._overall_bar)
 
+        # Contador de placeholders + cuota Google
+        self._placeholder_label = QLabel("")
+        self._placeholder_label.setStyleSheet("color: #555; font-style: italic;")
+        layout.addWidget(self._placeholder_label)
+
         # Progreso del batch actual
         self._batch_label = QLabel(self.tr("Procesando: —"))
         layout.addWidget(self._batch_label)
@@ -129,7 +149,7 @@ class ImageGeneratorView(QWidget):
         self._batch_bar.setRange(0, 100)
         layout.addWidget(self._batch_bar)
 
-        # Botonera
+        # Botonera principal
         buttons_row = QHBoxLayout()
         self._start_button = QPushButton(self.tr("▶ Generar pendientes"))
         self._start_button.clicked.connect(self._start_pending)
@@ -148,6 +168,21 @@ class ImageGeneratorView(QWidget):
         buttons_row.addWidget(self._stop_button)
         buttons_row.addStretch()
         layout.addLayout(buttons_row)
+
+        # Botonera secundaria: re-sketch sin internet + Google fill
+        secondary_row = QHBoxLayout()
+        self._resketch_button = QPushButton(
+            self.tr("🎨 Regenerar sketches (mismo algoritmo, mejor calidad)")
+        )
+        self._resketch_button.clicked.connect(self._regenerate_sketches)
+        self._google_fill_button = QPushButton(
+            self.tr("🔍 Rellenar con Google (max {n} hoy)").format(n=GOOGLE_DAILY_LIMIT)
+        )
+        self._google_fill_button.clicked.connect(self._google_fill)
+        secondary_row.addWidget(self._resketch_button)
+        secondary_row.addWidget(self._google_fill_button)
+        secondary_row.addStretch()
+        layout.addLayout(secondary_row)
 
         # Log
         layout.addWidget(QLabel(self.tr("Log") + ":"))
@@ -174,14 +209,22 @@ class ImageGeneratorView(QWidget):
         cid = self._current_collection_id()
         if cid is None:
             self._state_label.setText(self.tr("(elegí una colección)"))
+            self._placeholder_label.setText("")
             self._overall_bar.setValue(0)
             self._set_buttons_enabled(False)
             return
         total = CardsRepository(self.conn).count_by_collection(cid)
-        existing = ImagePipeline(get_database_path(), cid).get_existing_count()
+        pipeline = ImagePipeline(get_database_path(), cid)
+        existing = pipeline.get_existing_count()
+        placeholders = len(pipeline.get_placeholder_card_keys())
         pct = (existing / total * 100) if total > 0 else 0.0
         self._state_label.setText(
             self.tr("Imágenes generadas: {e} / {t} ({p:.1f}%)").format(e=existing, t=total, p=pct)
+        )
+        self._placeholder_label.setText(
+            self.tr("Cards con placeholder: {ph} · Se procesarán hoy: hasta {n}").format(
+                ph=placeholders, n=GOOGLE_DAILY_LIMIT
+            )
         )
         self._overall_bar.setValue(int(pct))
         self._set_buttons_enabled(True)
@@ -195,6 +238,8 @@ class ImageGeneratorView(QWidget):
         self._start_button.setEnabled(enabled and not running)
         self._regen_button.setEnabled(enabled and not running)
         self._regen_placeholders_button.setEnabled(enabled and not running)
+        self._resketch_button.setEnabled(enabled and not running)
+        self._google_fill_button.setEnabled(enabled and not running)
         self._stop_button.setEnabled(running)
 
     # ------------------------------------------------------------------
@@ -243,10 +288,60 @@ class ImageGeneratorView(QWidget):
             return
         self._launch_worker(force=False, regenerate_placeholders_only=True)
 
+    def _regenerate_sketches(self) -> None:
+        """Re-aplica el algoritmo actual de sketch a las fotos cacheadas."""
+        cid = self._current_collection_id()
+        if cid is None:
+            return
+        confirmed = QMessageBox.question(
+            self,
+            self.tr("Regenerar sketches"),
+            self.tr(
+                "Se regenerarán los sketches de todas las cards con foto cacheada "
+                "usando el algoritmo actual (sin internet). ¿Continuar?"
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if confirmed != QMessageBox.StandardButton.Yes:
+            return
+        self._launch_worker(force=False, regenerate_sketches_only=True)
+
+    def _google_fill(self) -> None:
+        """Rellena placeholders usando Google Custom Search (max 99 hoy)."""
+        cid = self._current_collection_id()
+        if cid is None:
+            return
+        pipeline = ImagePipeline(get_database_path(), cid)
+        n = len(pipeline.get_placeholder_card_keys())
+        if n == 0:
+            QMessageBox.information(
+                self,
+                self.tr("Rellenar con Google"),
+                self.tr("No hay cards en placeholder para rellenar."),
+            )
+            return
+        target = min(n, GOOGLE_DAILY_LIMIT)
+        confirmed = QMessageBox.question(
+            self,
+            self.tr("Rellenar con Google"),
+            self.tr(
+                "Se procesarán hasta {n} placeholders usando Google Custom Search. "
+                "Cada card consume 1 query de la cuota diaria. ¿Continuar?"
+            ).format(n=target),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if confirmed != QMessageBox.StandardButton.Yes:
+            return
+        self._launch_worker(force=False, google_fill_only=True)
+
     def _launch_worker(
         self,
         force: bool,
         regenerate_placeholders_only: bool = False,
+        regenerate_sketches_only: bool = False,
+        google_fill_only: bool = False,
     ) -> None:
         cid = self._current_collection_id()
         if cid is None:
@@ -258,6 +353,8 @@ class ImageGeneratorView(QWidget):
             pipeline,
             force=force,
             regenerate_placeholders_only=regenerate_placeholders_only,
+            regenerate_sketches_only=regenerate_sketches_only,
+            google_fill_only=google_fill_only,
             parent=self,
         )
         self._worker.progress.connect(self._on_progress)
@@ -267,6 +364,15 @@ class ImageGeneratorView(QWidget):
         self._set_buttons_enabled(True)
         if regenerate_placeholders_only:
             self._append_log(self.tr("Inicio de regeneración de placeholders"), "info")
+        elif regenerate_sketches_only:
+            self._append_log(self.tr("Inicio de regeneración de sketches (sin internet)"), "info")
+        elif google_fill_only:
+            self._append_log(
+                self.tr("Inicio de rellenado con Google (max {n} hoy)").format(
+                    n=GOOGLE_DAILY_LIMIT
+                ),
+                "info",
+            )
         else:
             self._append_log(self.tr("Inicio de generación (force=") + str(force) + ")", "info")
 
@@ -297,17 +403,31 @@ class ImageGeneratorView(QWidget):
     def _on_finished(self, result: PipelineResult) -> None:
         self._append_log(
             self.tr(
-                "Fin: {ok} ok, {fail} errores · DDG={d} Wiki={w} Cache={c} Placeholder={p}"
+                "Fin: {ok} ok, {fail} errores · DDG={d} Wiki={w} Google={g} "
+                "Cache={c} Placeholder={p}"
             ).format(
                 ok=result.succeeded,
                 fail=result.failed,
                 d=result.from_duckduckgo,
                 w=result.from_wikipedia,
+                g=result.from_google,
                 c=result.from_cache,
                 p=result.from_placeholder,
             ),
             "info",
         )
+        if result.google_calls_used:
+            self._append_log(
+                self.tr("Google: {used} queries usadas en esta sesión").format(
+                    used=result.google_calls_used
+                ),
+                "info",
+            )
+        if result.google_quota_exhausted:
+            self._append_log(
+                self.tr("⚠ Cuota diaria de Google alcanzada — quedan placeholders sin rellenar"),
+                "warn",
+            )
         self._worker = None
         self._on_collection_changed(self._collection_combo.currentIndex())
 

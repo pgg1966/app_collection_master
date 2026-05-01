@@ -10,12 +10,14 @@ import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import cv2
 import numpy as np
 import pytest
 from PIL import Image
 
 from collections_app.admin.image_pipeline.photo_finder import (
     SOURCE_DUCKDUCKGO,
+    SOURCE_GOOGLE,
     SOURCE_PLACEHOLDER,
     SOURCE_WIKIPEDIA,
     PhotoResult,
@@ -405,3 +407,286 @@ def test_index_persists_between_runs(setup_collection, tmp_path):
     assert len(pipe2._index) == 5
     for entry in pipe2._index.values():
         assert entry["source"] == SOURCE_WIKIPEDIA
+
+
+# ----------------------------------------------------------------------
+# run_google_fill (cuota diaria) y run_resketch
+# ----------------------------------------------------------------------
+
+
+def _seed_placeholders(setup_collection, out_dir: Path, n: int = 5) -> ImagePipeline:
+    """Genera `n` cards como placeholder vía run_batch y devuelve el pipeline."""
+    db_path, cid = setup_collection
+    pipe = _make_pipeline(db_path, cid, out_dir, photo_source=SOURCE_PLACEHOLDER)
+    pipe.run_batch()
+    assert len(pipe.get_placeholder_card_keys()) == n
+    return pipe
+
+
+def _fake_finder_with_google(
+    cache_dir: Path,
+    google_urls_per_call: list[str] | None = None,
+) -> MagicMock:
+    """Finder configurado para test de run_google_fill.
+
+    `search_google_only` retorna una URL ficticia. `_download_image` crea
+    un JPG válido en `dest`. `_image_has_face` retorna True. El test
+    chequea cuántas veces se llamó a `search_google_only`.
+    """
+    finder = MagicMock()
+    finder.cache_dir = cache_dir
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    urls = google_urls_per_call or ["https://google.example/photo.jpg"]
+
+    def fake_search(player_name: str, country_name: str) -> list[str]:
+        del player_name, country_name
+        return list(urls)
+
+    def fake_download(url: str, dest: Path) -> bool:
+        del url
+        # Crear JPEG válido mínimo
+        arr = np.full((200, 200, 3), 200, dtype=np.uint8)
+        from PIL import Image as _Img
+
+        _Img.fromarray(arr).save(dest, format="JPEG")
+        return True
+
+    finder.search_google_only.side_effect = fake_search
+    finder._download_image.side_effect = fake_download
+    finder._image_has_face.return_value = True
+    return finder
+
+
+def test_google_limit_respected_in_run_google_fill(setup_collection, tmp_path):
+    """El daily_limit corta el procesamiento aunque haya más placeholders."""
+    db_path, cid = setup_collection
+    out = tmp_path / "out"
+    cache = tmp_path / "photo_cache"
+    _seed_placeholders(setup_collection, out, n=5)
+
+    finder = _fake_finder_with_google(cache)
+    pipe = ImagePipeline(
+        db_path=db_path,
+        collection_id=cid,
+        photo_finder=finder,
+        sketch_generator=_fake_sketch_generator(),
+        card_composer=_fake_composer([]),
+        output_dir=out,
+    )
+    result = pipe.run_google_fill(daily_limit=2)
+
+    assert result.google_calls_used == 2
+    assert finder.search_google_only.call_count == 2
+    assert result.google_quota_exhausted is True
+    # Y se contabilizaron como Google
+    assert result.from_google == 2
+
+
+def test_google_not_called_beyond_daily_limit(setup_collection, tmp_path):
+    """Si daily_limit > placeholders, solo se llama lo necesario."""
+    db_path, cid = setup_collection
+    out = tmp_path / "out"
+    cache = tmp_path / "photo_cache"
+    _seed_placeholders(setup_collection, out, n=5)
+
+    finder = _fake_finder_with_google(cache)
+    pipe = ImagePipeline(
+        db_path=db_path,
+        collection_id=cid,
+        photo_finder=finder,
+        sketch_generator=_fake_sketch_generator(),
+        card_composer=_fake_composer([]),
+        output_dir=out,
+    )
+    result = pipe.run_google_fill(daily_limit=99)
+
+    # Solo 5 placeholders → 5 calls, sin agotar cuota
+    assert result.google_calls_used == 5
+    assert finder.search_google_only.call_count == 5
+    assert result.google_quota_exhausted is False
+    assert result.from_google == 5
+
+
+def test_google_fill_skips_when_no_placeholders(setup_collection, tmp_path):
+    """Si no hay placeholders, run_google_fill retorna sin llamar a Google."""
+    db_path, cid = setup_collection
+    out = tmp_path / "out"
+    cache = tmp_path / "photo_cache"
+    pipe = _make_pipeline(db_path, cid, out, photo_source=SOURCE_DUCKDUCKGO)
+    pipe.run_batch()
+
+    finder = _fake_finder_with_google(cache)
+    pipe2 = ImagePipeline(
+        db_path=db_path,
+        collection_id=cid,
+        photo_finder=finder,
+        sketch_generator=_fake_sketch_generator(),
+        card_composer=_fake_composer([]),
+        output_dir=out,
+    )
+    result = pipe2.run_google_fill()
+    assert result.total == 0
+    finder.search_google_only.assert_not_called()
+
+
+def test_google_fill_updates_index_to_google_source(setup_collection, tmp_path):
+    """Las cards rellenadas vía Google quedan con source=google en _index.json."""
+    db_path, cid = setup_collection
+    out = tmp_path / "out"
+    cache = tmp_path / "photo_cache"
+    _seed_placeholders(setup_collection, out, n=5)
+
+    finder = _fake_finder_with_google(cache)
+    pipe = ImagePipeline(
+        db_path=db_path,
+        collection_id=cid,
+        photo_finder=finder,
+        sketch_generator=_fake_sketch_generator(),
+        card_composer=_fake_composer([]),
+        output_dir=out,
+    )
+    pipe.run_google_fill(daily_limit=99)
+
+    # Reinstanciar para forzar recarga del index desde disco
+    pipe2 = _make_pipeline(db_path, cid, out, photo_source=SOURCE_PLACEHOLDER)
+    google_keys = [k for k, v in pipe2._index.items() if v.get("source") == SOURCE_GOOGLE]
+    assert len(google_keys) == 5
+
+
+def test_run_resketch_skips_placeholders(setup_collection, tmp_path):
+    """run_resketch ignora cards con source=placeholder."""
+    db_path, cid = setup_collection
+    out = tmp_path / "out"
+    cache = tmp_path / "photo_cache"
+    cache.mkdir(parents=True, exist_ok=True)
+
+    # Mix de sources: 2 DDG + 3 placeholder
+    pipe = _make_pipeline(db_path, cid, out, photo_source=SOURCE_PLACEHOLDER)
+    pipe.run_batch()
+    import json as _json
+
+    index_path = out / "_index.json"
+    data = _json.loads(index_path.read_text(encoding="utf-8"))
+    data["ARG-1"]["source"] = SOURCE_DUCKDUCKGO
+    data["BRA-2"]["source"] = SOURCE_DUCKDUCKGO
+    index_path.write_text(_json.dumps(data), encoding="utf-8")
+
+    # Crear los archivos cacheados de las cards no-placeholder
+    for key in ("ARG-1", "BRA-2"):
+        arr = np.full((200, 200, 3), 200, dtype=np.uint8)
+        cv2.imwrite(str(cache / f"{key}.jpg"), arr)
+
+    # Pipeline con finder.cache_dir apuntando al fake cache
+    finder = MagicMock()
+    finder.cache_dir = cache
+    sketch_gen = _fake_sketch_generator()
+    saved: list[Path] = []
+    pipe2 = ImagePipeline(
+        db_path=db_path,
+        collection_id=cid,
+        photo_finder=finder,
+        sketch_generator=sketch_gen,
+        card_composer=_fake_composer(saved),
+        output_dir=out,
+    )
+    result = pipe2.run_resketch()
+
+    # Solo las 2 cards no-placeholder se procesan
+    assert result.total == 2
+    assert sketch_gen.generate_sketch.call_count == 2
+    saved_keys = sorted(p.stem for p in saved)
+    assert saved_keys == ["ARG-1", "BRA-2"]
+
+
+def test_run_resketch_uses_cached_photos(setup_collection, tmp_path):
+    """run_resketch lee las fotos desde photo_cache (no llama a find_photo)."""
+    db_path, cid = setup_collection
+    out = tmp_path / "out"
+    cache = tmp_path / "photo_cache"
+    cache.mkdir(parents=True, exist_ok=True)
+
+    # Todas las cards como DDG (con foto cacheada)
+    pipe = _make_pipeline(db_path, cid, out, photo_source=SOURCE_DUCKDUCKGO)
+    pipe.run_batch()
+
+    # Crear archivos de cache para todas
+    for key in ("ARG-1", "ARG-2", "ARG-3", "BRA-1", "BRA-2"):
+        arr = np.full((200, 200, 3), 200, dtype=np.uint8)
+        cv2.imwrite(str(cache / f"{key}.jpg"), arr)
+
+    finder = MagicMock()
+    finder.cache_dir = cache
+    sketch_gen = _fake_sketch_generator()
+    pipe2 = ImagePipeline(
+        db_path=db_path,
+        collection_id=cid,
+        photo_finder=finder,
+        sketch_generator=sketch_gen,
+        card_composer=_fake_composer([]),
+        output_dir=out,
+    )
+    result = pipe2.run_resketch()
+
+    assert result.total == 5
+    assert result.succeeded == 5
+    # generate_sketch fue invocado con paths que apuntan al cache
+    for call in sketch_gen.generate_sketch.call_args_list:
+        path_arg = call.args[0]
+        assert Path(path_arg).parent == cache
+
+
+def test_run_resketch_does_not_make_network_requests(setup_collection, tmp_path):
+    """run_resketch nunca invoca find_photo ni search_google_only."""
+    db_path, cid = setup_collection
+    out = tmp_path / "out"
+    cache = tmp_path / "photo_cache"
+    cache.mkdir(parents=True, exist_ok=True)
+
+    pipe = _make_pipeline(db_path, cid, out, photo_source=SOURCE_DUCKDUCKGO)
+    pipe.run_batch()
+
+    for key in ("ARG-1", "ARG-2", "ARG-3", "BRA-1", "BRA-2"):
+        arr = np.full((200, 200, 3), 200, dtype=np.uint8)
+        cv2.imwrite(str(cache / f"{key}.jpg"), arr)
+
+    finder = MagicMock()
+    finder.cache_dir = cache
+    pipe2 = ImagePipeline(
+        db_path=db_path,
+        collection_id=cid,
+        photo_finder=finder,
+        sketch_generator=_fake_sketch_generator(),
+        card_composer=_fake_composer([]),
+        output_dir=out,
+    )
+    pipe2.run_resketch()
+
+    finder.find_photo.assert_not_called()
+    finder.search_google_only.assert_not_called()
+
+
+def test_run_resketch_handles_missing_cached_photo(setup_collection, tmp_path):
+    """Si el cache jpg no existe, la card se cuenta como fallida pero no rompe."""
+    db_path, cid = setup_collection
+    out = tmp_path / "out"
+    cache = tmp_path / "photo_cache"
+    cache.mkdir(parents=True, exist_ok=True)
+
+    pipe = _make_pipeline(db_path, cid, out, photo_source=SOURCE_DUCKDUCKGO)
+    pipe.run_batch()
+
+    # No creamos ningún archivo en cache → todas deben fallar suavemente
+    finder = MagicMock()
+    finder.cache_dir = cache
+    pipe2 = ImagePipeline(
+        db_path=db_path,
+        collection_id=cid,
+        photo_finder=finder,
+        sketch_generator=_fake_sketch_generator(),
+        card_composer=_fake_composer([]),
+        output_dir=out,
+    )
+    result = pipe2.run_resketch()
+    assert result.total == 5
+    assert result.failed == 5
+    assert result.succeeded == 0

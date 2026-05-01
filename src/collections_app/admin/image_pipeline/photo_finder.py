@@ -1,20 +1,26 @@
 """Búsqueda y descarga de fotos de jugadores con fallback en cascada.
 
-Estrategia:
+Estrategia (`find_photo`):
 1. Caché local (`data/photo_cache/{card_key}.jpg`) — si existe, se usa.
 2. DuckDuckGo image search — varias queries variadas (full name, apellido,
-   español, con `site:` hints). Cada URL descargada se valida por tamaño
-   mínimo Y por contener una cara detectable; si no, se prueba la siguiente.
+   español, con `site:` hints). UA rotation + rate limiting suave entre
+   queries. Cada URL descargada se valida por tamaño mínimo Y por
+   contener una cara detectable; si no, se prueba la siguiente.
 3. Wikipedia API (`page/summary`).
 4. Placeholder local generado con PIL.
 
-La validación por cara usa el mismo Haar Cascade que `SketchGenerator`,
-para que las imágenes que pasan el filtro acá también funcionen bien
-en la etapa de sketch.
+`find_photo` NO usa Google — su uso está reservado para
+`run_google_fill` (modo opt-in con cuota diaria de 99 llamadas), porque
+la API tiene un límite de 100 queries gratis por día y queremos
+gastarlas solo cuando DDG y Wikipedia ya fallaron sobre placeholders.
+La búsqueda Google se expone vía `search_google_only(player, country)`.
 """
 
 import logging
+import os
+import random
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,15 +30,32 @@ from PIL import Image, ImageDraw
 
 logger = logging.getLogger(__name__)
 
-USER_AGENT = "CollectionsApp/1.0"
+# Pool de User-Agents para rotación (rate-limit más suave; evita ser
+# clasificado como bot demasiado rápido).
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5) AppleWebKit/605.1.15 "
+    "(KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:127.0) Gecko/20100101 Firefox/127.0",
+    "CollectionsApp/1.0",
+]
+
 MIN_IMAGE_DIM = 100
 MAX_URLS_PER_QUERY = 3
-HTTP_TIMEOUT = 15  # antes 10, ahora más generoso para fotos grandes
+HTTP_TIMEOUT = 15
 WIKI_TIMEOUT = 8
+GOOGLE_TIMEOUT = 8
+DDG_QUERY_DELAY_SEC = 0.2  # rate-limit suave entre queries
+
+# Env vars donde leer las credenciales de Google Custom Search.
+GOOGLE_API_KEY_ENV = "GOOGLE_API_KEY"
+GOOGLE_CSE_ID_ENV = "GOOGLE_CSE_ID"
 
 SOURCE_CACHE = "cache"
 SOURCE_DUCKDUCKGO = "duckduckgo"
 SOURCE_WIKIPEDIA = "wikipedia"
+SOURCE_GOOGLE = "google"
 SOURCE_PLACEHOLDER = "placeholder"
 
 # Sitios con buenas fotos de futbolistas; incluidos como `site:` hint en una query.
@@ -55,6 +78,11 @@ class PhotoResult:
     source: str
     success: bool
     error: str | None = None
+
+
+def _random_ua() -> str:
+    """Retorna un User-Agent aleatorio del pool."""
+    return random.choice(USER_AGENTS)  # noqa: S311 — no es uso criptográfico
 
 
 class PhotoFinder:
@@ -145,6 +173,8 @@ class PhotoFinder:
     # ------------------------------------------------------------------
 
     def _search_duckduckgo(self, query: str) -> list[str]:
+        # Rate-limit suave entre queries para no caer en bot detection.
+        time.sleep(DDG_QUERY_DELAY_SEC)
         try:
             from duckduckgo_search import DDGS  # noqa: PLC0415
 
@@ -155,11 +185,63 @@ class PhotoFinder:
             logger.debug("DuckDuckGo search failed for %r: %s", query, exc)
             return []
 
+    def _search_google(self, query: str) -> list[str]:
+        """Google Custom Search Image API.
+
+        Requiere `GOOGLE_API_KEY` y `GOOGLE_CSE_ID` en env. Si no están
+        configuradas, retorna [] silenciosamente (no es un error: el
+        usuario puede preferir no usar Google).
+
+        El caller es responsable de respetar la cuota diaria — esta
+        función solo realiza una llamada por invocación.
+        """
+        api_key = os.environ.get(GOOGLE_API_KEY_ENV)
+        cse_id = os.environ.get(GOOGLE_CSE_ID_ENV)
+        if not api_key or not cse_id:
+            return []
+        try:
+            r = requests.get(
+                "https://www.googleapis.com/customsearch/v1",
+                params={
+                    "key": api_key,
+                    "cx": cse_id,
+                    "q": query,
+                    "searchType": "image",
+                    "num": "5",
+                    "safe": "active",
+                },
+                timeout=GOOGLE_TIMEOUT,
+                headers={"User-Agent": _random_ua()},
+            )
+            if r.status_code != 200:
+                logger.debug("Google CSE returned %s for %r", r.status_code, query)
+                return []
+            data = r.json()
+            items = data.get("items", []) or []
+            return [it["link"] for it in items if it.get("link")]
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Google CSE failed for %r: %s", query, exc)
+            return []
+
+    def search_google_only(self, player_name: str, country_name: str) -> list[str]:
+        """Realiza UNA query a Google y devuelve las URLs candidatas.
+
+        Pensado para ser invocado desde `ImagePipeline.run_google_fill`,
+        que controla el límite diario de 99 llamadas. Esta función NO
+        sabe nada del contador — solo hace una llamada.
+        """
+        queries = self._build_queries(player_name, country_name)
+        # Usamos solo la primera query (la más específica) para minimizar
+        # consumo de la cuota diaria de Google.
+        if not queries:
+            return []
+        return self._search_google(queries[0])
+
     def _search_wikipedia(self, player_name: str) -> str | None:
         try:
             name_encoded = player_name.title().replace(" ", "_")
             url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{name_encoded}"
-            r = requests.get(url, timeout=WIKI_TIMEOUT, headers={"User-Agent": USER_AGENT})
+            r = requests.get(url, timeout=WIKI_TIMEOUT, headers={"User-Agent": _random_ua()})
             if r.status_code == 200:
                 data = r.json()
                 thumb = data.get("thumbnail", {})
@@ -180,7 +262,7 @@ class PhotoFinder:
             r = requests.get(
                 url,
                 timeout=HTTP_TIMEOUT,
-                headers={"User-Agent": USER_AGENT},
+                headers={"User-Agent": _random_ua()},
                 stream=True,
             )
             if r.status_code != 200:

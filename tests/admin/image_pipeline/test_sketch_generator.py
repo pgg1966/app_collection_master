@@ -132,3 +132,55 @@ def test_crop_uses_generous_margins():
     assert sg.SIDE_MARGIN_RATIO >= 0.30
     assert sg.TOP_MARGIN_RATIO >= 0.60
     assert sg.BOTTOM_MARGIN_RATIO >= 0.40
+
+
+# ----------------------------------------------------------------------
+# Sketch Nivel 4 (Line Art)
+# ----------------------------------------------------------------------
+
+
+def test_level4_output_has_mostly_white_background(tmp_path, generator):
+    """El output de Nivel 4 tiene >60% de píxeles blancos (fondo limpio)."""
+    img_path = tmp_path / "input.jpg"
+    _save_synthetic_image(img_path, w=400, h=500)
+    sketch = generator.generate_sketch(img_path)
+    white_pct = float(np.mean(sketch == 255))
+    assert white_pct > 0.60, f"Esperado >60% blanco, fue {white_pct:.2%}"
+
+
+def test_level4_output_has_clean_black_lines(tmp_path, generator):
+    """El threshold binario produce solo dos valores: 0 (negro) y 255 (blanco)."""
+    img_path = tmp_path / "input.jpg"
+    _save_synthetic_image(img_path, w=400, h=500)
+    sketch = generator.generate_sketch(img_path)
+    unique_values = set(np.unique(sketch).tolist())
+    # Tras threshold binario y resize con INTER_AREA puede haber un par de
+    # valores intermedios en los bordes del resize, pero la enorme mayoría
+    # debe ser puro 0 o puro 255.
+    pure_pixels = float(np.mean((sketch == 0) | (sketch == 255)))
+    assert pure_pixels > 0.95, (
+        f"Esperado >95% píxeles puros (0 o 255), fue {pure_pixels:.2%}; "
+        f"valores únicos: {sorted(unique_values)[:10]}"
+    )
+
+
+def test_level4_parameters_are_configurable():
+    """Los parámetros del Nivel 4 son constantes editables del módulo."""
+    from collections_app.admin.image_pipeline import sketch_generator as sg
+
+    # Kernel impar y razonablemente grande
+    assert sg.SKETCH_BLUR_KERNEL >= 51
+    assert sg.SKETCH_BLUR_KERNEL % 2 == 1
+    # Threshold cerca de 255 para fondo limpio
+    assert 180 <= sg.SKETCH_THRESHOLD <= 245
+    # Engrosado configurable y no negativo
+    assert sg.SKETCH_LINE_THICKNESS >= 0
+
+
+def test_level4_apply_directly_on_blank_image(generator):
+    """Una imagen blanca da un sketch totalmente blanco."""
+    blank = np.full((200, 200, 3), 240, dtype=np.uint8)
+    out = generator._apply_sketch_level4(blank)
+    assert out.shape == (200, 200)
+    # Imagen plana → sin líneas → todo blanco
+    assert float(np.mean(out == 255)) > 0.95
