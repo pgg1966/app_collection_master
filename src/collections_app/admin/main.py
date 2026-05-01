@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QApplication, QTabWidget
 from collections_app.admin.views.cards_abm import CardsAbmView
 from collections_app.admin.views.codes_master_detail import CodesMasterDetailView
 from collections_app.admin.views.collections_abm import CollectionsAbmView
-from collections_app.admin.views.image_generator_view import ImageGeneratorView
+from collections_app.admin.views.crests_view import CrestsView
 from collections_app.core.utils.logging_setup import setup_logging
 from collections_app.core.utils.paths import get_database_path
 from collections_app.shared_ui import (
@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 class AdminMainWindow(MainWindowBase):
-    """Ventana principal del admin con tabs Colecciones / Códigos / Cards."""
+    """Ventana principal del admin con tabs Colecciones / Códigos / Cards / Escudos."""
 
     def __init__(self, db_path: Path) -> None:
         super().__init__(db_path, app_name="Collections — Admin")
@@ -31,13 +31,13 @@ class AdminMainWindow(MainWindowBase):
         self._collections_view = CollectionsAbmView(self.conn)
         self._codes_view = CodesMasterDetailView(self.conn)
         self._cards_view = CardsAbmView(self.conn)
-        self._image_generator_view = ImageGeneratorView(self.conn)
+        self._crests_view = CrestsView(self.conn)
 
         self._tabs = QTabWidget()
         self._tabs.addTab(self._collections_view, self.tr("Colecciones"))
         self._tabs.addTab(self._codes_view, self.tr("Códigos"))
         self._tabs.addTab(self._cards_view, self.tr("Cards"))
-        self._tabs.addTab(self._image_generator_view, self.tr("Generar Imágenes"))
+        self._tabs.addTab(self._crests_view, self.tr("Escudos"))
         self.setCentralWidget(self._tabs)
 
         # Cuando se crea/edita o borra una colección, refrescar el combo

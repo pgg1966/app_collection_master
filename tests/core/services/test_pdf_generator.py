@@ -86,36 +86,35 @@ def test_slot_data_ordered_by_code_order_then_card_number(memory_db, album_setup
     ]
 
 
-def test_slot_data_includes_generated_image_path_when_exists(
-    memory_db, album_setup, tmp_path, monkeypatch
-):
-    """Si el PNG existe en disco, slot.generated_image_path apunta a él."""
-    fake_png = tmp_path / "ARG-1.png"
-    fake_png.write_bytes(b"\x89PNG\r\n\x1a\n")  # mínimo de magic bytes
+def test_slot_data_includes_crest_path_when_exists(memory_db, album_setup, tmp_path, monkeypatch):
+    """Si el escudo existe en disco, slot.crest_path apunta a él."""
+    fake_arg = tmp_path / "ARG.png"
+    fake_arg.write_bytes(b"\x89PNG\r\n\x1a\n")  # mínimo de magic bytes
 
-    def fake_path(_cid, key):
-        return tmp_path / f"{key}.png"
+    def fake_path(code_id):
+        return tmp_path / f"{code_id}.png"
 
     monkeypatch.setattr(
-        "collections_app.core.services.pdf_generator.get_generated_card_path",
+        "collections_app.core.services.pdf_generator.get_crest_path",
         fake_path,
     )
 
     slots = PdfAlbumGenerator(memory_db, album_setup)._build_slot_data()
     by_key = {(s.card.code_id, s.card.card_number): s for s in slots}
-    assert by_key[("ARG", 1)].generated_image_path == fake_png
-    # Las que no tienen archivo: None
-    assert by_key[("ARG", 2)].generated_image_path is None
+    assert by_key[("ARG", 1)].crest_path == fake_arg
+    assert by_key[("ARG", 2)].crest_path == fake_arg
+    # BRA no tiene escudo en disco → None
+    assert by_key[("BRA", 1)].crest_path is None
 
 
-def test_slot_data_image_path_none_when_no_image(memory_db, album_setup, tmp_path, monkeypatch):
-    """Sin PNGs en disco, todas las paths son None."""
+def test_slot_data_crest_path_none_when_no_crest(memory_db, album_setup, tmp_path, monkeypatch):
+    """Sin escudos en disco, todas las paths son None."""
     monkeypatch.setattr(
-        "collections_app.core.services.pdf_generator.get_generated_card_path",
-        lambda _cid, key: tmp_path / f"missing-{key}.png",
+        "collections_app.core.services.pdf_generator.get_crest_path",
+        lambda code_id: tmp_path / f"missing-{code_id}.png",
     )
     slots = PdfAlbumGenerator(memory_db, album_setup)._build_slot_data()
-    assert all(s.generated_image_path is None for s in slots)
+    assert all(s.crest_path is None for s in slots)
 
 
 def test_export_missing_list_creates_txt(memory_db, album_setup, tmp_path):

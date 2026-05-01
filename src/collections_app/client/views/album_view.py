@@ -23,12 +23,13 @@ from PySide6.QtWidgets import (
 )
 
 from collections_app.core.models import Collection
+from collections_app.core.repositories import CodesLinesRepository
 from collections_app.core.services import (
     AlbumConfig,
     InventoryService,
     PdfAlbumGenerator,
 )
-from collections_app.core.utils.paths import get_generated_cards_dir
+from collections_app.core.utils.paths import get_crest_path
 from collections_app.shared_ui.theme import Spacing
 
 logger = logging.getLogger(__name__)
@@ -208,30 +209,38 @@ class AlbumView(QWidget):
     # ------------------------------------------------------------------
 
     def _refresh_image_count(self) -> None:
+        """Muestra cuántos códigos de la colección ya tienen escudo."""
         assert self.collection.collection_id is not None
         cid: int = self.collection.collection_id
-        gen_dir = get_generated_cards_dir(cid)
-        n_images = sum(1 for _ in gen_dir.glob("*.png"))
         total_cards = InventoryService(self.conn).get_stats(cid)["total_cards"]
         if total_cards == 0:
             self._image_count_label.setText(
                 self.tr("La colección no tiene cards en el catálogo todavía.")
             )
             return
-        if n_images == 0:
+        lines = CodesLinesRepository(self.conn).list_by_header(self.collection.code_header_id)
+        total_codes = len(lines)
+        with_crest = sum(1 for line in lines if get_crest_path(line.code_id).exists())
+        if total_codes == 0:
+            self._image_count_label.setText(
+                self.tr("La colección no tiene códigos definidos todavía.")
+            )
+            return
+        if with_crest == 0:
             self._image_count_label.setText(
                 self.tr(
-                    "No hay imágenes generadas. Generalas desde el Admin " "(tab Generar Imágenes)."
+                    "No hay escudos cargados. Configurá los escudos desde el "
+                    "Admin (tab Escudos)."
                 )
             )
             return
-        pct = (n_images / total_cards * 100) if total_cards > 0 else 0
+        pct = (with_crest / total_codes * 100) if total_codes > 0 else 0
         self._image_count_label.setText(
-            self.tr("Imágenes generadas: {n} / {t} ({pct:.1f}%)").format(
-                n=n_images, t=int(total_cards), pct=pct
+            self.tr("Escudos cargados: {n} / {t} ({pct:.1f}%)").format(
+                n=with_crest, t=total_codes, pct=pct
             )
             + "\n"
-            + self.tr("Las cards sin imagen mostrarán solo número y nombre.")
+            + self.tr("Los códigos sin escudo se renderizan solo con número y nombre.")
         )
 
     # ------------------------------------------------------------------

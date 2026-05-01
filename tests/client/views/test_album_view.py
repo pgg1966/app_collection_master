@@ -45,33 +45,33 @@ def test_album_view_loads_without_error(qtbot, view):
     assert view._duplicates_button is not None
 
 
-def test_image_count_shows_zero_when_no_images(
+def test_image_count_shows_zero_when_no_crests(
     qtbot, memory_db, album_setup, tmp_path, monkeypatch
 ):
-    """Sin PNGs en disco, muestra mensaje de 'no hay imágenes'."""
+    """Sin escudos en disco, muestra mensaje de 'no hay escudos cargados'."""
     monkeypatch.setattr(
-        "collections_app.client.views.album_view.get_generated_cards_dir",
-        lambda _cid: tmp_path,
+        "collections_app.client.views.album_view.get_crest_path",
+        lambda code_id: tmp_path / f"{code_id}.png",
     )
     v = AlbumView(memory_db, album_setup)
     qtbot.addWidget(v)
     text = v._image_count_label.text().lower()
-    assert "no hay imágenes" in text
+    assert "escudos" in text
+    assert "no hay" in text
 
 
-def test_image_count_shows_generated_images(qtbot, memory_db, album_setup, tmp_path, monkeypatch):
-    """Si hay PNGs en el dir generated_cards, los contabiliza."""
-    (tmp_path / "ARG-1.png").touch()
-    (tmp_path / "ARG-2.png").touch()
+def test_image_count_shows_loaded_crests(qtbot, memory_db, album_setup, tmp_path, monkeypatch):
+    """Si hay escudos en el dir crests para ARG, lo contabiliza (1 de 1)."""
+    (tmp_path / "ARG.png").touch()
     monkeypatch.setattr(
-        "collections_app.client.views.album_view.get_generated_cards_dir",
-        lambda _cid: tmp_path,
+        "collections_app.client.views.album_view.get_crest_path",
+        lambda code_id: tmp_path / f"{code_id}.png",
     )
     v = AlbumView(memory_db, album_setup)
     qtbot.addWidget(v)
     text = v._image_count_label.text()
-    # 2 imágenes generadas, 3 cards en catálogo
-    assert "2 / 3" in text
+    # En album_setup hay solo el código ARG → 1 de 1
+    assert "1 / 1" in text
 
 
 def test_generate_unique_calls_generator(qtbot, memory_db, album_setup, tmp_path, monkeypatch):
@@ -205,7 +205,7 @@ def test_export_duplicates_calls_generator(qtbot, memory_db, album_setup, tmp_pa
 def test_set_active_collection_refreshes_image_count(
     qtbot, memory_db, album_setup, sample_code_header, tmp_path, monkeypatch
 ):
-    """Cambiar la colección activa refresca el contador de imágenes."""
+    """Cambiar la colección activa refresca el contador de escudos."""
     from collections_app.core.models import Collection
     from collections_app.core.repositories import CollectionsRepository
 
@@ -221,18 +221,14 @@ def test_set_active_collection_refreshes_image_count(
     )
     memory_db.commit()
 
-    cid_to_dir = {album_setup.collection_id: tmp_path / "a", other.collection_id: tmp_path / "b"}
-    for d in cid_to_dir.values():
-        d.mkdir()
-
     monkeypatch.setattr(
-        "collections_app.client.views.album_view.get_generated_cards_dir",
-        lambda cid: cid_to_dir[cid],
+        "collections_app.client.views.album_view.get_crest_path",
+        lambda code_id: tmp_path / f"{code_id}.png",
     )
     view = AlbumView(memory_db, album_setup)
     qtbot.addWidget(view)
     initial = view._image_count_label.text()
     view.set_active_collection(other)
     new_text = view._image_count_label.text()
-    # El texto cambia (al menos por el total de cards o el placeholder)
+    # El texto cambia: la colección "Other" no tiene cards
     assert initial != new_text

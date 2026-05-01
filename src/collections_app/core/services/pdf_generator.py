@@ -1,15 +1,20 @@
-"""Generador de álbum PDF imprimible (únicas + repetidas) con sketches.
+"""Generador de álbum PDF imprimible (únicas + repetidas) usando escudos.
 
-Usa las imágenes generadas por el `ImagePipeline` del admin (un PNG por
-card en `get_generated_card_path()`). Si la imagen no existe, dibuja un
-slot "esquemático" con el número de card grande.
+Cada slot del álbum muestra:
+  - Fondo coloreado (celeste si la card está, blanco hueso si falta).
+  - El ESCUDO del code_id (un PNG por código en `get_crest_path()`),
+    centrado y con transparencia.
+  - Línea separadora.
+  - "#NUMERO  NOMBRE_JUGADOR" debajo.
+  - Badge rojo con "x{N}" en el modo "duplicates".
 
 Layout A4 vertical:
   - Margen exterior 10mm.
-  - Header rojo de 12mm con nombre del grupo.
+  - Header oscuro de 12mm con nombre del grupo + número de página.
   - Grilla 4×3 cards por defecto (configurable).
-  - Cada slot: imagen + label "#NUM NOMBRE" debajo.
   - Footer 6mm con colección + fecha.
+
+Cada nuevo `code_id` empieza en una página nueva.
 
 reportlab usa puntos como unidad nativa (1pt = 1/72 inch). Las constantes
 en mm se convierten via `* mm`.
@@ -22,9 +27,10 @@ from dataclasses import dataclass, field
 from itertools import groupby
 from pathlib import Path
 
-from reportlab.lib.colors import Color, HexColor, white
+from reportlab.lib.colors import HexColor, white
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
+from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
 from collections_app.core.models import Card, Collection, InventoryItem
@@ -34,7 +40,7 @@ from collections_app.core.repositories import (
     InventoryRepository,
 )
 from collections_app.core.utils.datetime_helpers import format_for_display, utc_now
-from collections_app.core.utils.paths import get_generated_card_path
+from collections_app.core.utils.paths import get_crest_path
 
 logger = logging.getLogger(__name__)
 
@@ -46,21 +52,25 @@ GAP_MM = 4
 HEADER_H_MM = 12
 LABEL_H_MM = 9
 FOOTER_H_MM = 6
+SEPARATOR_PAD_MM = 1.5
 
 # Card aspect ratio (Adrenalyn): 9 alto × 7 ancho.
 CARD_RATIO_H_OVER_W = 9 / 7
 
+# Fracción del slot que ocupa el escudo (alto)
+CREST_SCALE = 0.55
+
 # Colores
-COLOR_HEADER_BG = HexColor("#c8102e")
+COLOR_HEADER_BG = HexColor("#2c3e50")
 COLOR_HEADER_FG = white
-COLOR_OWNED_TINT = HexColor("#d4edda")  # tinte verde muy claro (cards sin imagen)
-COLOR_MISSING_BG = HexColor("#e8e8e8")
-COLOR_MISSING_OVERLAY = Color(0.4, 0.4, 0.4, alpha=0.5)
+COLOR_OWNED_BG = HexColor("#b8d4e8")  # celeste
+COLOR_MISSING_BG = HexColor("#f5f5f0")  # blanco hueso
 COLOR_BADGE = HexColor("#c8102e")
 COLOR_BADGE_FG = white
 COLOR_BORDER = HexColor("#404040")
 COLOR_LABEL_FG = HexColor("#1f1f1f")
 COLOR_FOOTER_FG = HexColor("#606060")
+COLOR_SEPARATOR = HexColor("#909090")
 
 MAX_NAME_CHARS = 22
 
@@ -84,7 +94,7 @@ class CardSlotData:
     inventory_item: InventoryItem | None
     code_name: str
     code_order: int
-    generated_image_path: Path | None
+    crest_path: Path | None
 
     @property
     def is_owned(self) -> bool:
@@ -115,6 +125,7 @@ class PdfAlbumGenerator:
         self.conn = conn
         self.collection = collection
         self.config = config or AlbumConfig()
+        self._crest_cache: dict[str, ImageReader | None] = {}
 
     # ------------------------------------------------------------------
     # API pública
@@ -192,7 +203,7 @@ class PdfAlbumGenerator:
     # ------------------------------------------------------------------
 
     def _build_slot_data(self) -> list[CardSlotData]:
-        """Carga catálogo + inventory + lookup de imagen y code_name."""
+        """Carga catálogo + inventory + lookup de escudo y code_name."""
         assert self.collection.collection_id is not None
         cid: int = self.collection.collection_id
 
@@ -207,16 +218,15 @@ class PdfAlbumGenerator:
         slots: list[CardSlotData] = []
         for card in cards:
             code_name, code_order = code_meta.get(card.code_id, (card.code_id, 0))
-            img_path = get_generated_card_path(cid, card.card_key)
+            crest_path = get_crest_path(card.code_id)
             slot = CardSlotData(
                 card=card,
                 inventory_item=inv.get((card.code_id, card.card_number)),
                 code_name=code_name,
                 code_order=code_order,
-                generated_image_path=img_path if img_path.exists() else None,
+                crest_path=crest_path if crest_path.exists() else None,
             )
             slots.append(slot)
-        # Ordenar por code_order, después por card_number (orden visual estable)
         slots.sort(key=lambda s: (s.code_order, s.card.code_id, s.card.card_number))
         return slots
 
@@ -230,7 +240,6 @@ class PdfAlbumGenerator:
 
     def _group_by_code(self, slots: list[CardSlotData]) -> SlotsByGroup:
         result = SlotsByGroup()
-        # itertools.groupby requiere que el input ya esté ordenado por la key
         ordered = sorted(slots, key=lambda s: (s.code_order, s.card.code_id))
         for code_id, group in groupby(ordered, key=lambda s: s.card.code_id):
             group_list = list(group)
@@ -254,12 +263,10 @@ class PdfAlbumGenerator:
         c = canvas.Canvas(str(output_path), pagesize=A4)
         page_w_pt, page_h_pt = A4
 
-        # Si no hay grupos, página única con mensaje
         if not groups.groups:
-            if empty_message is not None:
-                self._draw_empty_page(c, page_w_pt, page_h_pt, empty_message)
-            else:
-                self._draw_empty_page(c, page_w_pt, page_h_pt, "No hay cards para mostrar.")
+            self._draw_empty_page(
+                c, page_w_pt, page_h_pt, empty_message or "No hay cards para mostrar."
+            )
             c.showPage()
             c.save()
             return
@@ -270,7 +277,6 @@ class PdfAlbumGenerator:
         rows = self.config.rows
         slots_per_page = cols * rows
 
-        # Geometría calculada (en puntos)
         margin_pt = MARGIN_MM * mm
         gap_pt = GAP_MM * mm
         header_h_pt = HEADER_H_MM * mm
@@ -281,7 +287,6 @@ class PdfAlbumGenerator:
         card_w = available_w / cols
         card_h = card_w * CARD_RATIO_H_OVER_W
 
-        # Si la grilla no cabe en alto, ajustamos card_h al máximo posible
         available_h = (
             page_h_pt
             - 2 * margin_pt
@@ -293,17 +298,19 @@ class PdfAlbumGenerator:
         max_card_h = available_h / rows
         if card_h > max_card_h:
             card_h = max_card_h
-            # Mantener ratio: recalcular ancho
             card_w = card_h / CARD_RATIO_H_OVER_W
 
-        for code_id, code_name, group_slots in groups.groups:
-            del code_id  # solo se usa en el header como `code_name`
+        page_num = 0
+        for _, code_name, group_slots in groups.groups:
             slot_on_page = slots_per_page  # fuerza nueva página al inicio del grupo
             for slot in group_slots:
                 if slot_on_page >= slots_per_page:
                     if processed > 0:
                         c.showPage()
-                    self._draw_group_header(c, code_name, page_w_pt, page_h_pt, header_h_pt)
+                    page_num += 1
+                    self._draw_group_header(
+                        c, code_name, page_num, page_w_pt, page_h_pt, header_h_pt
+                    )
                     self._draw_footer(c, page_w_pt, footer_h_pt)
                     slot_on_page = 0
 
@@ -334,7 +341,6 @@ class PdfAlbumGenerator:
                 processed += 1
                 if on_progress is not None:
                     on_progress(processed, total_slots)
-            # Forzar nueva página al final de cada grupo
         c.showPage()
         c.save()
 
@@ -348,6 +354,7 @@ class PdfAlbumGenerator:
         self,
         c: canvas.Canvas,
         group_name: str,
+        page_num: int,
         page_w: float,
         page_h: float,
         header_h: float,
@@ -360,7 +367,9 @@ class PdfAlbumGenerator:
         c.rect(x0, y0, bar_w, header_h, stroke=0, fill=1)
         c.setFillColor(COLOR_HEADER_FG)
         c.setFont("Helvetica-Bold", 12)
-        c.drawCentredString(page_w / 2, y0 + header_h / 2 - 4, group_name)
+        c.drawString(x0 + 4, y0 + header_h / 2 - 4, group_name)
+        c.setFont("Helvetica", 9)
+        c.drawRightString(x0 + bar_w - 4, y0 + header_h / 2 - 3, f"Pág. {page_num}")
 
     def _draw_footer(self, c: canvas.Canvas, page_w: float, footer_h: float) -> None:
         margin_pt = MARGIN_MM * mm
@@ -381,76 +390,86 @@ class PdfAlbumGenerator:
         show_badge: bool,
         badge_count: int,
     ) -> None:
-        # Fondo del slot
-        if slot.is_owned and slot.generated_image_path is None:
-            c.setFillColor(COLOR_OWNED_TINT)
-            c.rect(x, y, w, h, stroke=0, fill=1)
-        elif not slot.is_owned and slot.generated_image_path is None:
-            c.setFillColor(COLOR_MISSING_BG)
-            c.rect(x, y, w, h, stroke=0, fill=1)
+        # Fondo según estado
+        bg_color = COLOR_OWNED_BG if slot.is_owned else COLOR_MISSING_BG
+        c.setFillColor(bg_color)
+        c.rect(x, y, w, h, stroke=0, fill=1)
 
-        # Imagen si existe
-        if slot.generated_image_path is not None:
+        # Escudo (PNG con alpha) centrado
+        crest = self._get_crest_image(slot.card.code_id)
+        if crest is not None:
+            crest_h = h * CREST_SCALE
+            crest_w = crest_h
+            cx = x + (w - crest_w) / 2
+            cy = y + (h - crest_h) / 2 + label_h / 4  # leve offset hacia arriba
             try:
-                from reportlab.lib.utils import ImageReader  # noqa: PLC0415
-
                 c.drawImage(
-                    ImageReader(str(slot.generated_image_path)),
-                    x,
-                    y,
-                    width=w,
-                    height=h,
+                    crest,
+                    cx,
+                    cy,
+                    width=crest_w,
+                    height=crest_h,
                     preserveAspectRatio=True,
                     anchor="c",
                     mask="auto",
                 )
-            except Exception:  # noqa: BLE001
-                # Si falla la carga, fallback al rectángulo plano
-                c.setFillColor(COLOR_OWNED_TINT if slot.is_owned else COLOR_MISSING_BG)
-                c.rect(x, y, w, h, stroke=0, fill=1)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("No se pudo dibujar escudo de %s: %s", slot.card.code_id, exc)
 
-            # Overlay gris semitransparente si la card falta
-            if not slot.is_owned:
-                c.setFillColor(COLOR_MISSING_OVERLAY)
-                c.rect(x, y, w, h, stroke=0, fill=1)
+        # Línea separadora horizontal a 1/4 desde abajo
+        sep_y = y + h * 0.22
+        c.setStrokeColor(COLOR_SEPARATOR)
+        c.setLineWidth(0.5)
+        c.line(x + SEPARATOR_PAD_MM * mm, sep_y, x + w - SEPARATOR_PAD_MM * mm, sep_y)
 
-        # Número grande centrado si no hay imagen (slot esquemático)
-        if slot.generated_image_path is None:
-            c.setFillColor(COLOR_LABEL_FG)
-            c.setFont("Helvetica-Bold", 18)
-            c.drawCentredString(
-                x + w / 2,
-                y + h / 2 - 6,
-                f"#{slot.card.card_number}",
-            )
+        # Texto: #NUM NOMBRE bajo el separador
+        c.setFillColor(COLOR_LABEL_FG)
+        c.setFont("Helvetica-Bold", 7.5)
+        label_text = (
+            f"#{slot.card.card_number} {self._truncate(slot.card.card_name, MAX_NAME_CHARS)}"
+        )
+        c.drawCentredString(x + w / 2, y + h * 0.10, label_text)
 
         # Marco
         c.setStrokeColor(COLOR_BORDER)
         c.setLineWidth(0.5)
         c.rect(x, y, w, h, stroke=1, fill=0)
 
-        # Label (#NUM NOMBRE) debajo
-        label_text = (
-            f"#{slot.card.card_number} {self._truncate(slot.card.card_name, MAX_NAME_CHARS)}"
-        )
-        c.setFillColor(COLOR_LABEL_FG)
-        c.setFont("Helvetica", 6.5)
-        c.drawCentredString(x + w / 2, y - label_h + 3, label_text)
+        # Label adicional debajo del slot (opcional, permite respiración)
+        # — Mantenemos el label_h pero vacío para consistencia geométrica
+        del label_h  # uso reservado para layout vertical, no dibujamos texto extra
 
-        # Badge en esquina superior derecha
+        # Badge en esquina superior derecha (modo duplicates)
         if show_badge and badge_count > 0:
             badge_r = min(w, h) * 0.10
-            cx = x + w - badge_r - 1
-            cy = y + h - badge_r - 1
+            cx_b = x + w - badge_r - 1
+            cy_b = y + h - badge_r - 1
             c.setFillColor(COLOR_BADGE)
-            c.circle(cx, cy, badge_r, stroke=0, fill=1)
+            c.circle(cx_b, cy_b, badge_r, stroke=0, fill=1)
             c.setFillColor(COLOR_BADGE_FG)
             c.setFont("Helvetica-Bold", 7)
-            c.drawCentredString(cx, cy - 2, f"x{badge_count}")
+            c.drawCentredString(cx_b, cy_b - 2, f"x{badge_count}")
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _get_crest_image(self, code_id: str) -> ImageReader | None:
+        """Carga (con cache por instancia) el escudo para un code_id."""
+        if code_id in self._crest_cache:
+            return self._crest_cache[code_id]
+        path = get_crest_path(code_id)
+        result: ImageReader | None
+        if path.exists():
+            try:
+                result = ImageReader(str(path))
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("ImageReader falló para %s: %s", path, exc)
+                result = None
+        else:
+            result = None
+        self._crest_cache[code_id] = result
+        return result
 
     @staticmethod
     def _truncate(text: str, max_chars: int) -> str:

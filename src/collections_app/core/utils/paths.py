@@ -41,29 +41,17 @@ def get_schema_dir() -> Path:
     return Path(__file__).resolve().parent.parent / "db" / "schema"
 
 
-def get_photo_cache_dir() -> Path:
-    """Directorio compartido donde el admin cachea fotos descargadas de internet.
+def get_crests_dir() -> Path:
+    """Directorio donde el admin guarda los escudos por code_id.
 
-    Las fotos crudas viven acá indexadas por `{country_code}_{name_slug}`,
-    no por card_key, así un mismo jugador en dos colecciones distintas
-    reusa la misma foto sin volver a buscarla.
+    Un solo escudo por código (ej. `ARG.png`, `BRA.png`), compartido
+    entre TODAS las colecciones que usen ese mismo header de códigos.
     """
-    d = get_app_data_dir() / "photo_cache"
+    d = get_app_data_dir() / "crests"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
-def get_generated_cards_dir(collection_id: int) -> Path:
-    """Directorio donde el admin guarda los sketches generados por colección.
-
-    Cada colección tiene su propio subdirectorio bajo
-    `{app_data}/generated_cards/{collection_id}/`.
-    """
-    d = get_app_data_dir() / "generated_cards" / str(collection_id)
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def get_generated_card_path(collection_id: int, card_key: str) -> Path:
-    """Path al sketch generado para una card específica (puede no existir aún)."""
-    return get_generated_cards_dir(collection_id) / f"{card_key}.png"
+def get_crest_path(code_id: str) -> Path:
+    """Path al escudo de un code_id específico (puede no existir aún)."""
+    return get_crests_dir() / f"{code_id}.png"
