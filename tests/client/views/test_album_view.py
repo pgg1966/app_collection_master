@@ -1,6 +1,5 @@
 """Tests del AlbumView."""
 
-
 import pytest
 
 from collections_app.client.views.album_view import AlbumView

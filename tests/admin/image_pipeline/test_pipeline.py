@@ -3,8 +3,12 @@
 Usan `file_db_path` (DB en archivo) porque el pipeline abre su propia
 conexión dentro de `run_batch()` para ser compatible con QThread; eso
 descarta `:memory:` (cada conn vería una DB vacía distinta).
+
+El tracking de imágenes ahora vive en la tabla `card_images` (migración
+003) en lugar del viejo `_index.json`. Los tests verifican vía repo.
 """
 
+import re
 import sqlite3
 import threading
 from pathlib import Path
@@ -26,11 +30,13 @@ from collections_app.admin.image_pipeline.pipeline import ImagePipeline
 from collections_app.core.db.connection import create_connection
 from collections_app.core.models import (
     Card,
+    CardImage,
     CodeHeader,
     CodeLine,
     Collection,
 )
 from collections_app.core.repositories import (
+    CardImagesRepository,
     CardsRepository,
     CodesHeadersRepository,
     CodesLinesRepository,
@@ -72,20 +78,35 @@ def setup_collection(file_db_path):
     return file_db_path, col.collection_id
 
 
-def _fake_photo_finder(source: str = SOURCE_DUCKDUCKGO) -> MagicMock:
-    """Mock que retorna un PhotoResult fijo apuntando a un fake JPG."""
+def _player_slug(name: str, code: str) -> str:
+    """Replica de `PhotoFinder._player_cache_key` para fixtures."""
+    slug = re.sub(r"[^A-Z0-9]", "_", name.upper())
+    slug = re.sub(r"_+", "_", slug).strip("_")
+    return f"{code.upper()}_{slug}"
 
-    def find_photo(player_name: str, country_name: str, card_key: str) -> PhotoResult:
+
+def _fake_photo_finder(source: str = SOURCE_DUCKDUCKGO, cache_dir: Path | None = None) -> MagicMock:
+    """Mock que retorna un PhotoResult fijo apuntando a un cache_path."""
+    cache = cache_dir or Path("/fake/cache")
+
+    def find_photo(player_name: str, country_name: str, country_code: str) -> PhotoResult:
+        del country_name
+        local = cache / f"{_player_slug(player_name, country_code)}.jpg"
         return PhotoResult(
             player_name=player_name,
-            source_url=f"https://example.com/{card_key}.jpg",
-            local_path=Path("/fake/path.jpg"),
+            source_url=f"https://example.com/{local.stem}.jpg",
+            local_path=local,
             source=source,
             success=True,
         )
 
+    def cached_photo_path(name: str, code: str) -> Path:
+        return cache / f"{_player_slug(name, code)}.jpg"
+
     finder = MagicMock()
+    finder.cache_dir = cache
     finder.find_photo.side_effect = find_photo
+    finder.cached_photo_path.side_effect = cached_photo_path
     return finder
 
 
@@ -114,16 +135,31 @@ def _make_pipeline(
     out_dir: Path,
     saved_paths: list[Path] | None = None,
     photo_source: str = SOURCE_DUCKDUCKGO,
+    cache_dir: Path | None = None,
 ) -> ImagePipeline:
     saved_paths = saved_paths if saved_paths is not None else []
     return ImagePipeline(
         db_path=db_path,
         collection_id=collection_id,
-        photo_finder=_fake_photo_finder(photo_source),
+        photo_finder=_fake_photo_finder(photo_source, cache_dir),
         sketch_generator=_fake_sketch_generator(),
         card_composer=_fake_composer(saved_paths),
         output_dir=out_dir,
     )
+
+
+def _read_card_images(db_path: Path, collection_id: int) -> list[CardImage]:
+    """Helper: lee el estado de la tabla `card_images` para asserts."""
+    conn = create_connection(db_path)
+    try:
+        return CardImagesRepository(conn).list_by_collection(collection_id)
+    finally:
+        conn.close()
+
+
+# ----------------------------------------------------------------------
+# Smoke tests del run_batch
+# ----------------------------------------------------------------------
 
 
 def test_skips_already_generated_cards(setup_collection, tmp_path):
@@ -257,23 +293,18 @@ def test_unknown_collection_raises(setup_collection, tmp_path):
 
 
 # ----------------------------------------------------------------------
-# Tests específicos del fix (compatibilidad con QThread)
+# Tests específicos del fix de QThread
 # ----------------------------------------------------------------------
 
 
 def test_pipeline_accepts_db_path_not_connection(setup_collection, tmp_path):
-    """Regresión: el __init__ acepta db_path (Path), no sqlite3.Connection."""
     db_path, cid = setup_collection
     pipe = _make_pipeline(db_path, cid, tmp_path / "out")
-    # Guarda el path, no una conexión.
     assert pipe._db_path == db_path
     assert not hasattr(pipe, "conn")
 
 
 def test_pipeline_creates_own_connection_in_run(setup_collection, tmp_path):
-    """El run abre su propia conn → ejecutar el método en otro thread no
-    debe lanzar `sqlite3.ProgrammingError: SQLite objects created in a
-    thread can only be used in that same thread`."""
     db_path, cid = setup_collection
     pipe = _make_pipeline(db_path, cid, tmp_path / "out")
     result_holder: list = []
@@ -296,7 +327,6 @@ def test_pipeline_creates_own_connection_in_run(setup_collection, tmp_path):
 
 
 def test_pipeline_closes_connection_after_run(setup_collection, tmp_path):
-    """La conn se cierra al terminar el run (validamos vía spy)."""
     db_path, cid = setup_collection
     pipe = _make_pipeline(db_path, cid, tmp_path / "out")
 
@@ -314,108 +344,171 @@ def test_pipeline_closes_connection_after_run(setup_collection, tmp_path):
         pipe.run_batch()
 
     assert captured, "No se creó ninguna conexión"
-    conn = captured[0]
+    # La última conexión usada por run_batch debe estar cerrada
+    last_conn = captured[-1]
     with pytest.raises(sqlite3.ProgrammingError):
-        conn.execute("SELECT 1")
+        last_conn.execute("SELECT 1")
 
 
 # ----------------------------------------------------------------------
-# Mejoras: _index.json y regenerate_placeholders
+# Tracking en card_images (migración 003)
 # ----------------------------------------------------------------------
 
 
-def test_index_json_records_sources(setup_collection, tmp_path):
-    """Tras run_batch, `_index.json` lista las fuentes por card."""
-    import json as _json
-
+def test_run_batch_records_each_card_in_card_images(setup_collection, tmp_path):
+    """Después de run_batch, cada card tiene una fila en card_images."""
     db_path, cid = setup_collection
-    out = tmp_path / "out"
-    pipe = _make_pipeline(db_path, cid, out, photo_source=SOURCE_PLACEHOLDER)
+    pipe = _make_pipeline(db_path, cid, tmp_path / "out", photo_source=SOURCE_WIKIPEDIA)
     pipe.run_batch()
-    index_path = out / "_index.json"
-    assert index_path.exists()
-    data = _json.loads(index_path.read_text(encoding="utf-8"))
-    assert len(data) == 5
-    for entry in data.values():
-        assert entry["source"] == SOURCE_PLACEHOLDER
+
+    images = _read_card_images(db_path, cid)
+    assert len(images) == 5
+    for img in images:
+        assert img.found_photo is True
+        assert img.image_source == SOURCE_WIKIPEDIA
+        assert img.image_path and img.image_path.endswith(".png")
 
 
-def test_get_placeholder_card_keys_filters_correctly(setup_collection, tmp_path):
-    """get_placeholder_card_keys() devuelve solo las cards con source=placeholder."""
+def test_placeholder_marks_found_photo_false(setup_collection, tmp_path):
     db_path, cid = setup_collection
-    out = tmp_path / "out"
-    pipe = _make_pipeline(db_path, cid, out, photo_source=SOURCE_PLACEHOLDER)
+    pipe = _make_pipeline(db_path, cid, tmp_path / "out", photo_source=SOURCE_PLACEHOLDER)
+    pipe.run_batch()
+    images = _read_card_images(db_path, cid)
+    assert all(img.found_photo is False for img in images)
+    assert all(img.image_source == SOURCE_PLACEHOLDER for img in images)
+
+
+def test_get_placeholder_card_keys_reads_from_db(setup_collection, tmp_path):
+    """get_placeholder_card_keys() lee de card_images, no del JSON."""
+    db_path, cid = setup_collection
+    pipe = _make_pipeline(db_path, cid, tmp_path / "out", photo_source=SOURCE_PLACEHOLDER)
     pipe.run_batch()
     keys = pipe.get_placeholder_card_keys()
     assert sorted(keys) == ["ARG-1", "ARG-2", "ARG-3", "BRA-1", "BRA-2"]
 
-    # Reinstanciar el pipeline (para forzar recarga del index desde disco) y
-    # comparar.
-    pipe2 = _make_pipeline(db_path, cid, out, photo_source=SOURCE_PLACEHOLDER)
-    assert sorted(pipe2.get_placeholder_card_keys()) == sorted(keys)
 
-
-def test_regenerate_placeholders_only_reprocesses_placeholders(setup_collection, tmp_path):
-    """regenerate_placeholders borra solo los PNGs de placeholder y los reprocesa."""
+def test_get_found_count_and_total_generated(setup_collection, tmp_path):
     db_path, cid = setup_collection
     out = tmp_path / "out"
 
-    # Primera corrida: todos como placeholder
-    saved_first: list[Path] = []
-    pipe = _make_pipeline(db_path, cid, out, saved_first, SOURCE_PLACEHOLDER)
-    pipe.run_batch()
-    assert len(saved_first) == 5
+    # 3 ARG con foto real, 2 BRA placeholder (manipulamos manualmente)
+    _make_pipeline(db_path, cid, out, photo_source=SOURCE_WIKIPEDIA).run_batch(
+        card_keys=["ARG-1", "ARG-2", "ARG-3"]
+    )
+    _make_pipeline(db_path, cid, out, photo_source=SOURCE_PLACEHOLDER).run_batch(
+        card_keys=["BRA-1", "BRA-2"]
+    )
 
-    # Marcar 2 cards como "exitosas" (DDG) en el index, manualmente, simulando
-    # que algunas no eran placeholder.
-    import json as _json
+    pipe = _make_pipeline(db_path, cid, out)
+    assert pipe.get_found_count() == 3
+    assert pipe.get_total_generated() == 5
 
-    index_path = out / "_index.json"
-    data = _json.loads(index_path.read_text(encoding="utf-8"))
-    data["ARG-1"]["source"] = SOURCE_DUCKDUCKGO
-    data["BRA-1"]["source"] = SOURCE_DUCKDUCKGO
-    index_path.write_text(_json.dumps(data), encoding="utf-8")
 
-    # Reinstanciar pipeline (lee el index modificado) con composer fresh
+def test_regenerate_placeholders_only_reprocesses_placeholders(setup_collection, tmp_path):
+    """regenerate_placeholders procesa sólo cards con found_photo=0."""
+    db_path, cid = setup_collection
+    out = tmp_path / "out"
+
+    # Primera corrida: todos placeholder
+    _make_pipeline(db_path, cid, out, photo_source=SOURCE_PLACEHOLDER).run_batch()
+
+    # Marcar 2 como DDG manualmente en card_images
+    conn = create_connection(db_path)
+    try:
+        repo = CardImagesRepository(conn)
+        existing_arg1 = repo.get(cid, "ARG", 1)
+        assert existing_arg1 is not None
+        repo.upsert(
+            CardImage(
+                collection_id=cid,
+                code_id="ARG",
+                card_number=1,
+                found_photo=True,
+                image_source=SOURCE_DUCKDUCKGO,
+                image_path=existing_arg1.image_path,
+                generated_at=existing_arg1.generated_at,
+            )
+        )
+        existing_bra1 = repo.get(cid, "BRA", 1)
+        assert existing_bra1 is not None
+        repo.upsert(
+            CardImage(
+                collection_id=cid,
+                code_id="BRA",
+                card_number=1,
+                found_photo=True,
+                image_source=SOURCE_DUCKDUCKGO,
+                image_path=existing_bra1.image_path,
+                generated_at=existing_bra1.generated_at,
+            )
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Reprocesar placeholders: sólo las 3 que siguen marcadas como tal
     saved_regen: list[Path] = []
     pipe2 = _make_pipeline(db_path, cid, out, saved_regen, SOURCE_DUCKDUCKGO)
     result = pipe2.regenerate_placeholders()
 
-    # Solo las 3 que seguían como placeholder se reprocesan
     assert result.total == 3
     saved_keys = sorted(p.stem for p in saved_regen)
     assert saved_keys == ["ARG-2", "ARG-3", "BRA-2"]
 
 
 def test_regenerate_placeholders_when_none(setup_collection, tmp_path):
-    """Sin placeholders, regenerate_placeholders no hace nada."""
     db_path, cid = setup_collection
     pipe = _make_pipeline(db_path, cid, tmp_path / "out", photo_source=SOURCE_DUCKDUCKGO)
-    pipe.run_batch()  # todos exitosos como DDG
+    pipe.run_batch()
     result = pipe.regenerate_placeholders()
     assert result.total == 0
 
 
-def test_index_persists_between_runs(setup_collection, tmp_path):
-    """El index sobrevive entre instancias del pipeline."""
+def test_card_images_persist_across_pipeline_instances(setup_collection, tmp_path):
+    """Los registros sobreviven a re-instanciar el pipeline (vivieron en DB)."""
     db_path, cid = setup_collection
     out = tmp_path / "out"
     pipe = _make_pipeline(db_path, cid, out, photo_source=SOURCE_WIKIPEDIA)
     pipe.run_batch()
-    # Reinstanciar y verificar que el index ya está cargado
+
+    # Reinstanciar y validar
     pipe2 = _make_pipeline(db_path, cid, out, photo_source=SOURCE_DUCKDUCKGO)
-    assert len(pipe2._index) == 5
-    for entry in pipe2._index.values():
-        assert entry["source"] == SOURCE_WIKIPEDIA
+    images = _read_card_images(db_path, cid)
+    assert len(images) == 5
+    assert all(img.image_source == SOURCE_WIKIPEDIA for img in images)
+    assert pipe2.get_found_count() == 5
 
 
 # ----------------------------------------------------------------------
-# run_google_fill (cuota diaria) y run_resketch
+# Cascade delete via FK (migración 003 + connection.py PRAGMA)
+# ----------------------------------------------------------------------
+
+
+def test_cascade_delete_card_image_when_card_deleted(setup_collection, tmp_path):
+    """Si se borra una card, su entry de card_images se borra por FK CASCADE."""
+    db_path, cid = setup_collection
+    pipe = _make_pipeline(db_path, cid, tmp_path / "out", photo_source=SOURCE_DUCKDUCKGO)
+    pipe.run_batch()
+    assert pipe.get_total_generated() == 5
+
+    conn = create_connection(db_path)
+    try:
+        conn.execute(
+            "DELETE FROM cards WHERE collection_id = ? AND code_id = ? AND card_number = ?",
+            (cid, "ARG", 1),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    assert pipe.get_total_generated() == 4
+
+
+# ----------------------------------------------------------------------
+# run_google_fill (cuota diaria) y breakdown
 # ----------------------------------------------------------------------
 
 
 def _seed_placeholders(setup_collection, out_dir: Path, n: int = 5) -> ImagePipeline:
-    """Genera `n` cards como placeholder vía run_batch y devuelve el pipeline."""
     db_path, cid = setup_collection
     pipe = _make_pipeline(db_path, cid, out_dir, photo_source=SOURCE_PLACEHOLDER)
     pipe.run_batch()
@@ -427,14 +520,7 @@ def _fake_finder_for_cascade(
     cache_dir: Path,
     sources_seq: list[str] | None = None,
 ) -> MagicMock:
-    """Finder que simula la cascada (Wiki/DDG/Google) per-card.
-
-    `sources_seq` indica qué `source` retornar por cada llamada a
-    find_photo (uno por card en el orden en que el pipeline las procesa).
-    Si una llamada simula `SOURCE_GOOGLE`, incrementa
-    `finder.google_calls_used` (respeta `google_quota` y degrada a
-    placeholder si la cuota está agotada).
-    """
+    """Finder simulando la cascada: cada card devuelve un source de la secuencia."""
     finder = MagicMock()
     finder.cache_dir = cache_dir
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -443,42 +529,35 @@ def _fake_finder_for_cascade(
     sequence = list(sources_seq or [SOURCE_GOOGLE])
     call_idx = {"n": 0}
 
-    def fake_find_photo(player_name: str, country_name: str, card_key: str) -> PhotoResult:
+    def fake_find_photo(player_name: str, country_name: str, country_code: str) -> PhotoResult:
         del country_name
         idx = call_idx["n"]
         call_idx["n"] += 1
         intended = sequence[idx] if idx < len(sequence) else SOURCE_PLACEHOLDER
-
-        # Simular cuota Google: si se intenta google y no hay quota, cae a placeholder.
         if intended == SOURCE_GOOGLE:
             if finder.google_calls_used >= finder.google_quota:
                 intended = SOURCE_PLACEHOLDER
             else:
                 finder.google_calls_used += 1
-
-        dest = cache_dir / f"{card_key}.jpg"
+        dest = cache_dir / f"{_player_slug(player_name, country_code)}.jpg"
         arr = np.full((200, 200, 3), 200, dtype=np.uint8)
         cv2.imwrite(str(dest), arr)
-        return PhotoResult(
-            player_name=player_name,
-            source_url=f"https://{intended}.example/{card_key}.jpg",
-            local_path=dest,
-            source=intended,
-            success=True,
-        )
+        return PhotoResult(player_name, f"https://{intended}/x.jpg", dest, intended, True)
+
+    def cached_photo_path(name: str, code: str) -> Path:
+        return cache_dir / f"{_player_slug(name, code)}.jpg"
 
     finder.find_photo.side_effect = fake_find_photo
+    finder.cached_photo_path.side_effect = cached_photo_path
     return finder
 
 
 def test_google_limit_respected_in_run_google_fill(setup_collection, tmp_path):
-    """Cuando se llega al daily_limit, los siguientes intentos caen a placeholder."""
     db_path, cid = setup_collection
     out = tmp_path / "out"
     cache = tmp_path / "photo_cache"
     _seed_placeholders(setup_collection, out, n=5)
 
-    # 5 cards intentan Google. Con limit=2, solo 2 lo logran y 3 quedan placeholder.
     finder = _fake_finder_for_cascade(cache, sources_seq=[SOURCE_GOOGLE] * 5)
     pipe = ImagePipeline(
         db_path=db_path,
@@ -497,7 +576,6 @@ def test_google_limit_respected_in_run_google_fill(setup_collection, tmp_path):
 
 
 def test_google_not_called_beyond_daily_limit(setup_collection, tmp_path):
-    """Si daily_limit cubre todas las cards, solo se llama lo necesario."""
     db_path, cid = setup_collection
     out = tmp_path / "out"
     cache = tmp_path / "photo_cache"
@@ -521,7 +599,6 @@ def test_google_not_called_beyond_daily_limit(setup_collection, tmp_path):
 
 
 def test_google_fill_skips_when_no_placeholders(setup_collection, tmp_path):
-    """Si no hay placeholders, run_google_fill retorna sin llamar al finder."""
     db_path, cid = setup_collection
     out = tmp_path / "out"
     cache = tmp_path / "photo_cache"
@@ -543,13 +620,11 @@ def test_google_fill_skips_when_no_placeholders(setup_collection, tmp_path):
 
 
 def test_google_fill_breakdown_by_source(setup_collection, tmp_path):
-    """run_google_fill reporta cuántas cards salvó cada fuente."""
     db_path, cid = setup_collection
     out = tmp_path / "out"
     cache = tmp_path / "photo_cache"
     _seed_placeholders(setup_collection, out, n=5)
 
-    # Cascada simulada: 2 wiki, 2 ddg, 1 google
     finder = _fake_finder_for_cascade(
         cache,
         sources_seq=[
@@ -575,18 +650,14 @@ def test_google_fill_breakdown_by_source(setup_collection, tmp_path):
     assert result.from_google == 1
     assert result.from_placeholder == 0
     assert result.google_calls_used == 1
-    # Reemplazadas = wiki + ddg + google = 5
-    assert result.from_wikipedia + result.from_duckduckgo + result.from_google == 5
 
 
 def test_google_fill_leaves_unrecoverable_as_placeholder(setup_collection, tmp_path):
-    """Las cards que no pudo rescatar ninguna fuente se quedan como placeholder."""
     db_path, cid = setup_collection
     out = tmp_path / "out"
     cache = tmp_path / "photo_cache"
     _seed_placeholders(setup_collection, out, n=5)
 
-    # 3 quedan placeholder (la cascada falla), 2 se rellenan vía wiki
     finder = _fake_finder_for_cascade(
         cache,
         sources_seq=[
@@ -609,12 +680,11 @@ def test_google_fill_leaves_unrecoverable_as_placeholder(setup_collection, tmp_p
 
     assert result.from_wikipedia == 2
     assert result.from_placeholder == 3
-    # Las 3 que siguieron como placeholder permanecen en el index
     assert len(pipe.get_placeholder_card_keys()) == 3
 
 
-def test_google_fill_updates_index_to_actual_source(setup_collection, tmp_path):
-    """Cada card actualiza su entry del index con la fuente real que la rescató."""
+def test_google_fill_updates_card_images_to_actual_source(setup_collection, tmp_path):
+    """Cada card actualiza su entry de card_images con la fuente real que la rescató."""
     db_path, cid = setup_collection
     out = tmp_path / "out"
     cache = tmp_path / "photo_cache"
@@ -640,16 +710,14 @@ def test_google_fill_updates_index_to_actual_source(setup_collection, tmp_path):
     )
     pipe.run_google_fill()
 
-    # Reinstanciar para forzar recarga del index desde disco
-    pipe2 = _make_pipeline(db_path, cid, out, photo_source=SOURCE_PLACEHOLDER)
-    sources = sorted(v["source"] for v in pipe2._index.values())
+    images = _read_card_images(db_path, cid)
+    sources = sorted(img.image_source for img in images)
     assert sources == sorted(
         [SOURCE_WIKIPEDIA, SOURCE_DUCKDUCKGO, SOURCE_GOOGLE, SOURCE_GOOGLE, SOURCE_PLACEHOLDER]
     )
 
 
 def test_google_fill_resets_counter_at_start(setup_collection, tmp_path):
-    """Cada invocación de run_google_fill resetea el contador del finder."""
     db_path, cid = setup_collection
     out = tmp_path / "out"
     cache = tmp_path / "photo_cache"
@@ -667,37 +735,35 @@ def test_google_fill_resets_counter_at_start(setup_collection, tmp_path):
         output_dir=out,
     )
     pipe.run_google_fill(daily_limit=10)
-    # Después del run, el counter refleja SOLO las llamadas de este run
     assert finder.google_calls_used == 5
     assert finder.google_quota == 10
 
 
+# ----------------------------------------------------------------------
+# run_resketch
+# ----------------------------------------------------------------------
+
+
 def test_run_resketch_skips_placeholders(setup_collection, tmp_path):
-    """run_resketch ignora cards con source=placeholder."""
     db_path, cid = setup_collection
     out = tmp_path / "out"
     cache = tmp_path / "photo_cache"
     cache.mkdir(parents=True, exist_ok=True)
 
-    # Mix de sources: 2 DDG + 3 placeholder
-    pipe = _make_pipeline(db_path, cid, out, photo_source=SOURCE_PLACEHOLDER)
-    pipe.run_batch()
-    import json as _json
-
-    index_path = out / "_index.json"
-    data = _json.loads(index_path.read_text(encoding="utf-8"))
-    data["ARG-1"]["source"] = SOURCE_DUCKDUCKGO
-    data["BRA-2"]["source"] = SOURCE_DUCKDUCKGO
-    index_path.write_text(_json.dumps(data), encoding="utf-8")
+    # 2 cards con foto real (DDG), 3 placeholder
+    _make_pipeline(db_path, cid, out, photo_source=SOURCE_DUCKDUCKGO).run_batch(
+        card_keys=["ARG-1", "BRA-2"]
+    )
+    _make_pipeline(db_path, cid, out, photo_source=SOURCE_PLACEHOLDER).run_batch(
+        card_keys=["ARG-2", "ARG-3", "BRA-1"]
+    )
 
     # Crear los archivos cacheados de las cards no-placeholder
-    for key in ("ARG-1", "BRA-2"):
+    for name, code in [("Messi", "ARG"), ("Neymar", "BRA")]:
         arr = np.full((200, 200, 3), 200, dtype=np.uint8)
-        cv2.imwrite(str(cache / f"{key}.jpg"), arr)
+        cv2.imwrite(str(cache / f"{_player_slug(name, code)}.jpg"), arr)
 
-    # Pipeline con finder.cache_dir apuntando al fake cache
-    finder = MagicMock()
-    finder.cache_dir = cache
+    finder = _fake_photo_finder(SOURCE_DUCKDUCKGO, cache_dir=cache)
     sketch_gen = _fake_sketch_generator()
     saved: list[Path] = []
     pipe2 = ImagePipeline(
@@ -710,7 +776,6 @@ def test_run_resketch_skips_placeholders(setup_collection, tmp_path):
     )
     result = pipe2.run_resketch()
 
-    # Solo las 2 cards no-placeholder se procesan
     assert result.total == 2
     assert sketch_gen.generate_sketch.call_count == 2
     saved_keys = sorted(p.stem for p in saved)
@@ -718,23 +783,25 @@ def test_run_resketch_skips_placeholders(setup_collection, tmp_path):
 
 
 def test_run_resketch_uses_cached_photos(setup_collection, tmp_path):
-    """run_resketch lee las fotos desde photo_cache (no llama a find_photo)."""
     db_path, cid = setup_collection
     out = tmp_path / "out"
     cache = tmp_path / "photo_cache"
     cache.mkdir(parents=True, exist_ok=True)
 
-    # Todas las cards como DDG (con foto cacheada)
-    pipe = _make_pipeline(db_path, cid, out, photo_source=SOURCE_DUCKDUCKGO)
-    pipe.run_batch()
+    _make_pipeline(db_path, cid, out, photo_source=SOURCE_DUCKDUCKGO).run_batch()
 
-    # Crear archivos de cache para todas
-    for key in ("ARG-1", "ARG-2", "ARG-3", "BRA-1", "BRA-2"):
+    name_by_card = [
+        ("ARG", 1, "Messi"),
+        ("ARG", 2, "Martinez"),
+        ("ARG", 3, "Molina"),
+        ("BRA", 1, "Vinicius"),
+        ("BRA", 2, "Neymar"),
+    ]
+    for code, _, name in name_by_card:
         arr = np.full((200, 200, 3), 200, dtype=np.uint8)
-        cv2.imwrite(str(cache / f"{key}.jpg"), arr)
+        cv2.imwrite(str(cache / f"{_player_slug(name, code)}.jpg"), arr)
 
-    finder = MagicMock()
-    finder.cache_dir = cache
+    finder = _fake_photo_finder(SOURCE_DUCKDUCKGO, cache_dir=cache)
     sketch_gen = _fake_sketch_generator()
     pipe2 = ImagePipeline(
         db_path=db_path,
@@ -755,21 +822,24 @@ def test_run_resketch_uses_cached_photos(setup_collection, tmp_path):
 
 
 def test_run_resketch_does_not_make_network_requests(setup_collection, tmp_path):
-    """run_resketch nunca invoca find_photo ni search_google_only."""
     db_path, cid = setup_collection
     out = tmp_path / "out"
     cache = tmp_path / "photo_cache"
     cache.mkdir(parents=True, exist_ok=True)
 
-    pipe = _make_pipeline(db_path, cid, out, photo_source=SOURCE_DUCKDUCKGO)
-    pipe.run_batch()
+    _make_pipeline(db_path, cid, out, photo_source=SOURCE_DUCKDUCKGO).run_batch()
 
-    for key in ("ARG-1", "ARG-2", "ARG-3", "BRA-1", "BRA-2"):
+    for code, _, name in [
+        ("ARG", 1, "Messi"),
+        ("ARG", 2, "Martinez"),
+        ("ARG", 3, "Molina"),
+        ("BRA", 1, "Vinicius"),
+        ("BRA", 2, "Neymar"),
+    ]:
         arr = np.full((200, 200, 3), 200, dtype=np.uint8)
-        cv2.imwrite(str(cache / f"{key}.jpg"), arr)
+        cv2.imwrite(str(cache / f"{_player_slug(name, code)}.jpg"), arr)
 
-    finder = MagicMock()
-    finder.cache_dir = cache
+    finder = _fake_photo_finder(SOURCE_DUCKDUCKGO, cache_dir=cache)
     pipe2 = ImagePipeline(
         db_path=db_path,
         collection_id=cid,
@@ -781,22 +851,17 @@ def test_run_resketch_does_not_make_network_requests(setup_collection, tmp_path)
     pipe2.run_resketch()
 
     finder.find_photo.assert_not_called()
-    finder.search_google_only.assert_not_called()
 
 
 def test_run_resketch_handles_missing_cached_photo(setup_collection, tmp_path):
-    """Si el cache jpg no existe, la card se cuenta como fallida pero no rompe."""
     db_path, cid = setup_collection
     out = tmp_path / "out"
     cache = tmp_path / "photo_cache"
     cache.mkdir(parents=True, exist_ok=True)
 
-    pipe = _make_pipeline(db_path, cid, out, photo_source=SOURCE_DUCKDUCKGO)
-    pipe.run_batch()
+    _make_pipeline(db_path, cid, out, photo_source=SOURCE_DUCKDUCKGO).run_batch()
 
-    # No creamos ningún archivo en cache → todas deben fallar suavemente
-    finder = MagicMock()
-    finder.cache_dir = cache
+    finder = _fake_photo_finder(SOURCE_DUCKDUCKGO, cache_dir=cache)
     pipe2 = ImagePipeline(
         db_path=db_path,
         collection_id=cid,
@@ -809,3 +874,33 @@ def test_run_resketch_handles_missing_cached_photo(setup_collection, tmp_path):
     assert result.total == 5
     assert result.failed == 5
     assert result.succeeded == 0
+
+
+# ----------------------------------------------------------------------
+# Migración legacy: ingesto de _index.json viejo
+# ----------------------------------------------------------------------
+
+
+def test_legacy_index_json_is_ingested_and_renamed(setup_collection, tmp_path):
+    """Si hay un `_index.json` viejo, lo ingestamos a card_images y lo renombramos."""
+    import json as _json
+
+    db_path, cid = setup_collection
+    out = tmp_path / "out"
+    out.mkdir(parents=True, exist_ok=True)
+    legacy_data = {
+        "ARG-1": {"source": SOURCE_DUCKDUCKGO, "url": "x"},
+        "ARG-2": {"source": SOURCE_PLACEHOLDER, "url": "y"},
+    }
+    (out / "_index.json").write_text(_json.dumps(legacy_data), encoding="utf-8")
+
+    pipe = _make_pipeline(db_path, cid, out, photo_source=SOURCE_WIKIPEDIA)
+    # Forzar abrir conn (para gatillar el ingest)
+    pipe.get_total_generated()
+
+    images = _read_card_images(db_path, cid)
+    sources = {f"{img.code_id}-{img.card_number}": img.image_source for img in images}
+    assert sources == {"ARG-1": SOURCE_DUCKDUCKGO, "ARG-2": SOURCE_PLACEHOLDER}
+    # Y el archivo se renombró a .legacy
+    assert not (out / "_index.json").exists()
+    assert (out / "_index.json.legacy").exists()

@@ -1,16 +1,21 @@
 """Búsqueda y descarga de fotos de jugadores con fallback en cascada.
 
 Estrategia (`find_photo`):
-1. Caché local (`data/photo_cache/{card_key}.jpg`) — si existe, se usa.
+1. Caché compartido por jugador (`{country_code}_{name_slug}.jpg`).
+   Indexado por jugador, no por card_key, así una foto descargada para
+   "ARG_LIONEL_MESSI" sirve para Adrenalyn y Stickers Mundial sin
+   redescargarla.
 2. Wikipedia API (`page/summary`) — fuente más estable, sin rate limit.
 3. DuckDuckGo image search — varias queries variadas (full name,
    apellido, español, con `site:` hints). UA rotation + rate limiting
-   suave entre queries. Cada URL descargada se valida por tamaño mínimo
-   Y por contener una cara detectable; si no, se prueba la siguiente.
+   suave entre queries. Cada URL descargada se valida por tamaño mínimo,
+   por aspect ratio (rechaza fotos grupales muy anchas), y por contener
+   una cara detectable; si no, se prueba la siguiente.
 4. Google Custom Search — último recurso (cuota 100/día). Solo se
    intenta si el contador `google_calls_used` no superó `google_quota`
    y si las env vars `GOOGLE_API_KEY`/`GOOGLE_CSE_ID` están configuradas.
-5. Placeholder local generado con PIL.
+5. Placeholder compartido — NO se guarda en el cache de jugadores
+   (para que un próximo run pueda reintentar la búsqueda real).
 
 El contador `google_calls_used` es por instancia y empieza en 0. El
 caller (típicamente `ImagePipeline.run_google_fill`) lo resetea entre
@@ -20,6 +25,7 @@ runs y ajusta `google_quota` según necesite.
 import logging
 import os
 import random
+import re
 import shutil
 import time
 from dataclasses import dataclass
@@ -48,6 +54,14 @@ HTTP_TIMEOUT = 15
 WIKI_TIMEOUT = 8
 GOOGLE_TIMEOUT = 8
 DDG_QUERY_DELAY_SEC = 0.2  # rate-limit suave entre queries
+
+# Filtros de calidad para `_is_good_photo`
+MAX_ASPECT_RATIO = 1.8  # imágenes más anchas que altas → probables fotos grupales
+MIN_MEAN_GRAY = 30  # más oscuro = imagen casi negra
+MAX_MEAN_GRAY = 225  # más claro = imagen casi blanca
+MIN_GRAY_STD = 20  # std bajo = imagen casi uniforme (sin contenido real)
+
+PLACEHOLDER_FILENAME = "_placeholder.jpg"
 
 # Cuota diaria default: 100 (límite de la free tier de Google Custom Search).
 DEFAULT_GOOGLE_QUOTA = 100
@@ -114,15 +128,16 @@ class PhotoFinder:
         self,
         player_name: str,
         country_name: str,
-        card_key: str,
+        country_code: str,
     ) -> PhotoResult:
-        """Busca y devuelve la mejor foto disponible para esa card.
+        """Busca y devuelve la mejor foto disponible para ese jugador.
 
-        Cascada: cache → Wikipedia → DuckDuckGo → Google CSE → placeholder.
-        Wikipedia primero porque es la fuente más estable y sin cuota.
-        Google al final porque tiene límite de 100 queries/día.
+        Cascada: cache_jugador → Wikipedia → DuckDuckGo → Google CSE →
+        placeholder. La foto se cachea bajo `{country_code}_{name_slug}.jpg`,
+        compartida entre colecciones (un mismo jugador en dos álbumes
+        distintos reusa la foto).
         """
-        dest = self.cache_dir / f"{card_key}.jpg"
+        dest = self.cached_photo_path(player_name, country_code)
         if dest.exists():
             return PhotoResult(
                 player_name=player_name,
@@ -134,9 +149,9 @@ class PhotoFinder:
 
         # 1) Wikipedia: estable y sin rate limiting. Aceptamos aunque el
         # cascade no detecte cara (los thumbs son chicos y a veces el
-        # detector falla por ángulo).
+        # detector falla por ángulo); igual filtramos por aspect/contraste.
         wiki_url = self._search_wikipedia(player_name)
-        if wiki_url and self._download_image(wiki_url, dest):
+        if wiki_url and self._download_image(wiki_url, dest) and self._is_good_photo(dest):
             return PhotoResult(player_name, wiki_url, dest, SOURCE_WIKIPEDIA, True)
         dest.unlink(missing_ok=True)
 
@@ -144,7 +159,11 @@ class PhotoFinder:
         for query in self._build_queries(player_name, country_name):
             urls = self._search_duckduckgo(query)
             for url in urls[:MAX_URLS_PER_QUERY]:
-                if self._download_image(url, dest) and self._image_has_face(dest):
+                if (
+                    self._download_image(url, dest)
+                    and self._is_good_photo(dest)
+                    and self._image_has_face(dest)
+                ):
                     return PhotoResult(player_name, url, dest, SOURCE_DUCKDUCKGO, True)
                 # Si descargó pero no pasó la validación, limpiar el archivo
                 # parcial para que la próxima URL no tenga side-effects.
@@ -154,12 +173,17 @@ class PhotoFinder:
         if self._is_google_enabled():
             self.google_calls_used += 1
             for url in self.search_google_only(player_name, country_name)[:MAX_URLS_PER_QUERY]:
-                if self._download_image(url, dest) and self._image_has_face(dest):
+                if (
+                    self._download_image(url, dest)
+                    and self._is_good_photo(dest)
+                    and self._image_has_face(dest)
+                ):
                     return PhotoResult(player_name, url, dest, SOURCE_GOOGLE, True)
                 dest.unlink(missing_ok=True)
 
-        # 4) Placeholder local
-        placeholder_path = self._use_placeholder(card_key)
+        # 4) Placeholder compartido — NO lo guardamos como cache_jugador
+        # para que la próxima corrida pueda reintentar la búsqueda real.
+        placeholder_path = self._use_placeholder()
         return PhotoResult(
             player_name=player_name,
             source_url=str(placeholder_path),
@@ -168,6 +192,30 @@ class PhotoFinder:
             success=True,
             error="Photo not found online",
         )
+
+    # ------------------------------------------------------------------
+    # Cache key por jugador
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _player_cache_key(player_name: str, country_code: str) -> str:
+        """Genera una clave de cache normalizada para el jugador.
+
+        Ejemplo: ("Lionel Messi", "ARG") → "ARG_LIONEL_MESSI".
+        Toma sólo letras A-Z y dígitos; cualquier otro char se reemplaza
+        por `_`. Múltiples `_` consecutivos se colapsan.
+        """
+        slug = re.sub(r"[^A-Z0-9]", "_", player_name.upper())
+        slug = re.sub(r"_+", "_", slug).strip("_")
+        return f"{country_code.upper()}_{slug}"
+
+    def cached_photo_path(self, player_name: str, country_code: str) -> Path:
+        """Path al .jpg cacheado para ese jugador (puede no existir aún).
+
+        Útil para callers que necesitan saber si la foto ya está localmente
+        sin disparar una búsqueda online (ej. resketch).
+        """
+        return self.cache_dir / f"{self._player_cache_key(player_name, country_code)}.jpg"
 
     def _is_google_enabled(self) -> bool:
         """¿Tiene sentido intentar Google?
@@ -329,12 +377,46 @@ class PhotoFinder:
         )
         return len(faces) > 0
 
+    def _is_good_photo(self, img_path: Path) -> bool:
+        """Filtros de calidad rápidos sobre la foto descargada.
+
+        Rechaza:
+        - imágenes muy chicas (< MIN_IMAGE_DIM)
+        - fotos demasiado anchas (aspect > 1.8): suelen ser grupos / equipos
+        - imágenes casi negras o casi blancas (mean fuera de [30, 225])
+        - imágenes casi uniformes (std < 20): probablemente fondo solo
+
+        Retorna True si la imagen pasa todos los filtros.
+        """
+        img = cv2.imread(str(img_path))
+        if img is None:
+            return False
+        h, w = img.shape[:2]
+        if h < MIN_IMAGE_DIM or w < MIN_IMAGE_DIM:
+            return False
+        if (w / h) > MAX_ASPECT_RATIO:
+            return False
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        mean_val = float(gray.mean())
+        if mean_val < MIN_MEAN_GRAY or mean_val > MAX_MEAN_GRAY:
+            return False
+        std_val = float(gray.std())
+        return std_val >= MIN_GRAY_STD
+
     # ------------------------------------------------------------------
     # Placeholder
     # ------------------------------------------------------------------
 
-    def _use_placeholder(self, card_key: str) -> Path:
-        dest = self.cache_dir / f"{card_key}.jpg"
+    def _use_placeholder(self) -> Path:
+        """Retorna el path a un placeholder compartido entre todas las cards.
+
+        Se genera una vez por instancia del cache_dir y se reusa. El
+        archivo se llama `_placeholder.jpg` para no chocar con cache
+        keys reales (esos empiezan con código de país).
+        """
+        dest = self.cache_dir / PLACEHOLDER_FILENAME
+        if dest.exists():
+            return dest
         official = (
             Path(__file__).resolve().parent.parent.parent.parent
             / "data"

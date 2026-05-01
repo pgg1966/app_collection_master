@@ -44,8 +44,9 @@ def get_schema_dir() -> Path:
 def get_photo_cache_dir() -> Path:
     """Directorio compartido donde el admin cachea fotos descargadas de internet.
 
-    Las fotos crudas viven acá (no por colección): si el mismo jugador aparece
-    en dos colecciones, se reusa la foto si la card_key coincide.
+    Las fotos crudas viven acá indexadas por `{country_code}_{name_slug}`,
+    no por card_key, así un mismo jugador en dos colecciones distintas
+    reusa la misma foto sin volver a buscarla.
     """
     d = get_app_data_dir() / "photo_cache"
     d.mkdir(parents=True, exist_ok=True)

@@ -218,11 +218,15 @@ class ImageGeneratorView(QWidget):
             return
         total = CardsRepository(self.conn).count_by_collection(cid)
         pipeline = ImagePipeline(get_database_path(), cid)
-        existing = pipeline.get_existing_count()
-        placeholders = len(pipeline.get_placeholder_card_keys())
-        pct = (existing / total * 100) if total > 0 else 0.0
+        found = pipeline.get_found_count()
+        total_generated = pipeline.get_total_generated()
+        placeholders = total_generated - found
+        pending = max(0, total - total_generated)
+        pct = (total_generated / total * 100) if total > 0 else 0.0
         self._state_label.setText(
-            self.tr("Imágenes generadas: {e} / {t} ({p:.1f}%)").format(e=existing, t=total, p=pct)
+            self.tr(
+                "Fotos reales: {f} · Placeholders: {ph} · Pendientes: {p} · Total: {t} ({pct:.1f}%)"
+            ).format(f=found, ph=placeholders, p=pending, t=total, pct=pct)
         )
         self._placeholder_label.setText(
             self.tr("Cards con placeholder: {ph} · Se procesarán hoy: hasta {n}").format(

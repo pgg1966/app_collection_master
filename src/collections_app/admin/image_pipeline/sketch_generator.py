@@ -1,13 +1,13 @@
 """Conversión de fotos a sketch B&W usando OpenCV.
 
-Pipeline (Nivel 4 — Line Art):
+Pipeline:
   cargar → detectar cara → recortar con margen amplio → limpiar fondo
-  (blur fuera de la cara) → bilateral filter + dodge blend con kernel
-  grande + threshold → erode (=engrosar líneas) → resize.
+  (blur fuera de la cara) → preprocesar (upscale + CLAHE + bilateral)
+  → sketch tipo lápiz (edge-preserving + dodge blend + Canny suave)
+  → ajuste adaptativo de brillo → resize.
 
-Resultado: líneas negras limpias sobre fondo blanco puro, estilo retrato
-a lápiz fino. El threshold final fuerza el fondo a 255 (blanco) y borra
-los grises medios que generaban ruido en el Nivel 3.
+Salida: sketch en escala de grises con líneas suaves y mucha área
+clara, pensado para imprimir bien sobre el slot de la card.
 
 La detección usa Haar Cascade frontalface (viene con `opencv-python`).
 Si no detecta cara, se procesa la imagen completa.
@@ -31,10 +31,9 @@ TOP_MARGIN_RATIO = 0.60  # +60% arriba
 SIDE_MARGIN_RATIO = 0.30  # +30% a cada lado
 BOTTOM_MARGIN_RATIO = 0.40  # +40% abajo
 
-# Parámetros del Nivel 4 (Line Art)
-SKETCH_BLUR_KERNEL = 111  # impar; más grande = líneas más suaves
-SKETCH_THRESHOLD = 215  # mayor = fondo más blanco, menos grises
-SKETCH_LINE_THICKNESS = 1  # 0 = no engrosar; 1 = engrosar 1 iteración
+# Umbral mínimo de tamaño bajo el cual hacemos upscale por interpolación
+# cúbica antes de aplicar el sketch (las imágenes chicas pierden detalle).
+MIN_PREPROCESS_DIM = 300
 
 
 class SketchGenerator:
@@ -50,7 +49,7 @@ class SketchGenerator:
             logger.warning("Haar cascade vacío en %s", cascade_path)
 
     def generate_sketch(self, image_path: Path) -> np.ndarray:
-        """Pipeline end-to-end (Nivel 4 Line Art)."""
+        """Pipeline end-to-end."""
         img = cv2.imread(str(image_path))
         if img is None:
             logger.warning("No se pudo cargar imagen: %s", image_path)
@@ -58,7 +57,7 @@ class SketchGenerator:
 
         cropped = self._detect_and_crop_face(img)
         cleaned = self._clean_background(cropped)
-        sketch = self._apply_sketch_level4(cleaned)
+        sketch = self._apply_sketch_level3(cleaned)
         return self._resize_for_card(sketch)
 
     # ------------------------------------------------------------------
@@ -135,42 +134,76 @@ class SketchGenerator:
         return out
 
     # ------------------------------------------------------------------
-    # Sketch nivel 4 (Line Art)
+    # Preprocesamiento previo al sketch
     # ------------------------------------------------------------------
 
-    def _apply_sketch_level4(self, img: np.ndarray) -> np.ndarray:
-        """Line Art: líneas negras limpias sobre fondo blanco puro.
+    def _preprocess_photo(self, img: np.ndarray) -> np.ndarray:
+        """Upscale + CLAHE + bilateral, para mejorar el resultado del sketch.
 
-        Pipeline:
-        1. Bilateral filter para suavizar preservando bordes.
-        2. Dodge blend con GaussianBlur de kernel grande (más natural).
-        3. Threshold binario para forzar fondo blanco puro.
-        4. Erode opcional para engrosar las líneas (en imagen invertida
-           sería dilate; sobre la imagen blanca, erode achica los blancos
-           y por ende engrosa las líneas negras).
+        - Si la imagen es chica (< MIN_PREPROCESS_DIM), se upscalea con
+          interpolación cúbica para que el sketch tenga más detalle.
+        - CLAHE en el canal L de LAB sube el contraste local sin
+          saturar.
+        - Bilateral filter reduce ruido preservando bordes.
         """
+        h, w = img.shape[:2]
+        if h < MIN_PREPROCESS_DIM or w < MIN_PREPROCESS_DIM:
+            scale = max(MIN_PREPROCESS_DIM / max(h, 1), MIN_PREPROCESS_DIM / max(w, 1))
+            img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+
+        lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+        l_chan, a_chan, b_chan = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        l_chan = clahe.apply(l_chan)
+        img = cv2.cvtColor(cv2.merge([l_chan, a_chan, b_chan]), cv2.COLOR_LAB2BGR)
+
+        return cv2.bilateralFilter(img, 9, 75, 75)
+
+    # ------------------------------------------------------------------
+    # Sketch tipo lápiz con bordes Canny suaves y brillo adaptativo
+    # ------------------------------------------------------------------
+
+    def _apply_sketch_level3(self, img: np.ndarray) -> np.ndarray:
+        """Sketch tipo lápiz: trazos suaves sobre fondo claro.
+
+        1. Preprocesar (upscale + CLAHE + bilateral).
+        2. `edgePreservingFilter` de OpenCV para suavizar manteniendo bordes.
+        3. Dodge blend (`gray / inv_blur`) para el sketch base.
+        4. Canny suave (umbrales bajos) para reforzar bordes sin
+           sobrecargar.
+        5. GaussianBlur final para que las líneas no queden duras.
+        6. Si el resultado quedó oscuro (mean < 180), aclarar con
+           `convertScaleAbs` (alpha=1.2, beta=20).
+        """
+        img = self._preprocess_photo(img)
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-        # Suavizar preservando bordes
-        smoothed = cv2.bilateralFilter(gray, d=9, sigmaColor=75, sigmaSpace=75)
+        # Edge-preserving sobre la imagen color, después gris
+        smooth = cv2.edgePreservingFilter(img, flags=1, sigma_s=45, sigma_r=0.35)
+        smooth_gray = cv2.cvtColor(smooth, cv2.COLOR_BGR2GRAY)
 
-        # Dodge blend con blur grande
-        inv = cv2.bitwise_not(smoothed)
-        kernel = SKETCH_BLUR_KERNEL
-        if kernel % 2 == 0:  # OpenCV exige kernel impar
-            kernel += 1
-        blur = cv2.GaussianBlur(inv, (kernel, kernel), 0)
-        sketch = cv2.divide(smoothed, cv2.bitwise_not(blur), scale=256.0)
+        # Dodge blend (sketch base estilo lápiz)
+        inv = cv2.bitwise_not(smooth_gray)
+        blur = cv2.GaussianBlur(inv, (17, 17), 0)
+        sketch = cv2.divide(smooth_gray, cv2.bitwise_not(blur), scale=256.0)
 
-        # Threshold para forzar fondo blanco puro (limpia los grises medios)
-        _, clean = cv2.threshold(sketch, SKETCH_THRESHOLD, 255, cv2.THRESH_BINARY)
+        # Bordes suaves con Canny (umbrales bajos = más bordes pero finos)
+        edges = cv2.Canny(gray, 20, 80)
+        edges = cv2.dilate(edges, np.ones((1, 1), np.uint8))
 
-        # Engrosar las líneas negras (erode sobre fondo blanco)
-        if SKETCH_LINE_THICKNESS > 0:
-            line_kernel = np.ones((2, 2), np.uint8)
-            clean = cv2.erode(clean, line_kernel, iterations=SKETCH_LINE_THICKNESS)
+        # Aplicar bordes: oscurece sólo donde Canny detectó borde
+        signed = sketch.copy().astype(np.int16)
+        signed[edges > 0] = np.clip(signed[edges > 0] - 40, 0, 255)
+        result: np.ndarray = signed.astype(np.uint8)
 
-        return clean
+        # Suavizado final para suavizar líneas (kernel chico)
+        result = cv2.GaussianBlur(result, (5, 5), 0)
+
+        # Brillo adaptativo: si el sketch quedó oscuro, levantarlo
+        if float(result.mean()) < 180:
+            result = cv2.convertScaleAbs(result, alpha=1.2, beta=20)
+
+        return np.clip(result, 0, 255).astype(np.uint8)
 
     # ------------------------------------------------------------------
     # Resize final

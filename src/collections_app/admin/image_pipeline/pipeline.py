@@ -5,6 +5,12 @@ Para cada card de la colección: PhotoFinder → SketchGenerator → CardCompose
 Las dependencias (finder/sketch/composer) se inyectan en el constructor para
 que los tests puedan mockearlas.
 
+Tracking persistido en la tabla `card_images` (migración 003): cada card
+queda con `found_photo` (1=foto real, 0=placeholder) + `image_source` +
+`image_path`. Reemplaza al `_index.json` que usábamos antes; si todavía
+hay un JSON viejo en el output_dir lo ingestamos automáticamente y lo
+renombramos a `.legacy`.
+
 Threading note: el pipeline normalmente corre dentro de un QThread (ver
 `PipelineWorker`). SQLite no permite compartir conexiones entre threads,
 así que el pipeline NO recibe una conexión: recibe un `db_path` y abre
@@ -33,12 +39,15 @@ from collections_app.admin.image_pipeline.photo_finder import (
 from collections_app.admin.image_pipeline.sketch_generator import SketchGenerator
 from collections_app.core.db.connection import create_connection
 from collections_app.core.db.migrator import run_migrations
+from collections_app.core.models import CardImage
 from collections_app.core.repositories import (
+    CardImagesRepository,
     CardsRepository,
     CodesLinesRepository,
     CollectionsRepository,
     InventoryRepository,
 )
+from collections_app.core.utils.datetime_helpers import format_for_db, utc_now
 from collections_app.core.utils.paths import (
     get_generated_cards_dir,
     get_photo_cache_dir,
@@ -47,7 +56,7 @@ from collections_app.core.utils.paths import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_BATCH_SIZE = 100
-INDEX_FILE_NAME = "_index.json"
+LEGACY_INDEX_FILENAME = "_index.json"  # ingestado y renombrado a .legacy
 
 # Google Custom Search free tier permite 100 queries/día. El contador
 # es por sesión (no persistido en disco): si la app se reinicia el mismo
@@ -115,10 +124,7 @@ class ImagePipeline:
         self._output_dir = output_dir or get_generated_cards_dir(collection_id)
         self._output_dir.mkdir(parents=True, exist_ok=True)
         self._stop_event = Event()
-        # `_index.json` mapea card_key → {"source": ..., "url": ...}.
-        # Persistido en el output_dir para sobrevivir entre runs.
-        self._index_path = self._output_dir / INDEX_FILE_NAME
-        self._index: dict[str, dict[str, str]] = self._load_index()
+        self._legacy_index_path = self._output_dir / LEGACY_INDEX_FILENAME
 
     # ------------------------------------------------------------------
     # API pública
@@ -132,27 +138,13 @@ class ImagePipeline:
         batch_size: int = DEFAULT_BATCH_SIZE,
         force: bool = False,
     ) -> PipelineResult:
-        """Procesa cards generando sus imágenes.
-
-        Abre una conexión SQLite propia (lo que permite ejecutar el método
-        dentro de un QThread) y la cierra al terminar el run.
-
-        Args:
-            card_keys: lista de "CODE-NUMBER" a procesar. None = todas.
-            on_progress: callback `(current, total, label)` para barra de progreso.
-            on_log: callback `(card_key, source, status)` para logging visual.
-            batch_size: cantidad por batch (default 100). El stop signal se
-                chequea entre batches.
-            force: si False, omite cards que ya tienen imagen generada.
-
-        Returns:
-            `PipelineResult` con conteos por fuente y errores.
-        """
+        """Procesa cards generando sus imágenes."""
         self._stop_event.clear()
         result = PipelineResult(output_dir=self._output_dir)
 
         conn = self._open_connection()
         try:
+            repo = CardImagesRepository(conn)
             all_cards = self._load_target_cards(conn, card_keys)
             result.total = len(all_cards)
 
@@ -163,14 +155,13 @@ class ImagePipeline:
                 for i, card in enumerate(batch, start=batch_start + 1):
                     if self._stop_event.is_set():
                         break
-                    self._process_card(card, force, result, on_log)
+                    self._process_card(card, force, result, repo, on_log)
                     if on_progress is not None:
                         label = f"{card['card_key']} {card['card_name']}"
                         on_progress(i, result.total, label)
-                # Persistir el index al cerrar cada batch para sobrevivir a stops
-                self._save_index()
+                conn.commit()
         finally:
-            self._save_index()
+            conn.commit()
             conn.close()
 
         return result
@@ -193,40 +184,47 @@ class ImagePipeline:
     def get_placeholder_card_keys(self) -> list[str]:
         """Card keys cuya imagen actual fue generada vía placeholder.
 
-        Útil para `regenerate_placeholders()`. Si el index no existe aún
-        (corrida vieja sin _index.json), devuelve lista vacía.
+        Lee de `card_images` (found_photo=0). Si la pipeline nunca corrió
+        en esta colección la lista queda vacía.
         """
-        return sorted(
-            key for key, info in self._index.items() if info.get("source") == SOURCE_PLACEHOLDER
-        )
+        conn = self._open_connection()
+        try:
+            placeholders = CardImagesRepository(conn).get_placeholders(self.collection_id)
+            return sorted(f"{p.code_id}-{p.card_number}" for p in placeholders)
+        finally:
+            conn.close()
+
+    def get_found_count(self) -> int:
+        """Cuántas cards tienen `found_photo=True` en card_images."""
+        conn = self._open_connection()
+        try:
+            return CardImagesRepository(conn).get_found_count(self.collection_id)
+        finally:
+            conn.close()
+
+    def get_total_generated(self) -> int:
+        """Cuántas cards tienen alguna imagen registrada (real o placeholder)."""
+        conn = self._open_connection()
+        try:
+            return CardImagesRepository(conn).get_total_generated(self.collection_id)
+        finally:
+            conn.close()
 
     def regenerate_placeholders(
         self,
         on_progress: ProgressCallback | None = None,
         on_log: LogCallback | None = None,
     ) -> PipelineResult:
-        """Borra los PNGs de cards que cayeron a placeholder y los reprocesa.
-
-        El reprocesamiento usa la lógica normal del pipeline (incluyendo
-        las queries mejoradas y la validación por face detection), por lo
-        que un jugador que la primera vez fue placeholder puede ahora
-        encontrar foto real.
-
-        También limpia las fotos crudas del caché de esos cards (si no,
-        el pipeline volvería a leer la imagen vieja desde caché).
-        """
+        """Borra los PNGs de cards que cayeron a placeholder y los reprocesa."""
         keys = self.get_placeholder_card_keys()
         if not keys:
             return PipelineResult(output_dir=self._output_dir)
 
-        # Borrar PNGs y fotos crudas para forzar re-búsqueda
+        # Borrar PNGs viejos para forzar reprocesamiento.
+        # Las fotos crudas en cache_dir son por jugador (compartidas), así
+        # que NO las borramos: si otra colección las descargó, valen.
         for key in keys:
-            png = self.get_output_path(key)
-            png.unlink(missing_ok=True)
-            cached_photo = self._photo_finder.cache_dir / f"{key}.jpg"
-            cached_photo.unlink(missing_ok=True)
-            self._index.pop(key, None)
-        self._save_index()
+            self.get_output_path(key).unlink(missing_ok=True)
 
         return self.run_batch(
             card_keys=keys,
@@ -243,7 +241,7 @@ class ImagePipeline:
     ) -> PipelineResult:
         """Reintenta la cascada completa para las cards en placeholder.
 
-        Procesa SOLO cards con `source=placeholder` en `_index.json`. Para
+        Procesa SOLO cards con `found_photo=0` en `card_images`. Para
         cada una intenta la cascada Wikipedia → DuckDuckGo → Google CSE.
         Las queries a Google se cuentan en `photo_finder.google_calls_used`
         y la cascada deja de probar Google al llegar a `daily_limit`.
@@ -257,26 +255,27 @@ class ImagePipeline:
         if not keys:
             return result
 
-        # Resetear contador y fijar la cuota en el finder. Si el caller
-        # pasó un finder externo, igual confiamos en estas dos props.
+        # Resetear contador y fijar la cuota en el finder.
         self._photo_finder.google_calls_used = 0
         self._photo_finder.google_quota = daily_limit
 
         conn = self._open_connection()
         try:
+            repo = CardImagesRepository(conn)
             jobs = self._load_target_cards(conn, keys)
             result.total = len(jobs)
             for i, job in enumerate(jobs, start=1):
                 if self._stop_event.is_set():
                     break
-                # Borrar PNG y JPG cacheados para forzar la re-búsqueda
-                # vía la cascada completa (sin usar la versión placeholder).
+                # Borrar el PNG viejo para forzar regeneración.
                 self.get_output_path(job["card_key"]).unlink(missing_ok=True)
-                cached = self._photo_finder.cache_dir / f"{job['card_key']}.jpg"
+                # Borrar el cache del jugador para que no use el placeholder
+                # cacheado de un run previo (el placeholder NO se cachea
+                # como foto del jugador, pero por las dudas).
+                cached = self._photo_finder.cached_photo_path(job["card_name"], job["code_id"])
                 cached.unlink(missing_ok=True)
-                self._index.pop(job["card_key"], None)
 
-                self._process_card(job, force=True, result=result, on_log=on_log)
+                self._process_card(job, force=True, result=result, repo=repo, on_log=on_log)
 
                 if on_progress is not None:
                     used = self._photo_finder.google_calls_used
@@ -284,9 +283,9 @@ class ImagePipeline:
                         f"{job['card_key']} {job['card_name']} " f"(Google {used}/{daily_limit})"
                     )
                     on_progress(i, result.total, label)
-            self._save_index()
+            conn.commit()
         finally:
-            self._save_index()
+            conn.commit()
             conn.close()
 
         result.google_calls_used = self._photo_finder.google_calls_used
@@ -300,25 +299,23 @@ class ImagePipeline:
     ) -> PipelineResult:
         """Re-aplica el algoritmo de sketch a las fotos cacheadas.
 
-        Útil tras cambiar el algoritmo de sketch (p.ej. Nivel 3 → Nivel 4):
-        regenera el PNG final usando la foto cruda en `photo_cache/` sin
-        salir a internet. Se saltan los placeholders (su sketch se
-        regenera con `regenerate_placeholders` o `run_google_fill`).
+        Útil tras cambiar el algoritmo de sketch: regenera el PNG final
+        usando la foto cruda en `photo_cache/` sin salir a internet. Se
+        saltan los placeholders (su sketch se regenera con
+        `regenerate_placeholders` o `run_google_fill`).
         """
         self._stop_event.clear()
         result = PipelineResult(output_dir=self._output_dir)
 
-        # Cards con foto real cacheada (cualquier source que no sea placeholder).
-        target_keys = sorted(
-            key
-            for key, info in self._index.items()
-            if info.get("source") and info["source"] != SOURCE_PLACEHOLDER
-        )
-        if not target_keys:
-            return result
-
         conn = self._open_connection()
         try:
+            images = CardImagesRepository(conn).list_by_collection(self.collection_id)
+            target_keys = sorted(
+                f"{img.code_id}-{img.card_number}" for img in images if img.found_photo
+            )
+            if not target_keys:
+                return result
+
             jobs = self._load_target_cards(conn, target_keys)
             result.total = len(jobs)
             for i, job in enumerate(jobs, start=1):
@@ -340,28 +337,60 @@ class ImagePipeline:
         """Abre y retorna una nueva conexión a la DB. Migra por las dudas."""
         conn = create_connection(self._db_path)
         run_migrations(conn)
+        # Ingesto del _index.json viejo si existe (one-shot)
+        self._ingest_legacy_index_if_needed(conn)
         return conn
 
-    def _load_index(self) -> dict[str, dict[str, str]]:
-        """Carga el `_index.json` del output_dir o retorna dict vacío."""
-        if not self._index_path.exists():
-            return {}
-        try:
-            with self._index_path.open(encoding="utf-8") as fh:
-                data = json.load(fh)
-            if isinstance(data, dict):
-                return data
-        except (OSError, json.JSONDecodeError) as exc:
-            logger.warning("No se pudo leer %s: %s", self._index_path, exc)
-        return {}
+    def _ingest_legacy_index_if_needed(self, conn: sqlite3.Connection) -> None:
+        """Migra entries de `_index.json` (antes de migración 003) a card_images.
 
-    def _save_index(self) -> None:
-        """Guarda el `_index.json` con las entradas actuales."""
+        Sólo corre una vez: tras importar, renombra el archivo a `.legacy`.
+        Si ya hay datos en `card_images` para esta colección no pisa nada.
+        """
+        if not self._legacy_index_path.exists():
+            return
+        repo = CardImagesRepository(conn)
+        if repo.get_total_generated(self.collection_id) > 0:
+            # Ya hay datos en card_images para esta colección, no pisar.
+            return
         try:
-            with self._index_path.open("w", encoding="utf-8") as fh:
-                json.dump(self._index, fh, indent=2, ensure_ascii=False)
-        except OSError as exc:
-            logger.warning("No se pudo escribir %s: %s", self._index_path, exc)
+            with self._legacy_index_path.open(encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("No se pudo leer legacy index %s: %s", self._legacy_index_path, exc)
+            return
+        if not isinstance(data, dict):
+            return
+
+        now = format_for_db(utc_now())
+        ingested = 0
+        for card_key, info in data.items():
+            if not isinstance(info, dict):
+                continue
+            source = info.get("source")
+            if not source:
+                continue
+            try:
+                code_id, num_str = card_key.rsplit("-", 1)
+                num = int(num_str)
+            except (ValueError, AttributeError):
+                continue
+            repo.upsert(
+                CardImage(
+                    collection_id=self.collection_id,
+                    code_id=code_id,
+                    card_number=num,
+                    found_photo=(source != SOURCE_PLACEHOLDER),
+                    image_source=source,
+                    image_path=str(self.get_output_path(card_key)),
+                    generated_at=now,
+                )
+            )
+            ingested += 1
+        conn.commit()
+        logger.info("Ingestadas %d entries de %s", ingested, self._legacy_index_path)
+        # Renombrar a .legacy para no volver a procesar
+        self._legacy_index_path.rename(self._legacy_index_path.with_suffix(".json.legacy"))
 
     def _load_target_cards(
         self,
@@ -404,6 +433,7 @@ class ImagePipeline:
         card: _CardJob,
         force: bool,
         result: PipelineResult,
+        repo: CardImagesRepository,
         on_log: LogCallback | None,
     ) -> None:
         card_key = card["card_key"]
@@ -419,7 +449,7 @@ class ImagePipeline:
             photo = self._photo_finder.find_photo(
                 player_name=card["card_name"],
                 country_name=card["code_name"],
-                card_key=card_key,
+                country_code=card["code_id"],
             )
             sketch = self._sketch_generator.generate_sketch(photo.local_path)
             image = self._composer.compose(
@@ -432,10 +462,17 @@ class ImagePipeline:
             self._composer.save(image, out_path)
             self._count_source(photo.source, result)
             result.succeeded += 1
-            self._index[card_key] = {
-                "source": photo.source,
-                "url": photo.source_url,
-            }
+            repo.upsert(
+                CardImage(
+                    collection_id=self.collection_id,
+                    code_id=card["code_id"],
+                    card_number=card["card_number"],
+                    found_photo=(photo.source != SOURCE_PLACEHOLDER),
+                    image_source=photo.source,
+                    image_path=str(out_path),
+                    generated_at=format_for_db(utc_now()),
+                )
+            )
             if on_log is not None:
                 on_log(card_key, photo.source, "ok")
         except Exception as exc:  # noqa: BLE001
@@ -453,7 +490,7 @@ class ImagePipeline:
     ) -> None:
         """Re-aplica sketch+compose a una card que ya tiene foto cacheada."""
         card_key = card["card_key"]
-        cached_jpg = self._photo_finder.cache_dir / f"{card_key}.jpg"
+        cached_jpg = self._photo_finder.cached_photo_path(card["card_name"], card["code_id"])
         if not cached_jpg.exists():
             # El index dice que tiene foto pero el archivo no está; saltar.
             result.failed += 1

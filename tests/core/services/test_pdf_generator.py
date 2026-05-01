@@ -1,6 +1,5 @@
 """Tests del PdfAlbumGenerator."""
 
-
 import pytest
 
 from collections_app.core.models import Card, CodeLine, InventoryItem

@@ -135,52 +135,57 @@ def test_crop_uses_generous_margins():
 
 
 # ----------------------------------------------------------------------
-# Sketch Nivel 4 (Line Art)
+# Sketch tipo lápiz (preprocesamiento + brillo adaptativo)
 # ----------------------------------------------------------------------
 
 
-def test_level4_output_has_mostly_white_background(tmp_path, generator):
-    """El output de Nivel 4 tiene >60% de píxeles blancos (fondo limpio)."""
+def test_preprocess_upscales_small_image(generator):
+    """`_preprocess_photo` upscalea imágenes chicas por encima de 300px."""
+    small = np.full((100, 100, 3), 128, dtype=np.uint8)
+    out = generator._preprocess_photo(small)
+    h, w = out.shape[:2]
+    assert h >= 300
+    assert w >= 300
+
+
+def test_preprocess_keeps_large_image(generator):
+    """Imágenes grandes no se downscalean (sólo se mejora contraste)."""
+    large = np.full((600, 800, 3), 128, dtype=np.uint8)
+    out = generator._preprocess_photo(large)
+    assert out.shape[:2] == (600, 800)
+
+
+def test_sketch_not_too_dark(tmp_path, generator):
+    """El sketch no queda demasiado oscuro: mean global > 100."""
     img_path = tmp_path / "input.jpg"
     _save_synthetic_image(img_path, w=400, h=500)
     sketch = generator.generate_sketch(img_path)
-    white_pct = float(np.mean(sketch == 255))
-    assert white_pct > 0.60, f"Esperado >60% blanco, fue {white_pct:.2%}"
+    assert float(sketch.mean()) > 100
 
 
-def test_level4_output_has_clean_black_lines(tmp_path, generator):
-    """El threshold binario produce solo dos valores: 0 (negro) y 255 (blanco)."""
+def test_sketch_not_too_black(tmp_path, generator):
+    """El sketch nunca queda casi todo negro: mean > 80 incluso en el peor caso."""
     img_path = tmp_path / "input.jpg"
-    _save_synthetic_image(img_path, w=400, h=500)
+    # Imagen muy oscura pero con algo de detalle (un círculo claro al medio)
+    arr = np.full((400, 400, 3), 30, dtype=np.uint8)
+    cv2.circle(arr, (200, 200), 80, (200, 200, 200), -1)
+    cv2.imwrite(str(img_path), arr)
     sketch = generator.generate_sketch(img_path)
-    unique_values = set(np.unique(sketch).tolist())
-    # Tras threshold binario y resize con INTER_AREA puede haber un par de
-    # valores intermedios en los bordes del resize, pero la enorme mayoría
-    # debe ser puro 0 o puro 255.
-    pure_pixels = float(np.mean((sketch == 0) | (sketch == 255)))
-    assert pure_pixels > 0.95, (
-        f"Esperado >95% píxeles puros (0 o 255), fue {pure_pixels:.2%}; "
-        f"valores únicos: {sorted(unique_values)[:10]}"
-    )
+    assert float(sketch.mean()) > 80
 
 
-def test_level4_parameters_are_configurable():
-    """Los parámetros del Nivel 4 son constantes editables del módulo."""
-    from collections_app.admin.image_pipeline import sketch_generator as sg
-
-    # Kernel impar y razonablemente grande
-    assert sg.SKETCH_BLUR_KERNEL >= 51
-    assert sg.SKETCH_BLUR_KERNEL % 2 == 1
-    # Threshold cerca de 255 para fondo limpio
-    assert 180 <= sg.SKETCH_THRESHOLD <= 245
-    # Engrosado configurable y no negativo
-    assert sg.SKETCH_LINE_THICKNESS >= 0
+def test_sketch_output_is_grayscale(tmp_path, generator):
+    """El output es una imagen en escala de grises (1 canal)."""
+    img_path = tmp_path / "input.jpg"
+    _save_synthetic_image(img_path)
+    sketch = generator.generate_sketch(img_path)
+    assert sketch.ndim == 2
 
 
-def test_level4_apply_directly_on_blank_image(generator):
-    """Una imagen blanca da un sketch totalmente blanco."""
-    blank = np.full((200, 200, 3), 240, dtype=np.uint8)
-    out = generator._apply_sketch_level4(blank)
-    assert out.shape == (200, 200)
-    # Imagen plana → sin líneas → todo blanco
-    assert float(np.mean(out == 255)) > 0.95
+def test_apply_sketch_level3_directly(generator):
+    """`_apply_sketch_level3` corre sin error sobre una imagen color válida."""
+    img = np.full((200, 200, 3), 128, dtype=np.uint8)
+    cv2.circle(img, (100, 100), 40, (50, 50, 50), -1)
+    out = generator._apply_sketch_level3(img)
+    assert out.ndim == 2
+    assert out.dtype == np.uint8

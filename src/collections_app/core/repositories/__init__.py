@@ -1,6 +1,7 @@
 """Repositorios: una clase por tabla, encapsulan SQL."""
 
 from collections_app.core.repositories.base import BaseRepository
+from collections_app.core.repositories.card_images_repo import CardImagesRepository
 from collections_app.core.repositories.cards_repo import CardsRepository
 from collections_app.core.repositories.codes_headers_repo import CodesHeadersRepository
 from collections_app.core.repositories.codes_lines_repo import CodesLinesRepository
@@ -11,6 +12,7 @@ from collections_app.core.repositories.transactions_repo import TransactionsRepo
 
 __all__ = [
     "BaseRepository",
+    "CardImagesRepository",
     "CardsRepository",
     "CodesHeadersRepository",
     "CodesLinesRepository",

@@ -1,6 +1,7 @@
 """Modelos de dominio (dataclasses inmutables)."""
 
 from collections_app.core.models.card import Card
+from collections_app.core.models.card_image import CardImage
 from collections_app.core.models.code_header import CodeHeader
 from collections_app.core.models.code_line import CodeLine
 from collections_app.core.models.collection import Collection
@@ -9,6 +10,7 @@ from collections_app.core.models.transaction import OperationType, Transaction
 
 __all__ = [
     "Card",
+    "CardImage",
     "CodeHeader",
     "CodeLine",
     "Collection",

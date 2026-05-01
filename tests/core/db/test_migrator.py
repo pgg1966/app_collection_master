@@ -12,7 +12,7 @@ def test_migrator_applies_all_migrations():
     """Verifica que el migrator aplica todas las migraciones disponibles."""
     conn = create_connection(":memory:")
     final_version = run_migrations(conn)
-    assert final_version >= 2  # mínimo 001 + 002
+    assert final_version >= 3  # 001 + 002 + 003
 
 
 def test_migrator_creates_all_expected_tables(memory_db: sqlite3.Connection):
@@ -31,9 +31,34 @@ def test_migrator_creates_all_expected_tables(memory_db: sqlite3.Connection):
         "cards",
         "inventory",
         "transactions",
+        "card_images",
     }
     # SQLite agrega sqlite_sequence automáticamente con AUTOINCREMENT
     assert expected.issubset(table_names)
+
+
+def test_migration_003_creates_card_images_table(memory_db: sqlite3.Connection):
+    """La migración 003 crea card_images con FK CASCADE desde cards."""
+    cols = memory_db.execute("PRAGMA table_info(card_images)").fetchall()
+    col_names = {row["name"] for row in cols}
+    expected_cols = {
+        "collection_id",
+        "code_id",
+        "card_number",
+        "found_photo",
+        "image_source",
+        "image_path",
+        "generated_at",
+    }
+    assert expected_cols.issubset(col_names)
+
+    # FK con ON DELETE CASCADE hacia cards
+    fks = memory_db.execute("PRAGMA foreign_key_list(card_images)").fetchall()
+    assert any(fk["table"] == "cards" and fk["on_delete"] == "CASCADE" for fk in fks)
+
+    # Index para queries por found_photo
+    indexes = memory_db.execute("PRAGMA index_list(card_images)").fetchall()
+    assert any(idx["name"] == "idx_card_images_found" for idx in indexes)
 
 
 def test_migrator_is_idempotent(memory_db: sqlite3.Connection):
