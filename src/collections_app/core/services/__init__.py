@@ -11,6 +11,11 @@ from collections_app.core.services.license_service import (
     LicenseValidator,
     LocalHashLicenseValidator,
 )
+from collections_app.core.services.pdf_generator import (
+    AlbumConfig,
+    CardSlotData,
+    PdfAlbumGenerator,
+)
 from collections_app.core.services.reports_service import (
     ReportsService,
     TransactionWithCard,
@@ -23,12 +28,15 @@ from collections_app.core.services.settings_service import (
 __all__ = [
     "SETTING_KEY_ACTIVE_COLLECTION",
     "SETTING_KEY_LICENSE_PREFIX",
+    "AlbumConfig",
     "AmbiguousCardError",
+    "CardSlotData",
     "CollectionsService",
     "InventoryService",
     "LicenseService",
     "LicenseValidator",
     "LocalHashLicenseValidator",
+    "PdfAlbumGenerator",
     "ReportsService",
     "SettingsService",
     "TransactionWithCard",

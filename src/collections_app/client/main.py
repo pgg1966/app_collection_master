@@ -8,6 +8,7 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QApplication, QLabel, QTabWidget, QWidget
 
 from collections_app.client.dialogs.client_settings_dialog import ClientSettingsDialog
+from collections_app.client.views.album_view import AlbumView
 from collections_app.client.views.card_loader import CardLoaderView
 from collections_app.client.views.inventory_view import InventoryView
 from collections_app.client.views.reports_view import ReportsView
@@ -92,18 +93,19 @@ class ClientMainWindow(MainWindowBase):
         tabs = QTabWidget()
         self._card_loader = CardLoaderView(self.conn, active)
         self._inventory_view = InventoryView(self.conn, active)
+        self._album_view = AlbumView(self.conn, active)
         self._stats_view = StatsView(self.conn, active)
         self._reports_view = ReportsView(self.conn, active)
 
         tabs.addTab(self._card_loader, self.tr("Cargar Cards"))
         tabs.addTab(self._inventory_view, self.tr("Inventario"))
+        tabs.addTab(self._album_view, self.tr("Álbum"))
         tabs.addTab(self._stats_view, self.tr("Estadísticas"))
         tabs.addTab(self._reports_view, self.tr("Reportes"))
         self.setCentralWidget(tabs)
 
         # Auto-refresh de vistas afectadas tras una alta/baja en CardLoader.
-        # Reports queda fuera: el usuario lo refresca explícitamente al
-        # cambiar filtros (período estable durante una sesión).
+        # Reports y Álbum quedan fuera: el usuario los dispara explícitamente.
         self._card_loader.card_changed.connect(self._inventory_view.refresh)
         self._card_loader.card_changed.connect(self._stats_view.refresh)
 

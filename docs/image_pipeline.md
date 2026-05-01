@@ -139,6 +139,25 @@ manualmente**: editá su PNG en `generated_cards/{cid}/` o reemplazá la
 foto cacheada en `data/photo_cache/{card_key}.jpg` y borrá el PNG para
 que se regenere.
 
+## Cómo el cliente consume estas imágenes
+
+El **`PdfAlbumGenerator`** (en `core/services/pdf_generator.py`) es el
+único consumidor de las imágenes generadas. Para cada card:
+
+1. Calcula `get_generated_card_path(collection_id, card_key)`.
+2. Si el PNG existe → lo dibuja en el PDF (`canvas.drawImage`).
+3. Si NO existe → dibuja un slot esquemático con `#NUM` grande
+   (verde si la card está en inventory, gris si falta).
+
+Los PNGs se reusan tal cual (sin re-procesar) — son los sketches B&W
+producidos por `CardComposer` con fondo celeste/gris según el `owned`
+flag al momento de generación. Si el usuario actualiza el inventory
+después (carga/quita cards), el PDF refleja el estado actual aplicando
+un overlay gris semitransparente sobre las cards faltantes.
+
+El cliente no tiene acceso al pipeline (no necesita opencv ni DDGS para
+correr): solo lee los archivos PNG ya generados por el admin.
+
 ## Tests
 
 Todos los tests del pipeline mockean internet:

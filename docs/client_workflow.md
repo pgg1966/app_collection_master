@@ -53,7 +53,61 @@ Status bar inferior:
 
 Click en columnas para ordenar ascendente; click again para descendente.
 
-## 3. Tab "Estadísticas"
+## 3. Tab "Álbum"
+
+Generador de PDFs imprimibles y exportador de listas TXT.
+
+### Álbum Principal (Únicas)
+
+PDF A4 con todas las cards organizadas por código (cada grupo en una
+nueva página, header rojo arriba). Default 4 columnas × 3 filas = 12
+cards por página, configurable.
+
+- Cards con imagen generada por el admin → sketch B&W.
+- Cards tenidas sin imagen → fondo verde claro con número grande.
+- Cards faltantes → fondo gris (overlay sobre la imagen si la hay).
+- Footer: nombre de la colección + fecha de generación (hora local).
+
+Filtros: incluir solo "Tengo", solo "Faltan", o ambas.
+
+### Álbum de Repetidas
+
+Igual layout que el principal, pero solo con cards de `quantity > 1`.
+Cada slot incluye un badge rojo "x{N}" en la esquina superior derecha
+con el número de copias extra.
+
+Si no hay repetidas, aparece un diálogo informativo y NO se abre el
+FileDialog (evita generar un PDF vacío).
+
+### Exportar listas TXT
+
+- **Lista de faltantes**: agrupada por código, formato fácil de pegar
+  en mensajes a otros coleccionistas.
+- **Lista de repetidas**: con cantidad de copias extras (`×N`).
+
+Tras exportar, el archivo se abre automáticamente con el editor de
+texto del SO (`QDesktopServices.openUrl`).
+
+### Info de imágenes
+
+La sección inferior muestra cuántas imágenes generadas hay para la
+colección activa:
+
+```
+Imágenes generadas: 143 / 630 (22.7%)
+Las cards sin imagen mostrarán solo número y nombre.
+```
+
+Si no hay ninguna imagen generada, aparece un cartel sugiriendo
+generarlas desde el Admin (tab **Generar Imágenes**).
+
+### QThread + Progreso
+
+El PDF de 630 cards puede tardar varios segundos. La generación corre
+en un `_PdfWorker` (QThread) y la UI muestra un `QProgressDialog`
+cancelable. Si el usuario cancela, el PDF parcial se borra.
+
+## 5. Tab "Estadísticas"
 
 - **Progreso general**: barra global de `owned/total` con porcentaje.
 - **Por código**: una barra por cada código del header con `owned/total
@@ -64,7 +118,7 @@ Click en columnas para ordenar ascendente; click again para descendente.
 
 Auto-refresh al cargar/quitar cards desde "Cargar Cards".
 
-## 4. Tab "Reportes"
+## 6. Tab "Reportes"
 
 Bitácora de altas/bajas con filtros de período y operación.
 
