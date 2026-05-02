@@ -15,13 +15,16 @@ Cada `code_id` (ej. "ARG", "BRA") tiene UN escudo en
 4. Si todo falla, se genera un placeholder con las iniciales del
    code_id sobre un círculo gris.
 
-Las API keys (`google_api_key`, `google_cse_id`) viven en `app_settings`.
-Si no están configuradas, la cascada salta a placeholder con un log
-explícito (no es un error).
+Las API keys se leen con cascada: primero `app_settings` (claves
+`google_api_key` / `google_cse_id`), luego env vars `GOOGLE_API_KEY`
+/ `GOOGLE_CSE_ID` como fallback. Si no están en ninguna de las dos
+fuentes, la cascada salta a placeholder con un log explícito (no es
+un error).
 """
 
 import io
 import logging
+import os
 import sqlite3
 import time
 from collections.abc import Callable
@@ -89,8 +92,17 @@ SOURCE_MANUAL = "manual"
 SOURCE_PLACEHOLDER = "placeholder"
 
 # Settings keys donde viven las credenciales de Google CSE.
+# OJO: estos son los NOMBRES de las entries en `app_settings`, NO los
+# valores. Las credenciales reales se setean vía SettingsRepository.set()
+# o se leen de las env vars de abajo.
 SETTING_GOOGLE_API_KEY = "google_api_key"
 SETTING_GOOGLE_CSE_ID = "google_cse_id"
+
+# Env vars usadas como fallback cuando `app_settings` no tiene las claves.
+# Mantienen el nombre histórico del antiguo image_pipeline para no obligar
+# al usuario a re-setear nada.
+ENV_GOOGLE_API_KEY = "GOOGLE_API_KEY"
+ENV_GOOGLE_CSE_ID = "GOOGLE_CSE_ID"
 
 
 @dataclass(frozen=True)
@@ -103,6 +115,23 @@ class CrestResult:
     source: str  # "cache" | "google" | "manual" | "placeholder"
     success: bool
     error: str | None = None
+
+
+def _load_google_credentials(
+    conn: sqlite3.Connection,
+) -> tuple[str | None, str | None]:
+    """Lee las credenciales de Google CSE con cascada `app_settings` → env vars.
+
+    Retorna `(api_key, cse_id)`. Cualquiera puede ser `None` si no está
+    configurado en ninguna de las dos fuentes. Las env vars se usan como
+    fallback porque era el patrón histórico del proyecto antes del refactor;
+    permite que usuarios con `GOOGLE_API_KEY`/`GOOGLE_CSE_ID` ya seteadas
+    no necesiten migrar nada.
+    """
+    settings = SettingsRepository(conn)
+    api_key = settings.get(SETTING_GOOGLE_API_KEY) or os.environ.get(ENV_GOOGLE_API_KEY)
+    cse_id = settings.get(SETTING_GOOGLE_CSE_ID) or os.environ.get(ENV_GOOGLE_CSE_ID)
+    return api_key, cse_id
 
 
 def _build_crest_queries(code_name: str) -> list[tuple[str, str]]:
@@ -260,12 +289,17 @@ class CrestFinder:
         sucesivas para no mezclar contextos). Si la API no está
         configurada o la cuota se agota, retorna `[]` sin levantar.
         """
-        settings = SettingsRepository(conn)
-        api_key = settings.get(SETTING_GOOGLE_API_KEY)
-        cse_id = settings.get(SETTING_GOOGLE_CSE_ID)
-
+        api_key, cse_id = _load_google_credentials(conn)
         if not api_key or not cse_id:
-            logger.info("Crest %s: Google CSE no configurado — placeholder", code_name)
+            logger.info(
+                "Crest %s: Google CSE no configurado "
+                "(seteá %s/%s en app_settings o las env vars %s/%s) — placeholder",
+                code_name,
+                SETTING_GOOGLE_API_KEY,
+                SETTING_GOOGLE_CSE_ID,
+                ENV_GOOGLE_API_KEY,
+                ENV_GOOGLE_CSE_ID,
+            )
             return []
 
         for query, img_type in _build_crest_queries(code_name):

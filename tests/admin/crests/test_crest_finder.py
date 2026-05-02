@@ -13,6 +13,8 @@ import responses
 from PIL import Image
 
 from collections_app.admin.crests.crest_finder import (
+    ENV_GOOGLE_API_KEY,
+    ENV_GOOGLE_CSE_ID,
     GOOGLE_CSE_URL,
     MIN_VALID_FILE_BYTES,
     SETTING_GOOGLE_API_KEY,
@@ -23,6 +25,7 @@ from collections_app.admin.crests.crest_finder import (
     SPECIAL_CODES,
     CrestFinder,
     _build_crest_queries,
+    _load_google_credentials,
     is_valid_crest_file,
 )
 from collections_app.core.repositories.settings_repo import SettingsRepository
@@ -321,15 +324,73 @@ def test_search_google_crest_returns_urls_when_configured(tmp_path, monkeypatch,
 
 
 def test_search_google_crest_returns_empty_when_not_configured(tmp_path, monkeypatch, memory_db):
-    """Sin api_key/cse_id, retorna [] sin hacer requests."""
+    """Sin api_key/cse_id en settings NI env vars, retorna [] sin hacer requests."""
     _redirect_crest_paths(monkeypatch, tmp_path)
-    # NO seteamos las keys
+    # NO seteamos las keys en settings; tampoco deben existir como env vars
+    monkeypatch.delenv(ENV_GOOGLE_API_KEY, raising=False)
+    monkeypatch.delenv(ENV_GOOGLE_CSE_ID, raising=False)
 
     finder = CrestFinder()
     with responses.RequestsMock():  # ningún request debe ocurrir
         urls = finder._search_google_crest("ARGENTINA", memory_db)
 
     assert urls == []
+
+
+# ----------------------------------------------------------------------
+# Cascada settings → env vars en _load_google_credentials
+# ----------------------------------------------------------------------
+
+
+def test_load_credentials_uses_settings_when_present(monkeypatch, memory_db):
+    """Si las claves están en `app_settings`, esas ganan sobre env vars."""
+    _set_google_keys(memory_db)  # setea "from-settings"
+    monkeypatch.setenv(ENV_GOOGLE_API_KEY, "from-env")
+    monkeypatch.setenv(ENV_GOOGLE_CSE_ID, "from-env")
+
+    api_key, cse_id = _load_google_credentials(memory_db)
+    assert api_key == "test-api-key"
+    assert cse_id == "test-cse-id"
+
+
+def test_load_credentials_falls_back_to_env_vars(monkeypatch, memory_db):
+    """Sin entradas en settings, lee de env vars."""
+    # Sin _set_google_keys(): app_settings vacío
+    monkeypatch.setenv(ENV_GOOGLE_API_KEY, "env-api-key")
+    monkeypatch.setenv(ENV_GOOGLE_CSE_ID, "env-cse-id")
+
+    api_key, cse_id = _load_google_credentials(memory_db)
+    assert api_key == "env-api-key"
+    assert cse_id == "env-cse-id"
+
+
+def test_load_credentials_returns_none_when_neither_present(monkeypatch, memory_db):
+    """Sin settings ni env vars, retorna (None, None)."""
+    monkeypatch.delenv(ENV_GOOGLE_API_KEY, raising=False)
+    monkeypatch.delenv(ENV_GOOGLE_CSE_ID, raising=False)
+
+    api_key, cse_id = _load_google_credentials(memory_db)
+    assert api_key is None
+    assert cse_id is None
+
+
+def test_search_google_crest_uses_env_var_fallback(tmp_path, monkeypatch, memory_db):
+    """`_search_google_crest` funciona end-to-end leyendo solo de env vars."""
+    _redirect_crest_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv(ENV_GOOGLE_API_KEY, "env-api-key")
+    monkeypatch.setenv(ENV_GOOGLE_CSE_ID, "env-cse-id")
+
+    finder = CrestFinder()
+    with responses.RequestsMock() as rsps:
+        rsps.add(
+            responses.GET,
+            GOOGLE_CSE_URL,
+            json={"items": [{"link": "https://example.com/from-env.png"}]},
+            status=200,
+        )
+        urls = finder._search_google_crest("ARGENTINA", memory_db)
+
+    assert urls == ["https://example.com/from-env.png"]
 
 
 def test_search_google_crest_returns_empty_on_quota_exhausted(tmp_path, monkeypatch, memory_db):
