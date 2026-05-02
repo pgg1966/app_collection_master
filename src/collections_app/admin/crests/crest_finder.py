@@ -3,14 +3,20 @@
 Cada `code_id` (ej. "ARG", "BRA") tiene UN escudo en
 `get_crest_path(code_id)`. La cascada de descarga es:
 
-1. Cache local — si el archivo ya existe, no se redescarga.
+1. Cache local válido — si ya existe un PNG > MIN_VALID_FILE_BYTES,
+   no se redescarga (`is_valid_crest_file`).
 2. Si el code_id está en `SPECIAL_CODES` (sets temáticos sin equipo
    nacional asociado, p.ej. Golden Ballers), se genera placeholder
    directamente — el usuario debe importar la imagen manualmente.
-3. Wikipedia API: la página del seleccionado nacional contiene el
-   thumbnail con el escudo o el escudo de la asociación. Bajamos esa
-   imagen, la convertimos a RGBA 200×200 y la guardamos.
-4. Si Wikipedia falla, generamos un placeholder con las iniciales del
+3. Wikipedia Action API (`prop=pageimages`): devuelve la URL del
+   escudo principal de la página, incluso cuando es un SVG (a
+   diferencia del endpoint REST `page/summary` que solo expone fotos
+   fotográficas). Se pide `pithumbsize=300` para obtener un PNG
+   rasterizado y evitar pasar por cairosvg.
+4. Wikimedia Commons: si Wikipedia no tiene imagen, se busca el escudo
+   por nombre de federación (ej. "Argentina football federation") en
+   Commons y se baja `thumburl` (PNG rasterizado).
+5. Si todo falla, se genera un placeholder con las iniciales del
    code_id sobre un círculo gris.
 
 El nombre del país en `code_name` viene del CSV (ya en MAYÚSCULAS sin
@@ -32,12 +38,15 @@ from collections_app.core.utils.paths import get_crest_path, get_crests_dir
 
 logger = logging.getLogger(__name__)
 
-WIKIPEDIA_TIMEOUT = 10
-DOWNLOAD_TIMEOUT = 10
+WIKIPEDIA_API_URL = "https://en.wikipedia.org/w/api.php"
+COMMONS_API_URL = "https://commons.wikimedia.org/w/api.php"
+WIKIPEDIA_TIMEOUT = 15  # Action API puede ser más lenta que summary
+DOWNLOAD_TIMEOUT = 15  # algunos PNGs grandes necesitan más margen
 USER_AGENT = "CollectionsApp/1.0"
 RATE_LIMIT_DELAY = 1.0  # segundos entre requests a Wikipedia
 CREST_TARGET_SIZE = (200, 200)
 SVG_RENDER_SIZE = 200
+WIKIPEDIA_THUMB_SIZE = 300  # px — tamaño del thumbnail rasterizado pedido a la API
 
 # Tamaño mínimo (en bytes) que debe tener una respuesta HTTP para ser
 # considerada una imagen real. Las descargas válidas (PNG/JPEG/SVG de
@@ -86,6 +95,13 @@ SOURCE_PLACEHOLDER = "placeholder"
 
 # Mapeo de nombres en MAYÚSCULAS sin acentos (los que produce el cleanup
 # de CSV) → título de la página en Wikipedia inglesa.
+#
+# Notas sobre títulos:
+# - Algunos países usan "men's national" en el título oficial (Canada, USA,
+#   New Zealand) porque el título corto sin "men's" es una página de
+#   desambiguación que no contiene la imagen del escudo.
+# - Mantenemos las dos variantes (español + inglés) cuando el CSV puede
+#   venir en cualquiera de los dos idiomas.
 COUNTRY_WIKIPEDIA_MAP: dict[str, str] = {
     "ARGELIA": "Algeria national football team",
     "ALGERIA": "Algeria national football team",
@@ -98,19 +114,24 @@ COUNTRY_WIKIPEDIA_MAP: dict[str, str] = {
     "BRASIL": "Brazil national football team",
     "BRAZIL": "Brazil national football team",
     "C. DE MARFIL": "Ivory Coast national football team",
+    "IVORY COAST": "Ivory Coast national football team",
     "CABO VERDE": "Cape Verde national football team",
-    "CANADA": "Canada national soccer team",
+    "CAPE VERDE": "Cape Verde national football team",
+    "CANADA": "Canada men's national soccer team",
     "COLOMBIA": "Colombia national football team",
     "CROACIA": "Croatia national football team",
     "CROATIA": "Croatia national football team",
     "CURAZAO": "Curaçao national football team",
+    "CURACAO": "Curaçao national football team",
     "ECUADOR": "Ecuador national football team",
     "EGIPTO": "Egypt national football team",
     "EGYPT": "Egypt national football team",
     "ESCOCIA": "Scotland national football team",
+    "SCOTLAND": "Scotland national football team",
     "ESPAÑA": "Spain national football team",
     "SPAIN": "Spain national football team",
     "ESTADOS UNIDOS": "United States men's national soccer team",
+    "UNITED STATES": "United States men's national soccer team",
     "FRANCIA": "France national football team",
     "FRANCE": "France national football team",
     "GERMANY": "Germany national football team",
@@ -130,7 +151,8 @@ COUNTRY_WIKIPEDIA_MAP: dict[str, str] = {
     "MEXICO": "Mexico national football team",
     "NORUEGA": "Norway national football team",
     "NORWAY": "Norway national football team",
-    "NUEVA ZELANDA": "New Zealand national football team",
+    "NUEVA ZELANDA": "New Zealand men's national football team",
+    "NEW ZEALAND": "New Zealand men's national football team",
     "PAISES BAJOS": "Netherlands national football team",
     "NETHERLANDS": "Netherlands national football team",
     "PANAMA": "Panama national football team",
@@ -140,9 +162,12 @@ COUNTRY_WIKIPEDIA_MAP: dict[str, str] = {
     "RD CONGO": "DR Congo national football team",
     "REP. CHECA": "Czech Republic national football team",
     "REP. COREA": "South Korea national football team",
+    "KOREA REPUBLIC": "South Korea national football team",
     "ARABIA SAUDITA": "Saudi Arabia national football team",
+    "SAUDI ARABIA": "Saudi Arabia national football team",
     "SENEGAL": "Senegal national football team",
     "SUDAFRICA": "South Africa national football team",
+    "SOUTH AFRICA": "South Africa national football team",
     "SUECIA": "Sweden national football team",
     "SUIZA": "Switzerland national football team",
     "SWITZERLAND": "Switzerland national football team",
@@ -179,8 +204,14 @@ class CrestFinder:
     def find_crest(self, code_id: str, code_name: str) -> CrestResult:
         """Busca el escudo para un `code_id`.
 
-        Cascada: cache → (special: placeholder) → Wikipedia → placeholder.
-        Devuelve un `CrestResult` con el path local y el source.
+        Cascada:
+        1. Cache válido (`is_valid_crest_file`).
+        2. Si está en `SPECIAL_CODES` → placeholder con iniciales.
+        3. Wikipedia Action API (`prop=pageimages`).
+        4. Fallback: Wikimedia Commons (búsqueda por federación nacional).
+        5. Placeholder con iniciales.
+
+        Devuelve un `CrestResult` con el path local y el `source`.
         """
         dest = get_crest_path(code_id)
         if is_valid_crest_file(dest):
@@ -206,7 +237,13 @@ class CrestFinder:
         if wiki_url and self._download_and_process_crest(wiki_url, dest):
             return CrestResult(code_id, code_name, dest, SOURCE_WIKIPEDIA, True)
 
-        # Fallback: placeholder con iniciales
+        # Wikipedia falló (página sin imagen, SVG sin cairosvg, etc.):
+        # intentar Commons como segundo origen antes de dar por perdido.
+        commons_url = self._get_wikimedia_commons_url(code_name)
+        if commons_url and self._download_and_process_crest(commons_url, dest):
+            return CrestResult(code_id, code_name, dest, SOURCE_WIKIPEDIA, True)
+
+        # Fallback final: placeholder con iniciales
         self._generate_placeholder_crest(code_id, dest)
         return CrestResult(
             code_id,
@@ -214,7 +251,7 @@ class CrestFinder:
             dest,
             SOURCE_PLACEHOLDER,
             True,
-            error="No se encontró escudo en Wikipedia",
+            error="No se encontró escudo en Wikipedia ni en Commons",
         )
 
     def find_all_crests(
@@ -264,40 +301,142 @@ class CrestFinder:
     # ------------------------------------------------------------------
 
     def _get_wikipedia_crest_url(self, code_name: str) -> str | None:
-        """Resuelve `code_name` a una URL de imagen via Wikipedia API.
+        """Resuelve `code_name` a una URL de imagen via Wikipedia Action API.
 
-        1. Mapea `code_name` (ej. "ARGENTINA") al título de la página en
-           Wikipedia inglesa (ej. "Argentina national football team").
-        2. Usa el endpoint REST `page/summary/{title}` que devuelve un
-           thumbnail con el escudo del seleccionado nacional.
-        3. Si el thumbnail no existe, retorna None.
+        Usa `prop=pageimages` (Action API) en vez del endpoint REST
+        `page/summary`: este último solo devuelve la "lead image" cuando es
+        una FOTO, así que para selecciones de fútbol —cuya imagen principal
+        suele ser un escudo SVG— retorna respuestas sin imagen y pesa apenas
+        500-700 bytes. La Action API con `piprop=original|thumbnail` sí
+        expone el escudo y, además, sirve un thumbnail rasterizado en PNG
+        (vía `pithumbsize`) que evita pasar por cairosvg en el caller.
         """
         title = COUNTRY_WIKIPEDIA_MAP.get(code_name.upper())
         if not title:
+            logger.debug("No hay mapeo Wikipedia para %r", code_name)
             return None
-        url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{title.replace(' ', '_')}"
+
+        params: dict[str, str | int] = {
+            "action": "query",
+            "titles": title,
+            "prop": "pageimages",
+            "piprop": "original|thumbnail",
+            "pithumbsize": WIKIPEDIA_THUMB_SIZE,
+            "format": "json",
+            "redirects": 1,
+        }
         try:
             r = requests.get(
-                url,
+                WIKIPEDIA_API_URL,
+                params=params,
                 timeout=WIKIPEDIA_TIMEOUT,
                 headers={"User-Agent": USER_AGENT},
             )
             if r.status_code != 200:
-                logger.debug("Wikipedia returned %s for %r", r.status_code, title)
+                logger.debug("Wikipedia Action API returned %s for %r", r.status_code, title)
                 return None
             data = r.json()
-            # Preferir `thumbnail` sobre `originalimage`: Wikipedia sirve los
-            # thumbnails como PNG rasterizado incluso cuando el original es
-            # SVG. Pillow no abre SVG nativamente, así que el thumbnail evita
-            # tener que pasar por cairosvg en la mayoría de los casos.
-            thumb = data.get("thumbnail") or data.get("originalimage") or {}
-            if not isinstance(thumb, dict):
-                return None
-            src = thumb.get("source")
-            return str(src) if src else None
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("Wikipedia lookup failed for %r: %s", title, exc)
+            pages = data.get("query", {}).get("pages", {}) or {}
+            for page in pages.values():
+                if not isinstance(page, dict):
+                    continue
+                thumb = page.get("thumbnail") or {}
+                thumb_url = thumb.get("source") if isinstance(thumb, dict) else None
+                original = page.get("original") or {}
+                orig_url = original.get("source") if isinstance(original, dict) else None
+                # Preferir thumbnail (PNG rasterizado a WIKIPEDIA_THUMB_SIZE)
+                # sobre original (puede ser SVG y forzaría cairosvg).
+                url = thumb_url or orig_url
+                if url:
+                    return str(url)
+            logger.debug("Wikipedia no devolvió imagen para %r", title)
             return None
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Wikipedia Action API falló para %r: %s", title, exc)
+            return None
+
+    def _get_wikimedia_commons_url(self, code_name: str) -> str | None:
+        """Fallback: busca el escudo en Wikimedia Commons.
+
+        Cuando la búsqueda en Wikipedia falla (página sin pageimage o
+        descarga rota), intenta encontrar un archivo en Commons buscando
+        por "{country} football federation" en el namespace File:. Toma el
+        primer resultado y resuelve su URL de descarga (`thumburl` cuando
+        está disponible para evitar SVG, sino `url`).
+        """
+        title = COUNTRY_WIKIPEDIA_MAP.get(code_name.upper())
+        if not title:
+            return None
+        # "Argentina national football team" → "Argentina"
+        country_word = title.split()[0]
+        search_query = f"{country_word} football federation"
+        params: dict[str, str | int] = {
+            "action": "query",
+            "list": "search",
+            "srsearch": search_query,
+            "srnamespace": 6,  # namespace File:
+            "srlimit": 3,
+            "format": "json",
+        }
+        try:
+            r = requests.get(
+                COMMONS_API_URL,
+                params=params,
+                timeout=WIKIPEDIA_TIMEOUT,
+                headers={"User-Agent": USER_AGENT},
+            )
+            if r.status_code != 200:
+                return None
+            data = r.json()
+            results = data.get("query", {}).get("search", []) or []
+            if not results:
+                logger.debug("Commons search vacío para %r", search_query)
+                return None
+            file_title = results[0].get("title")
+            if not file_title:
+                return None
+            return self._get_commons_file_url(str(file_title))
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Commons search falló para %r: %s", search_query, exc)
+            return None
+
+    def _get_commons_file_url(self, file_title: str) -> str | None:
+        """Obtiene la URL de descarga de un `File:` de Commons.
+
+        Pide `iiprop=url|thumburl` con `iiurlwidth=WIKIPEDIA_THUMB_SIZE` —
+        el `thumburl` viene como PNG rasterizado incluso si el original es
+        SVG, lo que evita la dependencia a cairosvg.
+        """
+        params: dict[str, str | int] = {
+            "action": "query",
+            "titles": file_title,
+            "prop": "imageinfo",
+            "iiprop": "url|thumburl",
+            "iiurlwidth": WIKIPEDIA_THUMB_SIZE,
+            "format": "json",
+        }
+        try:
+            r = requests.get(
+                COMMONS_API_URL,
+                params=params,
+                timeout=WIKIPEDIA_TIMEOUT,
+                headers={"User-Agent": USER_AGENT},
+            )
+            if r.status_code != 200:
+                return None
+            data = r.json()
+            pages = data.get("query", {}).get("pages", {}) or {}
+            for page in pages.values():
+                if not isinstance(page, dict):
+                    continue
+                infos = page.get("imageinfo") or []
+                if infos and isinstance(infos[0], dict):
+                    url = infos[0].get("thumburl") or infos[0].get("url")
+                    if url:
+                        return str(url)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Commons file URL falló para %r: %s", file_title, exc)
+        return None
 
     # ------------------------------------------------------------------
     # Descarga y procesamiento

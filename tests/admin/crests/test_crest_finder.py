@@ -9,15 +9,27 @@ import responses
 from PIL import Image
 
 from collections_app.admin.crests.crest_finder import (
+    COMMONS_API_URL,
     COUNTRY_WIKIPEDIA_MAP,
     MIN_VALID_FILE_BYTES,
     SOURCE_CACHE,
     SOURCE_PLACEHOLDER,
     SOURCE_WIKIPEDIA,
     SPECIAL_CODES,
+    WIKIPEDIA_API_URL,
     CrestFinder,
     is_valid_crest_file,
 )
+
+
+def _action_api_response(thumb_url: str | None = None, original_url: str | None = None) -> dict:
+    """Construye una respuesta válida de la Action API con prop=pageimages."""
+    page: dict = {"pageid": 12345, "ns": 0, "title": "X"}
+    if thumb_url is not None:
+        page["thumbnail"] = {"source": thumb_url, "width": 300, "height": 300}
+    if original_url is not None:
+        page["original"] = {"source": original_url, "width": 1024, "height": 1024}
+    return {"query": {"pages": {"12345": page}}}
 
 
 def _png_bytes(w: int = 200, h: int = 200) -> bytes:
@@ -71,7 +83,7 @@ def test_special_codes_go_to_placeholder(tmp_path, monkeypatch):
 
 
 def test_wikipedia_api_called_for_country(tmp_path, monkeypatch):
-    """Para un país, se hace request a Wikipedia y se baja el thumbnail."""
+    """Para un país, se hace request a la Action API y se baja el thumbnail."""
     monkeypatch.setattr(
         "collections_app.admin.crests.crest_finder.get_crests_dir", lambda: tmp_path
     )
@@ -80,16 +92,13 @@ def test_wikipedia_api_called_for_country(tmp_path, monkeypatch):
         lambda code_id: tmp_path / f"{code_id}.png",
     )
 
-    summary_url = (
-        "https://en.wikipedia.org/api/rest_v1/page/summary/" "Argentina_national_football_team"
-    )
     img_url = "https://example.com/argentina-crest.png"
 
     with responses.RequestsMock() as rsps:
         rsps.add(
             responses.GET,
-            summary_url,
-            json={"thumbnail": {"source": img_url}},
+            WIKIPEDIA_API_URL,
+            json=_action_api_response(thumb_url=img_url),
             status=200,
         )
         rsps.add(responses.GET, img_url, body=_png_bytes(), status=200)
@@ -143,7 +152,7 @@ def test_placeholder_generated_with_code_initials(tmp_path, monkeypatch):
 
 
 def test_invalid_image_url_triggers_placeholder(tmp_path, monkeypatch):
-    """Si Wikipedia retorna un thumbnail inválido, se genera placeholder."""
+    """Si Wikipedia y Commons fallan, la cascada termina en placeholder."""
     monkeypatch.setattr(
         "collections_app.admin.crests.crest_finder.get_crests_dir", lambda: tmp_path
     )
@@ -152,19 +161,25 @@ def test_invalid_image_url_triggers_placeholder(tmp_path, monkeypatch):
         lambda code_id: tmp_path / f"{code_id}.png",
     )
 
-    summary_url = (
-        "https://en.wikipedia.org/api/rest_v1/page/summary/" "Brazil_national_football_team"
-    )
     img_url = "https://example.com/bad.png"
 
     with responses.RequestsMock() as rsps:
+        # Wikipedia API → URL "ok"
         rsps.add(
             responses.GET,
-            summary_url,
-            json={"thumbnail": {"source": img_url}},
+            WIKIPEDIA_API_URL,
+            json=_action_api_response(thumb_url=img_url),
             status=200,
         )
+        # Pero la imagen es inválida (12 bytes)
         rsps.add(responses.GET, img_url, body=b"not an image", status=200)
+        # Fallback a Commons: search vacío → no devuelve URL alternativa
+        rsps.add(
+            responses.GET,
+            COMMONS_API_URL,
+            json={"query": {"search": []}},
+            status=200,
+        )
 
         finder = CrestFinder()
         result = finder.find_crest("BRA", "BRAZIL")
@@ -401,16 +416,13 @@ def test_corrupt_cache_is_deleted_and_retried(tmp_path, monkeypatch):
     corrupt.write_bytes(b"")
     assert corrupt.exists()
 
-    summary_url = (
-        "https://en.wikipedia.org/api/rest_v1/page/summary/" "Uruguay_national_football_team"
-    )
     img_url = "https://example.com/uruguay-crest.png"
 
     with responses.RequestsMock() as rsps:
         rsps.add(
             responses.GET,
-            summary_url,
-            json={"thumbnail": {"source": img_url}},
+            WIKIPEDIA_API_URL,
+            json=_action_api_response(thumb_url=img_url),
             status=200,
         )
         rsps.add(responses.GET, img_url, body=_png_bytes(), status=200)
@@ -465,3 +477,242 @@ def test_save_too_small_is_discarded(tmp_path, monkeypatch):
 
     assert ok is False
     assert not dest.exists()
+
+
+# ----------------------------------------------------------------------
+# Action API (PARTE 2 del refactor)
+# ----------------------------------------------------------------------
+
+
+def test_get_wikipedia_crest_url_uses_action_api():
+    """`_get_wikipedia_crest_url` debe pegarle a /w/api.php (no al REST viejo)."""
+    img_url = "https://example.com/crest.png"
+    with responses.RequestsMock() as rsps:
+        rsps.add(
+            responses.GET,
+            WIKIPEDIA_API_URL,
+            json=_action_api_response(thumb_url=img_url),
+            status=200,
+        )
+        finder = CrestFinder()
+        url = finder._get_wikipedia_crest_url("ARGENTINA")
+
+        assert url == img_url
+        # Hubo exactamente 1 request, al endpoint Action API
+        assert len(rsps.calls) == 1
+        called = rsps.calls[0].request.url
+        assert "/w/api.php" in called
+        assert "/api/rest_v1/" not in called
+
+
+def test_get_wikipedia_crest_url_prefers_thumbnail_over_original():
+    """thumbnail (PNG rasterizado) debe ganar sobre original (puede ser SVG)."""
+    thumb = "https://example.com/thumb.png"
+    original = "https://example.com/original.svg"
+    with responses.RequestsMock() as rsps:
+        rsps.add(
+            responses.GET,
+            WIKIPEDIA_API_URL,
+            json=_action_api_response(thumb_url=thumb, original_url=original),
+            status=200,
+        )
+        finder = CrestFinder()
+        assert finder._get_wikipedia_crest_url("ARGENTINA") == thumb
+
+
+def test_get_wikipedia_crest_url_falls_back_to_original_when_no_thumbnail():
+    """Si no hay thumbnail, debe usar original.source."""
+    original = "https://example.com/original.svg"
+    with responses.RequestsMock() as rsps:
+        rsps.add(
+            responses.GET,
+            WIKIPEDIA_API_URL,
+            json=_action_api_response(original_url=original),
+            status=200,
+        )
+        finder = CrestFinder()
+        assert finder._get_wikipedia_crest_url("ARGENTINA") == original
+
+
+def test_get_wikipedia_crest_url_returns_none_when_no_image():
+    """Sin thumbnail ni original, debe retornar None (no levantar)."""
+    with responses.RequestsMock() as rsps:
+        rsps.add(
+            responses.GET,
+            WIKIPEDIA_API_URL,
+            json=_action_api_response(),  # ni thumbnail ni original
+            status=200,
+        )
+        finder = CrestFinder()
+        assert finder._get_wikipedia_crest_url("ARGENTINA") is None
+
+
+def test_get_wikipedia_crest_url_handles_missing_pages_node():
+    """Una respuesta sin `query.pages` no debe romper, debe devolver None."""
+    with responses.RequestsMock() as rsps:
+        rsps.add(responses.GET, WIKIPEDIA_API_URL, json={}, status=200)
+        finder = CrestFinder()
+        assert finder._get_wikipedia_crest_url("ARGENTINA") is None
+
+
+# ----------------------------------------------------------------------
+# Mapeos de COUNTRY_WIKIPEDIA_MAP (PARTE 1)
+# ----------------------------------------------------------------------
+
+
+def test_canada_mapped_correctly():
+    """CANADA debe apuntar a la página específica con `men's`, no a la desambiguación."""
+    assert COUNTRY_WIKIPEDIA_MAP["CANADA"] == "Canada men's national soccer team"
+
+
+def test_new_zealand_mapped_correctly():
+    """NEW ZEALAND y NUEVA ZELANDA usan la página `men's`."""
+    expected = "New Zealand men's national football team"
+    assert COUNTRY_WIKIPEDIA_MAP["NUEVA ZELANDA"] == expected
+    assert COUNTRY_WIKIPEDIA_MAP["NEW ZEALAND"] == expected
+
+
+def test_csv_country_names_all_mapped():
+    """Todos los nombres del CSV (no SPECIAL) deben estar en el mapa."""
+    csv_country_names = {
+        "ALGERIA",
+        "ARGENTINA",
+        "AUSTRALIA",
+        "AUSTRIA",
+        "BELGIUM",
+        "BRAZIL",
+        "CANADA",
+        "CAPE VERDE",
+        "COLOMBIA",
+        "CROATIA",
+        "CURACAO",
+        "ECUADOR",
+        "EGYPT",
+        "ENGLAND",
+        "FRANCE",
+        "GERMANY",
+        "GHANA",
+        "HAITI",
+        "IRAN",
+        "IVORY COAST",
+        "JAPAN",
+        "JORDAN",
+        "KOREA REPUBLIC",
+        "MEXICO",
+        "MOROCCO",
+        "NETHERLANDS",
+        "NEW ZEALAND",
+        "NORWAY",
+        "PANAMA",
+        "PARAGUAY",
+        "PORTUGAL",
+        "QATAR",
+        "SAUDI ARABIA",
+        "SCOTLAND",
+        "SENEGAL",
+        "SOUTH AFRICA",
+        "SPAIN",
+        "SWITZERLAND",
+        "TUNISIA",
+        "UNITED STATES",
+        "URUGUAY",
+        "UZBEKISTAN",
+    }
+    missing = csv_country_names - set(COUNTRY_WIKIPEDIA_MAP)
+    assert not missing, f"Faltan en COUNTRY_WIKIPEDIA_MAP: {sorted(missing)}"
+
+
+# ----------------------------------------------------------------------
+# Fallback Wikimedia Commons (PARTE 3)
+# ----------------------------------------------------------------------
+
+
+def test_wikimedia_commons_fallback_called_when_wikipedia_fails(tmp_path, monkeypatch):
+    """Si Wikipedia no devuelve URL, se intenta Commons antes de placeholder."""
+    monkeypatch.setattr(
+        "collections_app.admin.crests.crest_finder.get_crests_dir", lambda: tmp_path
+    )
+    monkeypatch.setattr(
+        "collections_app.admin.crests.crest_finder.get_crest_path",
+        lambda code_id: tmp_path / f"{code_id}.png",
+    )
+
+    commons_img = "https://example.com/commons-arg.png"
+
+    finder = CrestFinder()
+    with (
+        patch.object(finder, "_get_wikipedia_crest_url", return_value=None),
+        patch.object(finder, "_get_wikimedia_commons_url", return_value=commons_img),
+        responses.RequestsMock() as rsps,
+    ):
+        rsps.add(responses.GET, commons_img, body=_png_bytes(), status=200)
+        result = finder.find_crest("ARG", "ARGENTINA")
+
+    assert result.source == SOURCE_WIKIPEDIA  # mismo source: el origen es la red
+    assert result.local_path.exists()
+    assert result.local_path.stat().st_size > MIN_VALID_FILE_BYTES
+
+
+def test_wikimedia_commons_fallback_search(tmp_path, monkeypatch):
+    """`_get_wikimedia_commons_url` busca por federación y resuelve thumburl."""
+    monkeypatch.setattr(
+        "collections_app.admin.crests.crest_finder.get_crests_dir", lambda: tmp_path
+    )
+    finder = CrestFinder()
+
+    img_url = "https://example.com/commons-thumb.png"
+    with responses.RequestsMock() as rsps:
+        # Búsqueda en Commons → primer resultado
+        rsps.add(
+            responses.GET,
+            COMMONS_API_URL,
+            json={"query": {"search": [{"title": "File:Argentina FA.svg"}]}},
+            status=200,
+        )
+        # Resolución del File: → thumburl (PNG rasterizado)
+        rsps.add(
+            responses.GET,
+            COMMONS_API_URL,
+            json={
+                "query": {
+                    "pages": {
+                        "1": {
+                            "imageinfo": [
+                                {
+                                    "url": "https://example.com/commons-original.svg",
+                                    "thumburl": img_url,
+                                }
+                            ]
+                        }
+                    }
+                }
+            },
+            status=200,
+        )
+        url = finder._get_wikimedia_commons_url("ARGENTINA")
+
+    assert url == img_url
+
+
+def test_wikimedia_commons_search_empty_returns_none(tmp_path, monkeypatch):
+    """Si la búsqueda en Commons no devuelve resultados, retorna None."""
+    monkeypatch.setattr(
+        "collections_app.admin.crests.crest_finder.get_crests_dir", lambda: tmp_path
+    )
+    finder = CrestFinder()
+
+    with responses.RequestsMock() as rsps:
+        rsps.add(
+            responses.GET,
+            COMMONS_API_URL,
+            json={"query": {"search": []}},
+            status=200,
+        )
+        assert finder._get_wikimedia_commons_url("ARGENTINA") is None
+
+
+def test_wikimedia_commons_unknown_country_returns_none():
+    """Si el code_name no está en el mapa, Commons no se consulta y retorna None."""
+    finder = CrestFinder()
+    # Sin mock de red — si se hiciera un request, fallaría la conexión.
+    assert finder._get_wikimedia_commons_url("PAIS_INVENTADO") is None
