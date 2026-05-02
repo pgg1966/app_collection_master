@@ -9,18 +9,24 @@ está disponible.
 import importlib
 import io
 import os
+from pathlib import Path
 
 from PIL import Image
 
 from collections_app.admin.views import crests_view as view_mod
 from collections_app.admin.views.crests_view import (
     STATUS_NONE,
+    STATUS_ONLINE,
     STATUS_PLACEHOLDER,
-    STATUS_WIKIPEDIA,
     CrestsView,
 )
 from collections_app.core.models import CodeLine
 from collections_app.core.repositories import CodesLinesRepository
+
+# `db_path` dummy para inicializar CrestsView en tests: el worker real
+# nunca arranca (los tests del worker mockean _CrestSearchWorker), así
+# que el path no se usa para abrir conexiones.
+_DUMMY_DB_PATH = Path(":memory:")
 
 # Tamaño chico bajo el umbral (MIN_VALID_FILE_BYTES = 1000).
 INVALID_BYTES = b"x" * 50
@@ -78,7 +84,7 @@ def test_invalid_crest_not_shown_as_icon(qtbot, tmp_path, monkeypatch, memory_db
     _redirect_crest_dir(monkeypatch, tmp_path)
     (tmp_path / "ARG.png").write_bytes(INVALID_BYTES)
 
-    view = CrestsView(memory_db)
+    view = CrestsView(memory_db, _DUMMY_DB_PATH)
     qtbot.addWidget(view)
     line = CodeLine(code_header_id=1, code_id="ARG", code_name="ARGENTINA")
     icon_item, _code, _name, _status = view._build_row(line)
@@ -91,7 +97,7 @@ def test_valid_crest_shown_as_icon(qtbot, tmp_path, monkeypatch, memory_db):
     _redirect_crest_dir(monkeypatch, tmp_path)
     (tmp_path / "ARG.png").write_bytes(VALID_BYTES)
 
-    view = CrestsView(memory_db)
+    view = CrestsView(memory_db, _DUMMY_DB_PATH)
     qtbot.addWidget(view)
     line = CodeLine(code_header_id=1, code_id="ARG", code_name="ARGENTINA")
     icon_item, *_ = view._build_row(line)
@@ -109,19 +115,19 @@ def test_invalid_crest_shown_as_sin_escudo(qtbot, tmp_path, monkeypatch, memory_
     path = tmp_path / "ARG.png"
     path.write_bytes(INVALID_BYTES)
 
-    view = CrestsView(memory_db)
+    view = CrestsView(memory_db, _DUMMY_DB_PATH)
     qtbot.addWidget(view)
     assert view._compute_status("ARG", path) == STATUS_NONE
 
 
-def test_valid_crest_shown_as_wikipedia(qtbot, tmp_path, monkeypatch, memory_db):
+def test_valid_crest_shown_as_online(qtbot, tmp_path, monkeypatch, memory_db):
     _redirect_crest_dir(monkeypatch, tmp_path)
     path = tmp_path / "ARG.png"
     path.write_bytes(VALID_BYTES)
 
-    view = CrestsView(memory_db)
+    view = CrestsView(memory_db, _DUMMY_DB_PATH)
     qtbot.addWidget(view)
-    assert view._compute_status("ARG", path) == STATUS_WIKIPEDIA
+    assert view._compute_status("ARG", path) == STATUS_ONLINE
 
 
 def test_special_code_invalid_falls_to_placeholder(qtbot, tmp_path, monkeypatch, memory_db):
@@ -129,7 +135,7 @@ def test_special_code_invalid_falls_to_placeholder(qtbot, tmp_path, monkeypatch,
     _redirect_crest_dir(monkeypatch, tmp_path)
     path = tmp_path / "GBL.png"  # GBL ∈ SPECIAL_CODES
     # Sin archivo en disco
-    view = CrestsView(memory_db)
+    view = CrestsView(memory_db, _DUMMY_DB_PATH)
     qtbot.addWidget(view)
     assert view._compute_status("GBL", path) == STATUS_PLACEHOLDER
 
@@ -148,7 +154,7 @@ def test_invalid_crest_included_as_candidate_for_search(
     # ARG con archivo inválido (corrupto), BRA sin archivo.
     (tmp_path / "ARG.png").write_bytes(INVALID_BYTES)
 
-    view = CrestsView(memory_db)
+    view = CrestsView(memory_db, _DUMMY_DB_PATH)
     qtbot.addWidget(view)
 
     # Capturamos los `codes` con los que se construye el worker en lugar
@@ -160,8 +166,8 @@ def test_invalid_crest_included_as_candidate_for_search(
         finished_ok = type("S", (), {"connect": lambda *a, **k: None})()
         failed = type("S", (), {"connect": lambda *a, **k: None})()
 
-        def __init__(self, finder, codes, parent=None):
-            del finder, parent
+        def __init__(self, finder, codes, db_path, parent=None):
+            del finder, db_path, parent
             captured["codes"] = codes
 
         def start(self):
@@ -188,7 +194,7 @@ def test_valid_crest_excluded_from_search_candidates(
     _seed_lines(memory_db, sample_collection, ["ARG", "BRA"])
     (tmp_path / "ARG.png").write_bytes(VALID_BYTES)
 
-    view = CrestsView(memory_db)
+    view = CrestsView(memory_db, _DUMMY_DB_PATH)
     qtbot.addWidget(view)
 
     captured: dict[str, list[tuple[str, str]]] = {}
@@ -198,8 +204,8 @@ def test_valid_crest_excluded_from_search_candidates(
         finished_ok = type("S", (), {"connect": lambda *a, **k: None})()
         failed = type("S", (), {"connect": lambda *a, **k: None})()
 
-        def __init__(self, finder, codes, parent=None):
-            del finder, parent
+        def __init__(self, finder, codes, db_path, parent=None):
+            del finder, db_path, parent
             captured["codes"] = codes
 
         def start(self):
@@ -233,7 +239,7 @@ def test_refresh_grid_cleans_invalid_files(
     invalid.write_bytes(INVALID_BYTES)
     valid.write_bytes(VALID_BYTES)
 
-    view = CrestsView(memory_db)
+    view = CrestsView(memory_db, _DUMMY_DB_PATH)
     qtbot.addWidget(view)
     assert sample_collection.collection_id is not None
     view._refresh_grid(sample_collection.collection_id)

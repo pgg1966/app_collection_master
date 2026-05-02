@@ -27,6 +27,7 @@ class MainWindowBase(QMainWindow):
         self._app_name = app_name
         self.setWindowTitle(app_name)
 
+        self._db_path = db_path
         self._conn = create_connection(db_path)
         run_migrations(self._conn)
         self._conn.commit()
@@ -39,6 +40,11 @@ class MainWindowBase(QMainWindow):
     def conn(self) -> sqlite3.Connection:
         """Conexión SQLite compartida para toda la ventana."""
         return self._conn
+
+    @property
+    def db_path(self) -> Path:
+        """Path al archivo de DB. Útil para abrir conexiones nuevas en threads."""
+        return self._db_path
 
     def _build_menus(self) -> None:
         """Hook para que subclases agreguen menús específicos."""

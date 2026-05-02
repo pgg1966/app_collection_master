@@ -26,7 +26,12 @@ from collections_app.admin.crests import (
     CrestFinder,
     is_valid_crest_file,
 )
-from collections_app.admin.crests.crest_finder import CrestResult
+from collections_app.admin.crests.crest_finder import (
+    SOURCE_GOOGLE,
+    SOURCE_PLACEHOLDER,
+    CrestResult,
+)
+from collections_app.core.db.connection import create_connection
 from collections_app.core.models import CodeLine, Collection
 from collections_app.core.repositories import (
     CodesLinesRepository,
@@ -41,13 +46,18 @@ PREVIEW_SIZE = 150
 ICON_SIZE = 32
 
 STATUS_NONE = "Sin escudo"
-STATUS_WIKIPEDIA = "Wikipedia"
+STATUS_ONLINE = "Online"  # se descargó de la red (Google CSE u origen alternativo)
 STATUS_MANUAL = "Manual"
 STATUS_PLACEHOLDER = "Placeholder"
 
 
 class _CrestSearchWorker(QThread):
-    """Ejecuta `CrestFinder.find_all_crests` en un thread separado."""
+    """Ejecuta `CrestFinder.find_all_crests` en un thread separado.
+
+    El worker abre su propia conexión a la DB en `run()` porque
+    `sqlite3.Connection` no es thread-safe entre el main thread (donde
+    vive `CrestsView.conn`) y el QThread.
+    """
 
     progress = Signal(int, int, str)
     finished_ok = Signal(list)  # list[CrestResult]
@@ -57,15 +67,21 @@ class _CrestSearchWorker(QThread):
         self,
         finder: CrestFinder,
         codes: list[tuple[str, str]],
+        db_path: Path,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._finder = finder
         self._codes = codes
+        self._db_path = db_path
 
     def run(self) -> None:
         try:
-            results = self._finder.find_all_crests(self._codes, on_progress=self._emit)
+            conn = create_connection(self._db_path)
+            try:
+                results = self._finder.find_all_crests(self._codes, conn, on_progress=self._emit)
+            finally:
+                conn.close()
             self.finished_ok.emit(results)
         except Exception as exc:  # noqa: BLE001
             logger.exception("Error en _CrestSearchWorker")
@@ -83,9 +99,15 @@ class CrestsView(QWidget):
     COL_NAME = 2
     COL_STATUS = 3
 
-    def __init__(self, conn: sqlite3.Connection, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        db_path: Path,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self.conn = conn
+        self._db_path = db_path
         self._finder = CrestFinder()
         self._worker: _CrestSearchWorker | None = None
         self._build_ui()
@@ -260,13 +282,10 @@ class CrestsView(QWidget):
     def _compute_status(self, code_id: str, path: Path) -> str:
         if not is_valid_crest_file(path):
             return STATUS_NONE if code_id not in SPECIAL_CODES else STATUS_PLACEHOLDER
-        # Heurística simple: el placeholder generado tiene el code_id en
-        # el nombre del archivo no, pero lo identificamos por ser el
-        # único caso "auto" cuando code_id ∈ SPECIAL_CODES. Para el resto
-        # asumimos Wikipedia o Manual y mostramos el más probable según
-        # cuándo se modificó (no diferenciamos en este nivel — el usuario
-        # ve por el preview si es real o placeholder).
-        return STATUS_PLACEHOLDER if code_id in SPECIAL_CODES else STATUS_WIKIPEDIA
+        # Para SPECIAL_CODES asumimos placeholder (no se busca online).
+        # Para el resto asumimos que está online/manual: el usuario ve por
+        # el preview si es real o placeholder.
+        return STATUS_PLACEHOLDER if code_id in SPECIAL_CODES else STATUS_ONLINE
 
     def _set_buttons_enabled(self, enabled: bool) -> None:
         running = self._worker is not None and self._worker.isRunning()
@@ -315,7 +334,7 @@ class CrestsView(QWidget):
         progress.setWindowTitle(self.tr("Buscar escudos"))
         progress.setMinimumDuration(0)
 
-        self._worker = _CrestSearchWorker(self._finder, candidates, parent=self)
+        self._worker = _CrestSearchWorker(self._finder, candidates, self._db_path, parent=self)
         worker = self._worker
 
         def on_progress(c: int, _t: int, label: str) -> None:
@@ -324,13 +343,13 @@ class CrestsView(QWidget):
 
         def on_ok(results: list[CrestResult]) -> None:
             progress.close()
-            wiki = sum(1 for r in results if r.source == "wikipedia")
-            ph = sum(1 for r in results if r.source == "placeholder")
+            online = sum(1 for r in results if r.source == SOURCE_GOOGLE)
+            ph = sum(1 for r in results if r.source == SOURCE_PLACEHOLDER)
             QMessageBox.information(
                 self,
                 self.tr("Buscar escudos"),
-                self.tr("Procesados: {n}. Wikipedia: {w}. Placeholder: {p}.").format(
-                    n=len(results), w=wiki, p=ph
+                self.tr("Procesados: {n}. Online: {o}. Placeholder: {p}.").format(
+                    n=len(results), o=online, p=ph
                 ),
             )
             assert cid is not None
