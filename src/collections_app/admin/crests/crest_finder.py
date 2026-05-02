@@ -37,6 +37,27 @@ DOWNLOAD_TIMEOUT = 10
 USER_AGENT = "CollectionsApp/1.0"
 RATE_LIMIT_DELAY = 1.0  # segundos entre requests a Wikipedia
 CREST_TARGET_SIZE = (200, 200)
+SVG_RENDER_SIZE = 200
+
+# Tamaño mínimo (en bytes) que debe tener una respuesta HTTP para ser
+# considerada una imagen real. Las descargas válidas (PNG/JPEG/SVG de
+# Wikipedia) están bien por encima de este umbral.
+MIN_DOWNLOAD_BYTES = 500
+
+# Tamaño mínimo (en bytes) de un PNG ya guardado para ser considerado
+# un escudo válido en cache (también aplica a placeholders).
+MIN_VALID_FILE_BYTES = 1_000
+
+# "Magic bytes" de los formatos de imagen aceptados. Se chequean cuando
+# el Content-Type de la respuesta no es `image/*` (algunos CDNs sirven
+# las imágenes con `application/octet-stream` o tras un redirect).
+IMAGE_MAGIC_BYTES: tuple[bytes, ...] = (
+    b"\x89PNG",
+    b"\xff\xd8",  # JPEG
+    b"GIF",
+    b"RIFF",  # WebP empieza con RIFF....WEBP
+    b"\x00\x00\x01\x00",  # ICO
+)
 
 # Sets especiales (no son selecciones nacionales): el escudo no se puede
 # bajar de Wikipedia automáticamente, requiere import manual.
@@ -52,7 +73,6 @@ SPECIAL_CODES = frozenset(
         "EXC",
         "RTR",
         "FWC",
-        "PAN",
         "CCO",
     }
 )
@@ -163,8 +183,13 @@ class CrestFinder:
         Devuelve un `CrestResult` con el path local y el source.
         """
         dest = get_crest_path(code_id)
-        if dest.exists():
+        if is_valid_crest_file(dest):
             return CrestResult(code_id, code_name, dest, SOURCE_CACHE, True)
+        if dest.exists():
+            # Existe pero es inválido (intento previo fallido). Lo borramos
+            # para que la cascada vuelva a intentar bajarlo limpiamente.
+            dest.unlink()
+            logger.debug("Borrado crest inválido en cache: %s", dest)
 
         if code_id in SPECIAL_CODES:
             self._generate_placeholder_crest(code_id, dest)
@@ -207,7 +232,7 @@ class CrestFinder:
         first_network_call = True
         for i, (code_id, code_name) in enumerate(codes, start=1):
             dest = get_crest_path(code_id)
-            needs_network = not dest.exists() and code_id not in SPECIAL_CODES
+            needs_network = not is_valid_crest_file(dest) and code_id not in SPECIAL_CODES
             if needs_network and not first_network_call:
                 time.sleep(RATE_LIMIT_DELAY)
             result = self.find_crest(code_id, code_name)
@@ -261,7 +286,11 @@ class CrestFinder:
                 logger.debug("Wikipedia returned %s for %r", r.status_code, title)
                 return None
             data = r.json()
-            thumb = data.get("originalimage") or data.get("thumbnail") or {}
+            # Preferir `thumbnail` sobre `originalimage`: Wikipedia sirve los
+            # thumbnails como PNG rasterizado incluso cuando el original es
+            # SVG. Pillow no abre SVG nativamente, así que el thumbnail evita
+            # tener que pasar por cairosvg en la mayoría de los casos.
+            thumb = data.get("thumbnail") or data.get("originalimage") or {}
             if not isinstance(thumb, dict):
                 return None
             src = thumb.get("source")
@@ -277,8 +306,20 @@ class CrestFinder:
     def _download_and_process_crest(self, url: str, dest: Path) -> bool:
         """Descarga `url`, convierte a PNG RGBA `CREST_TARGET_SIZE` y guarda.
 
-        Retorna True si todo salió bien. La conversión a RGBA preserva
-        transparencia y el `thumbnail` mantiene aspect ratio.
+        Devuelve True si la descarga produjo un PNG válido en `dest`. La
+        validación es defensiva en varios pasos:
+
+        1. Status HTTP 200 y tamaño mínimo (`MIN_DOWNLOAD_BYTES`) — descarta
+           respuestas vacías o páginas de error redirigidas.
+        2. Detección de SVG (Wikipedia sirve algunos escudos como SVG y
+           Pillow no los abre): si hay SVG, intenta convertirlo con
+           cairosvg; si no está instalado, falla limpiamente.
+        3. Validación de Content-Type o "magic bytes" — si no es imagen
+           reconocible, descarta antes de invocar a Pillow.
+        4. Conversión a RGBA `CREST_TARGET_SIZE` con `thumbnail` (preserva
+           aspect ratio).
+        5. Re-validación post-save (`MIN_VALID_FILE_BYTES`) — si Pillow
+           guardó algo trivialmente pequeño/corrupto, lo descarta.
         """
         try:
             r = requests.get(
@@ -288,24 +329,97 @@ class CrestFinder:
             )
             if r.status_code != 200:
                 return False
-            with Image.open(io.BytesIO(r.content)) as img:
+
+            content = r.content
+            if len(content) < MIN_DOWNLOAD_BYTES:
+                logger.debug(
+                    "Descarga muy pequeña (%d bytes) para %s — descartando",
+                    len(content),
+                    url,
+                )
+                return False
+
+            content_type = r.headers.get("Content-Type", "").lower()
+
+            if "svg" in content_type or self._is_svg(content):
+                png_bytes = self._svg_to_png(content)
+                if png_bytes is None:
+                    logger.debug("SVG no convertible para %s", url)
+                    return False
+                content = png_bytes
+            elif "image" not in content_type and not self._has_image_magic(content):
+                logger.debug(
+                    "Respuesta no parece imagen (CT=%r) para %s",
+                    content_type,
+                    url,
+                )
+                return False
+
+            with Image.open(io.BytesIO(content)) as img:
                 rgba = img.convert("RGBA")
                 rgba.thumbnail(CREST_TARGET_SIZE, Image.Resampling.LANCZOS)
                 rgba.save(dest, "PNG")
-            return True
         except Exception as exc:  # noqa: BLE001
             logger.debug("No se pudo descargar/procesar %s: %s", url, exc)
+            dest.unlink(missing_ok=True)
             return False
+
+        if not dest.exists() or dest.stat().st_size < MIN_VALID_FILE_BYTES:
+            dest.unlink(missing_ok=True)
+            logger.debug("PNG guardado demasiado pequeño o vacío para %s", url)
+            return False
+
+        return True
+
+    # ------------------------------------------------------------------
+    # Validación e introspección de bytes
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _is_svg(content: bytes) -> bool:
+        """Detecta si `content` empieza con un encabezado XML/SVG."""
+        snippet = content[:512].lstrip().lower()
+        return snippet.startswith(b"<?xml") or snippet.startswith(b"<svg")
+
+    @staticmethod
+    def _has_image_magic(content: bytes) -> bool:
+        """True si los primeros bytes coinciden con un formato de imagen conocido."""
+        return any(content.startswith(magic) for magic in IMAGE_MAGIC_BYTES)
+
+    @staticmethod
+    def _svg_to_png(svg_bytes: bytes) -> bytes | None:
+        """Rasteriza SVG a PNG usando cairosvg (dependencia opcional).
+
+        Retorna `None` si cairosvg no está instalado o si la conversión
+        falla. La degradación es elegante: el caller usa placeholder.
+        """
+        try:
+            import cairosvg
+        except ImportError:
+            logger.debug("cairosvg no instalado — no se puede convertir SVG a PNG")
+            return None
+        try:
+            png = cairosvg.svg2png(
+                bytestring=svg_bytes,
+                output_width=SVG_RENDER_SIZE,
+                output_height=SVG_RENDER_SIZE,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("cairosvg falló: %s", exc)
+            return None
+        return bytes(png) if png else None
 
     # ------------------------------------------------------------------
     # Placeholder
     # ------------------------------------------------------------------
 
     def _generate_placeholder_crest(self, code_id: str, dest: Path) -> None:
-        """Crea un placeholder simple: círculo gris con las iniciales.
+        """Crea un placeholder: círculo gris relleno con las iniciales.
 
         Se usa cuando Wikipedia falla o cuando el code_id está en
-        `SPECIAL_CODES` (sets sin equipo nacional asociado).
+        `SPECIAL_CODES` (sets sin equipo nacional asociado). El círculo
+        va relleno (no solo outline) para garantizar que el PNG resultante
+        supere `MIN_VALID_FILE_BYTES` y el cache lo considere válido.
         """
         size = CREST_TARGET_SIZE
         img = Image.new("RGBA", size, (0, 0, 0, 0))
@@ -313,6 +427,7 @@ class CrestFinder:
         margin = max(size) // 20
         draw.ellipse(
             (margin, margin, size[0] - margin, size[1] - margin),
+            fill=(230, 230, 230, 255),
             outline=(150, 150, 150, 220),
             width=3,
         )
@@ -323,3 +438,20 @@ class CrestFinder:
             anchor="mm",
         )
         img.save(dest, "PNG")
+
+
+# ----------------------------------------------------------------------
+# Helpers de módulo (API pública usada también desde la vista)
+# ----------------------------------------------------------------------
+
+
+def is_valid_crest_file(path: Path) -> bool:
+    """Retorna True si `path` existe y supera el tamaño mínimo válido.
+
+    Los crests reales descargados de Wikipedia y los placeholders generados
+    internamente siempre superan `MIN_VALID_FILE_BYTES`. Cualquier archivo
+    más chico es probablemente un intento previo fallido (truncado, vacío,
+    corrupto). La vista usa esta función para evitar mostrar/cachear
+    escudos que estén en disco pero rotos.
+    """
+    return path.exists() and path.stat().st_size > MIN_VALID_FILE_BYTES

@@ -26,6 +26,9 @@ dev = [
 build = [
     "pyinstaller>=6.0",
 ]
+svg = [
+    "cairosvg>=2.7.0",
+]
 
 [project.scripts]
 collections-admin = "collections_app.admin.main:main"

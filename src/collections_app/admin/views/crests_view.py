@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 from collections_app.admin.crests import (
     SPECIAL_CODES,
     CrestFinder,
+    is_valid_crest_file,
 )
 from collections_app.admin.crests.crest_finder import CrestResult
 from collections_app.core.models import CodeLine, Collection
@@ -209,7 +210,7 @@ class CrestsView(QWidget):
             self._preview_label.clear()
             return
         path = get_crest_path(line.code_id)
-        if path.exists():
+        if is_valid_crest_file(path):
             pix = QPixmap(str(path)).scaled(
                 PREVIEW_SIZE,
                 PREVIEW_SIZE,
@@ -218,6 +219,7 @@ class CrestsView(QWidget):
             )
             self._preview_label.setPixmap(pix)
         else:
+            self._preview_label.clear()
             self._preview_label.setText(self.tr("(sin escudo)"))
 
     # ------------------------------------------------------------------
@@ -230,6 +232,17 @@ class CrestsView(QWidget):
             self._model.removeRows(0, self._model.rowCount())
             return
         lines = CodesLinesRepository(self.conn).list_by_header(col.code_header_id)
+
+        # Limpieza silenciosa: archivos en disco que no superan el umbral
+        # de validez son restos de descargas fallidas anteriores. Borrarlos
+        # acá garantiza que la grilla no muestre iconos vacíos y que la
+        # próxima búsqueda automática los reintente.
+        for line in lines:
+            path = get_crest_path(line.code_id)
+            if path.exists() and not is_valid_crest_file(path):
+                path.unlink(missing_ok=True)
+                logger.debug("Eliminado crest inválido pre-existente: %s", line.code_id)
+
         self._model.removeRows(0, self._model.rowCount())
         for line in lines:
             self._model.appendRow(self._build_row(line))
@@ -237,16 +250,15 @@ class CrestsView(QWidget):
     def _build_row(self, line: CodeLine) -> list[QStandardItem]:
         path = get_crest_path(line.code_id)
         icon_item = QStandardItem()
-        if path.exists():
+        if is_valid_crest_file(path):
             icon_item.setIcon(QIcon(str(path)))
         code_item = QStandardItem(line.code_id)
         name_item = QStandardItem(line.code_name)
         status_item = QStandardItem(self._compute_status(line.code_id, path))
         return [icon_item, code_item, name_item, status_item]
 
-    @staticmethod
-    def _compute_status(code_id: str, path: Path) -> str:
-        if not path.exists():
+    def _compute_status(self, code_id: str, path: Path) -> str:
+        if not is_valid_crest_file(path):
             return STATUS_NONE if code_id not in SPECIAL_CODES else STATUS_PLACEHOLDER
         # Heurística simple: el placeholder generado tiene el code_id en
         # el nombre del archivo no, pero lo identificamos por ser el
@@ -274,12 +286,16 @@ class CrestsView(QWidget):
         if col is None:
             return
         # Procesamos sólo codes que NO están en SPECIAL_CODES y que NO
-        # tienen escudo cacheado.
+        # tienen un escudo VÁLIDO cacheado. Los archivos en disco que no
+        # superan `is_valid_crest_file` (corruptos / vacíos / truncados de
+        # un intento previo) se reincluyen como candidatos; CrestFinder los
+        # borra y reintenta antes de descargar.
         all_lines = CodesLinesRepository(self.conn).list_by_header(col.code_header_id)
         candidates: list[tuple[str, str]] = [
             (line.code_id, line.code_name)
             for line in all_lines
-            if line.code_id not in SPECIAL_CODES and not get_crest_path(line.code_id).exists()
+            if line.code_id not in SPECIAL_CODES
+            and not is_valid_crest_file(get_crest_path(line.code_id))
         ]
         if not candidates:
             QMessageBox.information(
@@ -399,7 +415,7 @@ class CrestsView(QWidget):
                 self._model.item(row, self.COL_STATUS).setText(status)
                 # Refrescar icono
                 path = get_crest_path(code_id)
-                if path.exists():
+                if is_valid_crest_file(path):
                     self._model.item(row, self.COL_ICON).setIcon(QIcon(str(path)))
                 return
 
