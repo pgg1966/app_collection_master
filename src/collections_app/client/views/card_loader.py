@@ -350,11 +350,7 @@ class CardLoaderView(QWidget):
         # `_qty_input` se construye después de `_code_edit` y este filter
         # puede dispararse durante setup. Guard con getattr.
         qty_input = getattr(self, "_qty_input", None)
-        if (
-            qty_input is not None
-            and watched is qty_input
-            and event.type() == QEvent.Type.FocusIn
-        ):
+        if qty_input is not None and watched is qty_input and event.type() == QEvent.Type.FocusIn:
             qty_input.selectAll()
         # Up/Down sobre el code_edit: abrir popup del completer si no está
         # visible. Una vez abierto, el popup procesa las flechas nativamente.

@@ -18,13 +18,19 @@ htmlcov/
 
 # Data y outputs
 data/
-dist/
-build/
 *.db
 *.db-journal
 *.db-wal
 *.db-shm
 *.log
+
+# PyInstaller (versionar build/*.spec, hooks/ y build_client.py;
+# ignorar solo los outputs del compilador)
+dist/
+build/work/
+build/__pycache__/
+build/hooks/__pycache__/
+*.spec.bak
 
 # OS
 .DS_Store

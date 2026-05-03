@@ -106,3 +106,60 @@ def test_find_card_image_does_not_match_legacy_unpadded(tmp_path, monkeypatch):
     legacy.parent.mkdir(parents=True)
     legacy.write_bytes(b"x")
     assert paths.find_card_image(1, 42) is None
+
+
+# ----------------------------------------------------------------------
+# _get_bundle_dir / get_schema_dir — detección de PyInstaller frozen
+# ----------------------------------------------------------------------
+
+
+def test_bundle_dir_returns_package_root_in_dev():
+    """En desarrollo (sys.frozen ausente) apunta al paquete instalado."""
+    bundle = paths._get_bundle_dir()
+    # Debe ser la raíz de `collections_app/` — `core/utils/paths.py`
+    # vive 2 niveles abajo, así que la subida nos lleva ahí.
+    assert bundle.name == "collections_app"
+    assert (bundle / "core" / "utils" / "paths.py").exists()
+
+
+def test_get_schema_dir_returns_existing_directory_in_dev():
+    """En dev, el schema_dir existe y tiene los .sql de migración."""
+    schema = paths.get_schema_dir()
+    assert schema.exists()
+    sql_files = sorted(p.name for p in schema.glob("*.sql"))
+    assert sql_files  # al menos uno
+    assert all(name.endswith(".sql") for name in sql_files)
+
+
+def test_bundle_dir_uses_meipass_when_frozen(monkeypatch, tmp_path):
+    """Simulando sys.frozen + sys._MEIPASS, _get_bundle_dir() apunta ahí."""
+    monkeypatch.setattr(paths.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(paths.sys, "_MEIPASS", str(tmp_path), raising=False)
+
+    bundle = paths._get_bundle_dir()
+    assert bundle == tmp_path / "collections_app"
+
+
+def test_get_schema_dir_uses_meipass_when_frozen(monkeypatch, tmp_path):
+    """En modo frozen, get_schema_dir resuelve a _MEIPASS/.../schema."""
+    monkeypatch.setattr(paths.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(paths.sys, "_MEIPASS", str(tmp_path), raising=False)
+
+    expected = tmp_path / "collections_app" / "core" / "db" / "schema"
+    assert paths.get_schema_dir() == expected
+
+
+def test_app_data_dir_does_not_depend_on_meipass(monkeypatch, tmp_path):
+    """Datos del usuario (DB, escudos, cards) viven en %APPDATA%, NO en _MEIPASS.
+
+    Si get_app_data_dir o las funciones que delegan en él dependieran de
+    _MEIPASS, los datos se perderían cada vez que el bootloader recreara
+    la carpeta temp. Este test garantiza esa separación.
+    """
+    monkeypatch.setattr(paths.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(paths.sys, "_MEIPASS", str(tmp_path), raising=False)
+
+    app_dir = paths.get_app_data_dir()
+    # No debe estar dentro de _MEIPASS
+    assert tmp_path not in app_dir.parents
+    assert app_dir != tmp_path

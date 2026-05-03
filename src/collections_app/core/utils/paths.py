@@ -5,6 +5,31 @@ import sys
 from pathlib import Path
 
 
+def _get_bundle_dir() -> Path:
+    """Directorio base de los assets EMBEBIDOS en el paquete.
+
+    Resolución según el entorno:
+    - **Desarrollo / instalación pip**: la raíz del paquete `collections_app`
+      (sube dos niveles desde `core/utils/paths.py`).
+    - **PyInstaller onefile**: `sys._MEIPASS` (carpeta temporal donde el
+      bootloader extrae los datos al arrancar el .exe).
+
+    Solo afecta a recursos READ-ONLY que viajan con la app — los archivos
+    SQL de migración, por ejemplo. Los datos del usuario (DB, escudos,
+    cards descargadas) NO van por acá; siempre viven en
+    `get_app_data_dir()`.
+    """
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        # En el bundle de PyInstaller los datas se montan en
+        # sys._MEIPASS/<dest_path>. El spec mapea schema/ a
+        # "collections_app/core/db/schema", así que la raíz del bundle
+        # es _MEIPASS y el paquete sigue desde "collections_app/".
+        return Path(sys._MEIPASS) / "collections_app"
+    # `paths.py` vive en collections_app/core/utils/, así que hay que
+    # subir tres niveles para llegar a la raíz del paquete.
+    return Path(__file__).resolve().parent.parent.parent
+
+
 def get_app_data_dir() -> Path:
     r"""Retorna el directorio donde guardar datos de la app.
 
@@ -37,8 +62,12 @@ def get_logs_dir() -> Path:
 
 
 def get_schema_dir() -> Path:
-    """Path al directorio con los SQLs de migración (dentro del paquete)."""
-    return Path(__file__).resolve().parent.parent / "db" / "schema"
+    """Path al directorio con los SQLs de migración (dentro del paquete).
+
+    Funciona tanto en desarrollo (paquete instalado) como en el .exe
+    de PyInstaller (asset embebido en `_MEIPASS`).
+    """
+    return _get_bundle_dir() / "core" / "db" / "schema"
 
 
 def get_crests_dir() -> Path:
