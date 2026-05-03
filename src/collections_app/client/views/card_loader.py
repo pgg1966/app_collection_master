@@ -16,11 +16,10 @@ Comportamiento según `Collection.requires_code`:
 import logging
 import sqlite3
 
-from PySide6.QtCore import QEvent, QObject, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QStringListModel, Qt, QTimer, Signal
 from PySide6.QtGui import QIntValidator
 from PySide6.QtWidgets import (
     QButtonGroup,
-    QComboBox,
     QCompleter,
     QGridLayout,
     QHBoxLayout,
@@ -63,12 +62,20 @@ class CardLoaderView(QWidget):
         self._navigator = EnterNavigator(self)
         # Estado: cuando hay >1 match en find_by_number, se ofrece al
         # usuario elegir el código entre los ambiguos. Con `requires_code=True`,
-        # esto es siempre False; el combo se llena con todos los codes_lines.
+        # esto es siempre False; el completer se llena con todos los codes_lines.
         self._has_ambiguity = False
         # Cache del último match unívoco (cuando requires_code=False y find_by_number
         # devolvió exactamente 1) para que `_save_card` use add_card_by_number sin
         # tener que volver a buscar.
         self._unambiguous_card: Card | None = None
+        # Set de code_ids válidos en el contexto actual (uppercase). Se
+        # repuebla en cada llamada a `_populate_completer_*`. Sirve para
+        # validación rápida sin recorrer el modelo del completer.
+        self._valid_code_ids: set[str] = set()
+        # Code seleccionado y validado por el usuario. None mientras el
+        # texto del LineEdit no sea un código conocido. Reemplaza el
+        # `_get_selected_code` viejo basado en QComboBox.currentData.
+        self._selected_code_id: str | None = None
 
         self._build_ui()
         self._wire_navigator()
@@ -85,11 +92,11 @@ class CardLoaderView(QWidget):
         self._has_ambiguity = False
         self._unambiguous_card = None
         if collection.requires_code:
-            self._populate_combo_with_all_codes()
-            self._set_combo_visible(True)
+            self._populate_completer_with_all_codes()
+            self._set_code_visible(True)
         else:
-            self._code_combo.clear()
-            self._set_combo_visible(False)
+            self._clear_completer()
+            self._set_code_visible(False)
         self._reset_form()
 
     # ------------------------------------------------------------------
@@ -114,27 +121,37 @@ class CardLoaderView(QWidget):
         grid.addLayout(self._build_operation_row(), row, 1)
         row += 1
 
-        # Combo de código: visibilidad según contexto. Con requires_code=True
-        # siempre visible. Con requires_code=False inicia oculto y solo aparece
-        # si find_by_number devuelve >1 (ambigüedad).
+        # Campo de código: QLineEdit con QCompleter (autocompletado por
+        # contains, case-insensitive). Las opciones del completer son
+        # strings tipo "ARG - Argentina" para que el usuario pueda buscar
+        # tanto por code_id como por nombre. Visibilidad según contexto:
+        # con requires_code=True siempre visible; con requires_code=False
+        # inicia oculto y solo aparece si find_by_number devuelve >1
+        # (ambigüedad).
         self._code_label = QLabel((self.collection.code_field_name or self.tr("Código")) + ":")
-        self._code_combo = QComboBox()
-        self._code_combo.setEditable(True)
-        self._code_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-        completer = QCompleter()
-        completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
-        completer.setFilterMode(Qt.MatchFlag.MatchContains)
-        self._code_combo.setCompleter(completer)
-        self._code_combo.editTextChanged.connect(lambda _: self._on_code_changed())
+        self._code_edit = QLineEdit()
+        self._code_edit.setPlaceholderText(self.tr("Código (ej: ARG)"))
+        self._code_edit.setMaxLength(10)
+        self._completer = QCompleter([], self)
+        self._completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self._completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        self._completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+        # `QCompleter.activated` tiene dos sobrecargas (str y QModelIndex);
+        # el wrapper filtra por tipo para que mypy strict acepte la conexión
+        # sin la sintaxis `signal[str]` (no soportada en stubs de PySide6).
+        self._completer.activated.connect(self._on_completer_activated)
+        self._code_edit.setCompleter(self._completer)
+        self._code_edit.textChanged.connect(self._on_code_text_changed)
+        self._code_edit.returnPressed.connect(self._on_code_return_pressed)
         grid.addWidget(self._code_label, row, 0)
-        grid.addWidget(self._code_combo, row, 1)
+        grid.addWidget(self._code_edit, row, 1)
         row += 1
 
         if self.collection.requires_code:
-            self._populate_combo_with_all_codes()
-            self._set_combo_visible(True)
+            self._populate_completer_with_all_codes()
+            self._set_code_visible(True)
         else:
-            self._set_combo_visible(False)
+            self._set_code_visible(False)
 
         grid.addWidget(QLabel(self.tr("Número") + ":"), row, 0)
         grid.addLayout(self._build_number_qty_row(), row, 1)
@@ -194,43 +211,113 @@ class CardLoaderView(QWidget):
         return row
 
     # ------------------------------------------------------------------
-    # Combo: poblar / mostrar / leer
+    # Code field: poblar completer / mostrar / leer / validar
     # ------------------------------------------------------------------
 
-    def _populate_combo_with_all_codes(self) -> None:
-        """Llena el combo con TODOS los codes_lines del header de la colección."""
+    def _populate_completer_with_all_codes(self) -> None:
+        """Llena el completer con TODOS los codes_lines del header."""
         repo = CodesLinesRepository(self.conn)
         lines = repo.list_by_header(self.collection.code_header_id)
-        self._set_combo_items([(line.code_id, line.code_name) for line in lines])
+        self._set_completer_items([(line.code_id, line.code_name) for line in lines])
 
-    def _populate_combo_with_ambiguous(self, matches: list[Card]) -> None:
-        """Llena el combo con SOLO los códigos que matchearon en find_by_number."""
+    def _populate_completer_with_ambiguous(self, matches: list[Card]) -> None:
+        """Llena el completer con SOLO los códigos que matchearon en find_by_number."""
         items = [(card.code_id, self._lookup_code_name(card.code_id)) for card in matches]
-        self._set_combo_items(items)
-        # Forzar al usuario a elegir
-        self._code_combo.setCurrentIndex(-1)
+        self._set_completer_items(items)
 
-    def _set_combo_items(self, items: list[tuple[str, str]]) -> None:
-        self._code_combo.blockSignals(True)
-        self._code_combo.clear()
-        for code_id, code_name in items:
-            self._code_combo.addItem(f"{code_id} — {code_name}", userData=code_id)
-        self._code_combo.blockSignals(False)
+    def _set_completer_items(self, items: list[tuple[str, str]]) -> None:
+        """Setea las opciones del completer + el set de validación."""
+        self._valid_code_ids = {code_id.upper() for code_id, _ in items}
+        completion_strings = [f"{code_id} - {name}" for code_id, name in items]
+        model = QStringListModel(completion_strings, self)
+        self._completer.setModel(model)
+        self._code_edit.blockSignals(True)
+        self._code_edit.clear()
+        self._code_edit.blockSignals(False)
+        self._selected_code_id = None
 
-    def _set_combo_visible(self, visible: bool) -> None:
+    def _clear_completer(self) -> None:
+        """Vacía el completer y la selección (al cambiar a requires_code=False)."""
+        self._valid_code_ids = set()
+        self._completer.setModel(QStringListModel([], self))
+        self._code_edit.blockSignals(True)
+        self._code_edit.clear()
+        self._code_edit.blockSignals(False)
+        self._selected_code_id = None
+
+    def _set_code_visible(self, visible: bool) -> None:
         self._code_label.setVisible(visible)
-        self._code_combo.setVisible(visible)
+        self._code_edit.setVisible(visible)
 
     def _get_selected_code(self) -> str:
-        """Lee el código actual del combo (datos > texto)."""
-        data = self._code_combo.currentData()
-        if isinstance(data, str) and data:
-            return data
-        # El usuario tipeó algo no listado; intentar parsear "ARG — Argentina"
-        text = self._code_combo.currentText().strip()
-        if " — " in text:
-            text = text.split(" — ", 1)[0].strip()
-        return text.upper()
+        """Lee el código seleccionado y validado (uppercase, "" si no hay)."""
+        return self._selected_code_id or ""
+
+    # ------------------------------------------------------------------
+    # Code field: handlers de texto y selección
+    # ------------------------------------------------------------------
+
+    def _on_code_text_changed(self, _text: str) -> None:
+        """Invalida la selección si el texto deja de matchear un código válido."""
+        upper = self._code_edit.text().strip().upper()
+        if upper not in self._valid_code_ids:
+            self._selected_code_id = None
+        else:
+            # Match exacto: marcamos como seleccionado pero NO movemos el foco
+            # (el usuario puede seguir escribiendo o presionar Enter después).
+            self._selected_code_id = upper
+        # Si estamos en modo `requires_code` o ambigüedad, recalcular el preview.
+        if self.collection.requires_code or self._has_ambiguity:
+            self._validate_card()
+
+    def _on_completer_activated(self, value: object) -> None:
+        """Slot del completer.activated que descarta el overload QModelIndex."""
+        if isinstance(value, str):
+            self._on_code_selected(value)
+
+    def _on_code_selected(self, text: str) -> None:
+        """El usuario eligió una opción del popup ("ARG - Argentina")."""
+        code_id = text.split(" - ", 1)[0].strip().upper()
+        if code_id not in self._valid_code_ids:
+            return
+        self._selected_code_id = code_id
+        # Mostrar solo el code_id (sin el nombre) en el campo.
+        self._code_edit.blockSignals(True)
+        self._code_edit.setText(code_id)
+        self._code_edit.blockSignals(False)
+        # Mover foco al número y seleccionar lo que haya para overwrite rápido.
+        self._number_input.setFocus()
+        self._number_input.selectAll()
+        # Refrescar preview ahora que el código quedó fijo.
+        if self.collection.requires_code or self._has_ambiguity:
+            self._validate_card()
+
+    def _on_code_return_pressed(self) -> None:
+        """Enter en el campo de código: resolver según matches.
+
+        - 1 match exacto / único parcial → seleccionar y pasar foco a número.
+        - >1 matches parciales → abrir popup del completer.
+        - 0 matches → flash visual de borde rojo (1s).
+        """
+        text = self._code_edit.text().strip().upper()
+        if not text:
+            return
+        if text in self._valid_code_ids:
+            self._on_code_selected(text)
+            return
+        matches = sorted(c for c in self._valid_code_ids if text in c)
+        if len(matches) == 1:
+            self._on_code_selected(matches[0])
+        elif len(matches) > 1:
+            self._completer.setCompletionPrefix(text)
+            self._completer.complete()
+        else:
+            self._flash_invalid_code()
+
+    def _flash_invalid_code(self) -> None:
+        """Borde rojo temporal en el campo de código (1s)."""
+        self._code_edit.setStyleSheet("QLineEdit { border: 1px solid red; }")
+        QTimer.singleShot(1000, lambda: self._code_edit.setStyleSheet(""))
 
     # ------------------------------------------------------------------
     # Navegación y eventos
@@ -240,10 +327,10 @@ class CardLoaderView(QWidget):
         self._navigator.uninstall()
         chain: list[QWidget] = []
         if self.collection.requires_code:
-            chain = [self._code_combo, self._number_input, self._qty_input]
+            chain = [self._code_edit, self._number_input, self._qty_input]
         elif self._has_ambiguity:
             # El número ya fue tipeado; saltarlo y ir directo a qty tras código.
-            chain = [self._code_combo, self._qty_input]
+            chain = [self._code_edit, self._qty_input]
         else:
             chain = [self._number_input, self._qty_input]
         self._navigator.set_chain(chain)
@@ -252,7 +339,7 @@ class CardLoaderView(QWidget):
 
     def _first_active_input(self) -> QWidget:
         if self.collection.requires_code:
-            return self._code_combo
+            return self._code_edit
         return self._number_input
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
@@ -345,11 +432,11 @@ class CardLoaderView(QWidget):
             self._show_card_info(matches[0])
             return
 
-        # Ambigüedad: ofrecer combo limitado a los códigos matched
+        # Ambigüedad: ofrecer el campo de código limitado a los matched
         self._unambiguous_card = None
         self._has_ambiguity = True
-        self._populate_combo_with_ambiguous(matches)
-        self._set_combo_visible(True)
+        self._populate_completer_with_ambiguous(matches)
+        self._set_code_visible(True)
         self._wire_navigator()
         self._country_input.setText("")
         self._name_input.setText("")
@@ -359,7 +446,7 @@ class CardLoaderView(QWidget):
             ),
             StatusColor.WARNING,
         )
-        self._code_combo.setFocus()
+        self._code_edit.setFocus()
 
     def _show_card_info(self, card: Card) -> None:
         assert self.collection.collection_id is not None
@@ -380,7 +467,7 @@ class CardLoaderView(QWidget):
         self._name_input.setText("")
         self._set_status("", "")
         if not self.collection.requires_code and self._has_ambiguity:
-            self._set_combo_visible(False)
+            self._set_code_visible(False)
             self._has_ambiguity = False
             self._wire_navigator()
         self._unambiguous_card = None
@@ -418,6 +505,14 @@ class CardLoaderView(QWidget):
         # - requires_code=True (siempre)
         # - hubo ambigüedad y el usuario eligió uno
         user_specified_code = self.collection.requires_code or self._has_ambiguity
+
+        if user_specified_code and not self._selected_code_id:
+            # No hay código válido seleccionado: bloquear save y avisar
+            # visualmente (mismo flash rojo que en _on_code_return_pressed).
+            self._code_edit.setFocus()
+            self._flash_invalid_code()
+            self._set_status(self.tr("Falta código"), StatusColor.WARNING)
+            return
 
         try:
             updated = self._dispatch_save(service, cid, number, qty, is_alta, user_specified_code)
@@ -468,11 +563,18 @@ class CardLoaderView(QWidget):
         self._qty_input.setText("1")
         self._country_input.setText("")
         self._name_input.setText("")
-        if not self.collection.requires_code:
+        if self.collection.requires_code:
+            # Limpiar el campo de código para la próxima alta/baja, manteniendo
+            # las opciones del completer (siguen siendo todos los codes_lines).
+            self._code_edit.blockSignals(True)
+            self._code_edit.clear()
+            self._code_edit.blockSignals(False)
+            self._selected_code_id = None
+        else:
             # Salir del modo ambigüedad
             self._has_ambiguity = False
-            self._set_combo_visible(False)
-            self._code_combo.clear()
+            self._set_code_visible(False)
+            self._clear_completer()
         self._wire_navigator()
         self._unambiguous_card = None
         self._first_active_input().setFocus()

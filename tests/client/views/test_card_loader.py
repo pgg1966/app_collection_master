@@ -100,7 +100,7 @@ def test_no_code_field_when_requires_code_false(qtbot, memory_db, collection_no_
     view = CardLoaderView(memory_db, collection_no_code)
     qtbot.addWidget(view)
     view.show()
-    assert view._code_combo.isVisible() is False
+    assert view._code_edit.isVisible() is False
     assert view._code_label.isVisible() is False
 
 
@@ -108,7 +108,7 @@ def test_code_field_always_visible_when_requires_code_true(qtbot, memory_db, col
     view = CardLoaderView(memory_db, collection_with_code)
     qtbot.addWidget(view)
     view.show()
-    assert view._code_combo.isVisible() is True
+    assert view._code_edit.isVisible() is True
     assert view._code_label.isVisible() is True
 
 
@@ -125,7 +125,7 @@ def test_focus_on_code_when_requires_code_true(qtbot, memory_db, collection_with
     qtbot.addWidget(view)
     view.show()
     qtbot.wait(50)
-    assert view._code_combo.hasFocus()
+    assert view._code_edit.hasFocus()
 
 
 # ----------------------------------------------------------------------
@@ -155,16 +155,15 @@ def test_unknown_number_shows_clear_message(qtbot, memory_db, collection_no_code
 
 
 def test_ambiguous_number_shows_code_selector(qtbot, memory_db, collection_no_code):
-    """Número 24 está en ARG y BRA → debe mostrar combo y pedir código."""
+    """Número 24 está en ARG y BRA → debe mostrar el campo y pedir código."""
     view = CardLoaderView(memory_db, collection_no_code)
     qtbot.addWidget(view)
     view.show()
     view._number_input.setText("24")
     assert view._has_ambiguity is True
-    assert view._code_combo.isVisible() is True
-    # El combo solo debe contener los códigos ambiguos (ARG y BRA, no MR)
-    values = {view._code_combo.itemData(i) for i in range(view._code_combo.count())}
-    assert values == {"ARG", "BRA"}
+    assert view._code_edit.isVisible() is True
+    # El completer solo debe contener los códigos ambiguos (ARG y BRA, no MR)
+    assert view._valid_code_ids == {"ARG", "BRA"}
     assert (
         "especificá" in view._status_label.text().lower()
         or "especifica" in view._status_label.text().lower()
@@ -176,9 +175,9 @@ def test_choosing_code_after_ambiguity_validates_correctly(qtbot, memory_db, col
     qtbot.addWidget(view)
     view.show()
     view._number_input.setText("24")
-    # Elegir ARG en el combo
-    idx = view._code_combo.findData("ARG")
-    view._code_combo.setCurrentIndex(idx)
+    # Elegir ARG escribiéndolo y disparando Enter
+    view._code_edit.setText("ARG")
+    view._on_code_return_pressed()
     assert view._name_input.text() == "LIONEL MESSI"
     assert "ARGENTINA" in view._country_input.text()
     assert "Nueva" in view._status_label.text()
@@ -209,9 +208,9 @@ def test_save_uses_add_card_when_user_specified_code(qtbot, memory_db, collectio
     qtbot.addWidget(view)
     view.show()
     view._number_input.setText("24")
-    # Ambigüedad: el combo aparece. Elegir BRA.
-    idx = view._code_combo.findData("BRA")
-    view._code_combo.setCurrentIndex(idx)
+    # Ambigüedad: el campo de código aparece. Elegir BRA.
+    view._code_edit.setText("BRA")
+    view._on_code_return_pressed()
     qtbot.keyClick(view._qty_input, Qt.Key.Key_Return)
 
     item_arg = InventoryRepository(memory_db).get(collection_no_code.collection_id, "ARG", 24)
@@ -277,3 +276,133 @@ def test_typing_number_24_finds_messi_in_adrenalyn_like_setup(qtbot, memory_db, 
     msg = view._status_label.text().lower()
     assert "non-24" not in msg
     assert "no existe" not in msg or "especificá" in msg
+
+
+# ----------------------------------------------------------------------
+# Autocompletado: QLineEdit + QCompleter (reemplazo del QComboBox)
+# ----------------------------------------------------------------------
+
+
+def test_completer_contains_code_and_name(qtbot, memory_db, collection_with_code):
+    """El modelo del completer tiene strings tipo 'S1 - Set 1'."""
+    view = CardLoaderView(memory_db, collection_with_code)
+    qtbot.addWidget(view)
+    view.show()
+    model = view._completer.model()
+    items = [model.data(model.index(i, 0)) for i in range(model.rowCount())]
+    assert "S1 - Set 1" in items
+    assert "S2 - Set 2" in items
+
+
+def test_enter_exact_match_selects_code(qtbot, memory_db, collection_with_code):
+    """Texto 'S1' + Enter → _selected_code_id='S1' y foco en número."""
+    view = CardLoaderView(memory_db, collection_with_code)
+    qtbot.addWidget(view)
+    view.show()
+    view._code_edit.setText("S1")
+    view._on_code_return_pressed()
+    assert view._selected_code_id == "S1"
+    assert view._number_input.hasFocus()
+
+
+def test_enter_case_insensitive(qtbot, memory_db, collection_with_code):
+    """Texto en minúsculas 's1' + Enter → matchea 'S1'."""
+    view = CardLoaderView(memory_db, collection_with_code)
+    qtbot.addWidget(view)
+    view.show()
+    view._code_edit.setText("s1")
+    view._on_code_return_pressed()
+    assert view._selected_code_id == "S1"
+
+
+def test_enter_no_match_does_not_select(qtbot, memory_db, collection_with_code):
+    """Texto que no matchea ningún code → _selected_code_id queda en None."""
+    view = CardLoaderView(memory_db, collection_with_code)
+    qtbot.addWidget(view)
+    view.show()
+    view._code_edit.setText("ZZZ")
+    view._on_code_return_pressed()
+    assert view._selected_code_id is None
+
+
+def test_enter_single_partial_match_auto_selects(qtbot, memory_db, sample_code_header):
+    """Solo 'ARG' empieza con 'AR' → tipear 'AR' + Enter selecciona 'ARG'."""
+    hid = sample_code_header.code_header_id
+    lines_repo = CodesLinesRepository(memory_db)
+    for code, name in [("ARG", "ARGENTINA"), ("BRA", "BRAZIL")]:
+        lines_repo.upsert(CodeLine(hid, code, name))
+    col = CollectionsRepository(memory_db).create(
+        Collection(
+            collection_id=None,
+            collection_name="Test",
+            card_count=10,
+            requires_code=True,
+            code_field_name="P",
+            code_header_id=hid,
+        )
+    )
+    memory_db.commit()
+    view = CardLoaderView(memory_db, col)
+    qtbot.addWidget(view)
+    view.show()
+    view._code_edit.setText("AR")  # 'AR' contained only in 'ARG'
+    view._on_code_return_pressed()
+    assert view._selected_code_id == "ARG"
+
+
+def test_text_change_after_selection_clears_selection(qtbot, memory_db, collection_with_code):
+    """Si el usuario cambia el texto después de seleccionar, _selected_code_id se invalida."""
+    view = CardLoaderView(memory_db, collection_with_code)
+    qtbot.addWidget(view)
+    view.show()
+    view._code_edit.setText("S1")
+    view._on_code_return_pressed()
+    assert view._selected_code_id == "S1"
+    # Cambiar texto a algo que no matchea
+    view._code_edit.setText("S")  # prefix incompleto: no matchea exactamente
+    assert view._selected_code_id is None
+
+
+def test_on_code_selected_extracts_code_id(qtbot, memory_db, collection_with_code):
+    """Llamar _on_code_selected('S1 - Set 1') → extrae 'S1' y setea el text."""
+    view = CardLoaderView(memory_db, collection_with_code)
+    qtbot.addWidget(view)
+    view.show()
+    view._on_code_selected("S1 - Set 1")
+    assert view._selected_code_id == "S1"
+    assert view._code_edit.text() == "S1"
+    assert view._number_input.hasFocus()
+
+
+def test_on_code_selected_ignores_invalid(qtbot, memory_db, collection_with_code):
+    """Si pasamos un string inválido, no se setea selected_code_id."""
+    view = CardLoaderView(memory_db, collection_with_code)
+    qtbot.addWidget(view)
+    view.show()
+    view._on_code_selected("FAKE - No existe")
+    assert view._selected_code_id is None
+
+
+def test_add_card_blocked_when_no_code_selected(qtbot, memory_db, collection_with_code):
+    """requires_code=True + sin code seleccionado: save bloqueado."""
+    view = CardLoaderView(memory_db, collection_with_code)
+    qtbot.addWidget(view)
+    view.show()
+    # Tipear número y cantidad sin haber seleccionado código
+    view._number_input.setText("1")
+    view._qty_input.setText("1")
+    view._save_card()
+    # Inventario debe seguir vacío
+    item = InventoryRepository(memory_db).get(collection_with_code.collection_id, "S1", 1)
+    assert item is None or item.quantity == 0
+    # Status debe avisar la falta de código
+    assert "código" in view._status_label.text().lower()
+
+
+def test_completer_uses_contains_match_filter(qtbot, memory_db, collection_with_code):
+    """El completer está configurado en MatchContains (no MatchStartsWith)."""
+    view = CardLoaderView(memory_db, collection_with_code)
+    qtbot.addWidget(view)
+    view.show()
+    assert view._completer.filterMode() == Qt.MatchFlag.MatchContains
+    assert view._completer.caseSensitivity() == Qt.CaseSensitivity.CaseInsensitive
