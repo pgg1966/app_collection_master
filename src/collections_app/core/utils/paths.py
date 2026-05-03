@@ -55,3 +55,15 @@ def get_crests_dir() -> Path:
 def get_crest_path(code_id: str) -> Path:
     """Path al escudo de un code_id específico (puede no existir aún)."""
     return get_crests_dir() / f"{code_id}.png"
+
+
+def get_generated_cards_dir() -> Path:
+    """Directorio raíz para imágenes de cards descargadas/generadas.
+
+    Cada colección ocupa una subcarpeta (`<id>/`); el scraper de Panini
+    y otras herramientas escriben acá. Los archivos se nombran por
+    `card_number` zero-padded a 4 dígitos (ej. `0042.jpg`).
+    """
+    d = get_app_data_dir() / "generated_cards"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
