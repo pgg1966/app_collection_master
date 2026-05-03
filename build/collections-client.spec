@@ -76,10 +76,12 @@ a = Analysis(
         "duckduckgo_search",
         "bs4",
         # Stdlib pesado que la app cliente no usa.
+        # OJO: NO excluir `email`, `xml.etree` ni `urllib` — reportlab los
+        # arrastra transitivamente (reportlab/lib/utils.py → urllib.request
+        # → email). Excluirlos rompe el .exe en runtime con
+        # "No module named 'email'".
         "tkinter",
         "unittest",
-        "email",
-        "xml.etree",
         "pydoc",
         "doctest",
     ],
