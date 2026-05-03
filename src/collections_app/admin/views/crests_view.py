@@ -33,6 +33,7 @@ from collections_app.admin.crests.crest_finder import (
     SETTING_GOOGLE_API_KEY,
     SETTING_GOOGLE_CSE_ID,
     SOURCE_GOOGLE,
+    SOURCE_NOT_FOUND,
     SOURCE_PLACEHOLDER,
     CrestResult,
 )
@@ -51,8 +52,8 @@ logger = logging.getLogger(__name__)
 PREVIEW_SIZE = 150
 ICON_SIZE = 32
 
-STATUS_NONE = "Sin escudo"
-STATUS_ONLINE = "Online"  # se descargó de la red (Google CSE u origen alternativo)
+STATUS_NONE = "Sin escudo"  # no hay archivo (nunca se buscó o búsqueda no encontró)
+STATUS_FOUND = "✓ Encontrado"  # archivo válido descargado (Google CSE u origen)
 STATUS_MANUAL = "Manual"
 STATUS_PLACEHOLDER = "Placeholder"
 
@@ -354,11 +355,16 @@ class CrestsView(QWidget):
 
     def _compute_status(self, code_id: str, path: Path) -> str:
         if not is_valid_crest_file(path):
-            return STATUS_NONE if code_id not in SPECIAL_CODES else STATUS_PLACEHOLDER
-        # Para SPECIAL_CODES asumimos placeholder (no se busca online).
-        # Para el resto asumimos que está online/manual: el usuario ve por
-        # el preview si es real o placeholder.
-        return STATUS_PLACEHOLDER if code_id in SPECIAL_CODES else STATUS_ONLINE
+            # Sin archivo válido. Para SPECIAL_CODES seguimos mostrando
+            # "Placeholder" (su placeholder se genera siempre). Para el
+            # resto: "Sin escudo" — la próxima búsqueda lo intentará.
+            if code_id in SPECIAL_CODES:
+                return STATUS_PLACEHOLDER
+            return STATUS_NONE
+        # Archivo válido en disco. SPECIAL_CODES → placeholder (visualmente
+        # marca al usuario que tiene que importarlo manualmente). Resto →
+        # encontrado (Google CSE o import manual; el preview muestra cuál).
+        return STATUS_PLACEHOLDER if code_id in SPECIAL_CODES else STATUS_FOUND
 
     def _set_buttons_enabled(self, enabled: bool) -> None:
         running = self._worker is not None and self._worker.isRunning()
@@ -397,6 +403,14 @@ class CrestsView(QWidget):
             )
             return
 
+        # Limpieza de placeholders previos: archivos de ejecuciones anteriores
+        # (cuando find_crest aún escribía SOURCE_PLACEHOLDER en disco) seguirían
+        # contando como "cache válido" y bloquearían el reintento. Después del
+        # cambio a SOURCE_NOT_FOUND ya no se generan, pero borramos los heredados.
+        deleted = self._finder.cleanup_failed_placeholders(candidates)
+        if deleted:
+            logger.info("Limpiados %d placeholders previos antes de buscar", deleted)
+
         progress = QProgressDialog(
             self.tr("Descargando escudos…"),
             self.tr("Cancelar"),
@@ -416,14 +430,15 @@ class CrestsView(QWidget):
 
         def on_ok(results: list[CrestResult]) -> None:
             progress.close()
-            online = sum(1 for r in results if r.source == SOURCE_GOOGLE)
+            found = sum(1 for r in results if r.source == SOURCE_GOOGLE)
             ph = sum(1 for r in results if r.source == SOURCE_PLACEHOLDER)
+            not_found = sum(1 for r in results if r.source == SOURCE_NOT_FOUND)
             QMessageBox.information(
                 self,
                 self.tr("Buscar escudos"),
-                self.tr("Procesados: {n}. Online: {o}. Placeholder: {p}.").format(
-                    n=len(results), o=online, p=ph
-                ),
+                self.tr(
+                    "Procesados: {n}. Encontrados: {f}. " "Sin resultado: {nf}. Placeholder: {p}."
+                ).format(n=len(results), f=found, nf=not_found, p=ph),
             )
             assert cid is not None
             self._refresh_grid(cid)

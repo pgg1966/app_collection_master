@@ -21,6 +21,7 @@ from collections_app.admin.crests.crest_finder import (
     SETTING_GOOGLE_CSE_ID,
     SOURCE_CACHE,
     SOURCE_GOOGLE,
+    SOURCE_NOT_FOUND,
     SOURCE_PLACEHOLDER,
     SPECIAL_CODES,
     CrestFinder,
@@ -493,23 +494,24 @@ def test_find_crest_uses_google_cse(tmp_path, monkeypatch, memory_db):
     assert result.local_path.exists()
 
 
-def test_find_crest_falls_to_placeholder_when_google_returns_nothing(
-    tmp_path, monkeypatch, memory_db
-):
-    """Si Google CSE no devuelve URLs, el resultado es placeholder."""
+def test_find_crest_not_found_writes_no_file(tmp_path, monkeypatch, memory_db):
+    """Si Google CSE no devuelve URLs, NO se escribe placeholder en disco."""
     _redirect_crest_paths(monkeypatch, tmp_path)
 
     finder = CrestFinder()
     with patch.object(finder, "_search_google_crest", return_value=[]):
         result = finder.find_crest("ARG", "ARGENTINA", memory_db)
 
-    assert result.source == SOURCE_PLACEHOLDER
-    assert result.local_path.exists()
-    assert result.local_path.stat().st_size > MIN_VALID_FILE_BYTES
+    assert result.source == SOURCE_NOT_FOUND
+    assert result.success is False
+    assert not result.local_path.exists(), (
+        "find_crest no debe escribir archivo cuando no hay resultado, "
+        "para permitir reintento automático"
+    )
 
 
-def test_find_crest_falls_to_placeholder_when_all_downloads_fail(tmp_path, monkeypatch, memory_db):
-    """Si Google devuelve URLs pero ninguna baja → placeholder."""
+def test_find_crest_not_found_when_all_downloads_fail(tmp_path, monkeypatch, memory_db):
+    """Si Google devuelve URLs pero ninguna baja → NOT_FOUND, sin archivo."""
     _redirect_crest_paths(monkeypatch, tmp_path)
 
     finder = CrestFinder()
@@ -520,7 +522,45 @@ def test_find_crest_falls_to_placeholder_when_all_downloads_fail(tmp_path, monke
     ):
         result = finder.find_crest("ARG", "ARGENTINA", memory_db)
 
+    assert result.source == SOURCE_NOT_FOUND
+    assert result.success is False
+    assert not result.local_path.exists()
+
+
+def test_not_found_crest_is_retried_next_time(tmp_path, monkeypatch, memory_db):
+    """Tras un NOT_FOUND, la siguiente llamada vuelve a buscar (no devuelve cache)."""
+    _redirect_crest_paths(monkeypatch, tmp_path)
+
+    finder = CrestFinder()
+    call_count = {"n": 0}
+
+    def fake_search(_code_name: str, _conn) -> list[str]:
+        call_count["n"] += 1
+        return []  # ambos intentos sin resultado
+
+    with patch.object(finder, "_search_google_crest", side_effect=fake_search):
+        first = finder.find_crest("ARG", "ARGENTINA", memory_db)
+        second = finder.find_crest("ARG", "ARGENTINA", memory_db)
+
+    assert first.source == SOURCE_NOT_FOUND
+    assert second.source == SOURCE_NOT_FOUND
+    # Lo crítico: la SEGUNDA llamada efectivamente reintentó búsqueda
+    assert (
+        call_count["n"] == 2
+    ), f"Esperaba 2 búsquedas (sin cache de NOT_FOUND), hubo {call_count['n']}"
+
+
+def test_find_crest_special_code_still_writes_placeholder(tmp_path, monkeypatch, memory_db):
+    """SPECIAL_CODES SÍ siguen generando placeholder en disco (recordatorio visual)."""
+    _redirect_crest_paths(monkeypatch, tmp_path)
+
+    finder = CrestFinder()
+    result = finder.find_crest("GBL", "Golden Ballers", memory_db)
+
     assert result.source == SOURCE_PLACEHOLDER
+    assert result.success is True
+    assert result.local_path.exists(), "El placeholder de SPECIAL_CODES debe escribirse"
+    assert result.local_path.stat().st_size > MIN_VALID_FILE_BYTES
 
 
 def test_find_crest_skips_google_for_special_codes(tmp_path, monkeypatch, memory_db):
@@ -601,3 +641,58 @@ def test_find_all_does_not_sleep_for_cached_or_special(tmp_path, monkeypatch, me
     finder.find_all_crests([("ARG", "ARGENTINA"), ("GBL", "Global")], memory_db)
 
     assert sleep_calls == []
+
+
+# ----------------------------------------------------------------------
+# cleanup_failed_placeholders
+# ----------------------------------------------------------------------
+
+
+def test_cleanup_failed_placeholders_deletes_non_special(tmp_path, monkeypatch):
+    """Borra placeholders de códigos NO especiales; deja los SPECIAL_CODES."""
+    _redirect_crest_paths(monkeypatch, tmp_path)
+    arg = tmp_path / "ARG.png"
+    gbl = tmp_path / "GBL.png"
+    arg.write_bytes(b"placeholder-arg")
+    gbl.write_bytes(b"placeholder-gbl")
+
+    finder = CrestFinder()
+    deleted = finder.cleanup_failed_placeholders([("ARG", "Argentina"), ("GBL", "Golden Ballers")])
+
+    assert deleted == 1
+    assert not arg.exists(), "Placeholder de ARG (no special) debió borrarse"
+    assert gbl.exists(), "Placeholder de GBL (special) NO debe borrarse"
+
+
+def test_cleanup_failed_placeholders_returns_zero_when_no_files(tmp_path, monkeypatch):
+    _redirect_crest_paths(monkeypatch, tmp_path)
+    finder = CrestFinder()
+    deleted = finder.cleanup_failed_placeholders([("ARG", "Argentina"), ("BRA", "Brazil")])
+    assert deleted == 0
+
+
+# ----------------------------------------------------------------------
+# Logs [credentials]: ambas fuentes mostradas siempre
+# ----------------------------------------------------------------------
+
+
+def test_load_credentials_logs_both_sources(monkeypatch, memory_db, caplog):
+    """Cada llamada loguea el estado de app_settings Y de env vars."""
+    SettingsRepository(memory_db).set(SETTING_GOOGLE_API_KEY, "key-from-settings")
+    memory_db.commit()
+    monkeypatch.setenv(ENV_GOOGLE_CSE_ID, "cse-from-env")
+    monkeypatch.delenv(ENV_GOOGLE_API_KEY, raising=False)
+
+    with caplog.at_level("INFO", logger="collections_app.admin.crests.crest_finder"):
+        api_key, cse_id = _load_google_credentials(memory_db)
+
+    msgs = [r.message for r in caplog.records]
+    # Debe haber UNA línea para app_settings y UNA para env vars
+    assert any("[credentials] app_settings:" in m for m in msgs), msgs
+    assert any("[credentials] env vars:" in m for m in msgs), msgs
+    # Y la línea final que indica desde dónde se resolvió cada credencial
+    assert any("[credentials] usando" in m for m in msgs), msgs
+
+    # Sanity: las credenciales se resolvieron de las dos fuentes mezcladas
+    assert api_key == "key-from-settings"
+    assert cse_id == "cse-from-env"

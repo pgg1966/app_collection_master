@@ -90,19 +90,23 @@ SOURCE_CACHE = "cache"
 SOURCE_GOOGLE = "google"
 SOURCE_MANUAL = "manual"
 SOURCE_PLACEHOLDER = "placeholder"
+# `not_found`: Google CSE no devolvió URLs (o ninguna fue descargable). NO
+# se escribe archivo en disco para que la próxima ejecución reintente
+# automáticamente. Solo aplica a códigos NO especiales.
+SOURCE_NOT_FOUND = "not_found"
 
-# Settings keys donde viven las credenciales de Google CSE.
-# OJO: estos son los NOMBRES de las entries en `app_settings`, NO los
-# valores. Las credenciales reales se setean vía SettingsRepository.set()
-# o se leen de las env vars de abajo.
-SETTING_GOOGLE_API_KEY = "AIzaSyC-wdYCg4a_ykkbU6HRz0hsM6z1NFYAsxA"
-SETTING_GOOGLE_CSE_ID = "97aad52800c424491"
+# NOMBRES de claves (NO los valores). Estas constantes definen DÓNDE
+# buscar las credenciales — los valores reales se setean vía la UI de
+# CrestsView (que llama `SettingsRepository.set(SETTING_GOOGLE_API_KEY, "AIza...")`)
+# o por env vars del sistema.
+#
+# Si vas a pegar tu key real, NO toques este archivo: usá Admin → Escudos
+# → "Google Custom Search" → Guardar.
+SETTING_GOOGLE_API_KEY = "google_api_key"  # clave en la tabla app_settings
+SETTING_GOOGLE_CSE_ID = "google_cse_id"  # clave en la tabla app_settings
 
-# Env vars usadas como fallback cuando `app_settings` no tiene las claves.
-# Mantienen el nombre histórico del antiguo image_pipeline para no obligar
-# al usuario a re-setear nada.
-ENV_GOOGLE_API_KEY = "GOOGLE_API_KEY"
-ENV_GOOGLE_CSE_ID = "GOOGLE_CSE_ID"
+ENV_GOOGLE_API_KEY = "GOOGLE_API_KEY"  # variable de entorno OS
+ENV_GOOGLE_CSE_ID = "GOOGLE_CSE_ID"  # variable de entorno OS
 
 
 @dataclass(frozen=True)
@@ -117,6 +121,13 @@ class CrestResult:
     error: str | None = None
 
 
+def _truncated(value: str | None, keep: int = 12) -> str:
+    """Helper para loguear un secret: muestra `repr('AIzaSyAbcd…')` o `'None'`."""
+    if not value:
+        return "None"
+    return repr(value[:keep] + "…")
+
+
 def _load_google_credentials(
     conn: sqlite3.Connection,
 ) -> tuple[str | None, str | None]:
@@ -128,54 +139,46 @@ def _load_google_credentials(
     permite que usuarios con `GOOGLE_API_KEY`/`GOOGLE_CSE_ID` ya seteadas
     no necesiten migrar nada.
 
-    El método loguea con detalle qué encontró y dónde, para diagnosticar
-    casos como "configuré las keys pero no las encuentra" (mismatch de DB,
-    nombre de clave incorrecto, env var en otra shell, etc.).
+    Loguea con prefijo `[credentials]` los valores truncados encontrados en
+    cada fuente — pensado para diagnosticar visualmente "configuré las keys
+    pero no las encuentra" (mismatch de DB, env var en otra shell, etc.).
     """
     repo = SettingsRepository(conn)
-    settings_api = repo.get(SETTING_GOOGLE_API_KEY)
-    settings_cse = repo.get(SETTING_GOOGLE_CSE_ID)
+    db_api_key = repo.get(SETTING_GOOGLE_API_KEY)
+    db_cse_id = repo.get(SETTING_GOOGLE_CSE_ID)
+    logger.info(
+        "[credentials] app_settings: api_key=%s cse_id=%s",
+        _truncated(db_api_key),
+        _truncated(db_cse_id),
+    )
 
-    if settings_api and settings_cse:
-        logger.debug("_load_google_credentials: ambas keys encontradas en app_settings")
-        return settings_api, settings_cse
+    env_api_key = os.environ.get(ENV_GOOGLE_API_KEY)
+    env_cse_id = os.environ.get(ENV_GOOGLE_CSE_ID)
+    logger.info(
+        "[credentials] env vars: %s=%s %s=%s",
+        ENV_GOOGLE_API_KEY,
+        _truncated(env_api_key),
+        ENV_GOOGLE_CSE_ID,
+        _truncated(env_cse_id),
+    )
 
-    # Avisar al usuario si tiene una sola — casi siempre es un error de carga
-    if settings_api and not settings_cse:
-        logger.warning(
-            "app_settings tiene %s pero falta %s — verificar configuración",
-            SETTING_GOOGLE_API_KEY,
-            SETTING_GOOGLE_CSE_ID,
-        )
-    elif settings_cse and not settings_api:
-        logger.warning(
-            "app_settings tiene %s pero falta %s — verificar configuración",
-            SETTING_GOOGLE_CSE_ID,
-            SETTING_GOOGLE_API_KEY,
-        )
-    else:
-        logger.debug(
-            "app_settings vacío para keys de Google — probando env vars %s / %s",
-            ENV_GOOGLE_API_KEY,
-            ENV_GOOGLE_CSE_ID,
-        )
-
-    env_api = os.environ.get(ENV_GOOGLE_API_KEY)
-    env_cse = os.environ.get(ENV_GOOGLE_CSE_ID)
-    api_key = settings_api or env_api
-    cse_id = settings_cse or env_cse
+    api_key = db_api_key or env_api_key
+    cse_id = db_cse_id or env_cse_id
 
     if api_key and cse_id:
-        if env_api and not settings_api:
-            logger.debug("api_key resuelto desde env var %s", ENV_GOOGLE_API_KEY)
-        if env_cse and not settings_cse:
-            logger.debug("cse_id resuelto desde env var %s", ENV_GOOGLE_CSE_ID)
+        # Indicar de qué fuente vino cada credencial (pueden venir de fuentes
+        # distintas, p.ej. api_key en settings y cse_id en env var).
+        api_src = "app_settings" if db_api_key else "env"
+        cse_src = "app_settings" if db_cse_id else "env"
+        logger.info("[credentials] usando api_key=%s cse_id=%s ✓", api_src, cse_src)
         return api_key, cse_id
 
-    logger.info(
-        "Google CSE: credenciales no encontradas en app_settings ni env vars. "
-        "Setealas en Admin → Escudos → 'Google Custom Search', o exportá "
-        "%s y %s antes de arrancar la app.",
+    logger.warning(
+        "[credentials] NO encontradas. Setealas en Admin → Escudos → "
+        "'Google Custom Search' (claves '%s' y '%s' en app_settings), "
+        "o exportá las env vars %s y %s antes de arrancar la app.",
+        SETTING_GOOGLE_API_KEY,
+        SETTING_GOOGLE_CSE_ID,
         ENV_GOOGLE_API_KEY,
         ENV_GOOGLE_CSE_ID,
     )
@@ -218,13 +221,12 @@ class CrestFinder:
 
         Cascada:
         1. Cache válido (`is_valid_crest_file`).
-        2. Si está en `SPECIAL_CODES` → placeholder con iniciales.
-        3. Google Custom Search (con keys leídas de `app_settings`).
-        4. Placeholder con iniciales.
+        2. Si está en `SPECIAL_CODES` → placeholder con iniciales (sí escribe).
+        3. Google Custom Search (con keys leídas de `app_settings`/env vars).
+        4. `SOURCE_NOT_FOUND` — NO escribe nada en disco para permitir
+           reintento automático en la próxima ejecución.
 
-        `conn` se usa solo para leer las API keys de Google CSE desde
-        `app_settings`. Devuelve un `CrestResult` con el path local y el
-        `source`.
+        `conn` se usa solo para leer las API keys de Google CSE.
         """
         logger.info("Buscando crest para %s (%s)…", code_id, code_name)
         dest = get_crest_path(code_id)
@@ -238,6 +240,9 @@ class CrestFinder:
             logger.debug("Borrado crest inválido en cache: %s", dest)
 
         if code_id in SPECIAL_CODES:
+            # SPECIAL_CODES sí generan placeholder en disco — son sets que
+            # el usuario debe importar manualmente, el placeholder funciona
+            # como recordatorio visual permanente.
             self._generate_placeholder_crest(code_id, dest)
             return CrestResult(
                 code_id,
@@ -249,37 +254,31 @@ class CrestFinder:
             )
 
         urls = self._search_google_crest(code_name, conn)
-        if not urls:
-            logger.info("Crest %s: Google CSE no devolvió URLs — usando placeholder", code_id)
-            self._generate_placeholder_crest(code_id, dest)
-            return CrestResult(
+        if urls:
+            logger.info(
+                "Crest %s: Google CSE devolvió %d URLs — intentando descarga",
                 code_id,
-                code_name,
-                dest,
-                SOURCE_PLACEHOLDER,
-                True,
-                error="Google CSE no devolvió resultados",
+                len(urls),
             )
+            for url in urls:
+                if self._download_and_process_crest(url, dest):
+                    logger.info("Crest %s encontrado via Google CSE", code_id)
+                    return CrestResult(code_id, code_name, dest, SOURCE_GOOGLE, True)
 
+        # Sin escudo. NO escribimos placeholder en disco: si lo hiciéramos,
+        # la próxima ejecución vería el archivo y consideraría cache válido,
+        # bloqueando reintentos automáticos para siempre.
         logger.info(
-            "Crest %s: Google CSE devolvió %d URLs — intentando descarga",
+            "Crest %s: sin resultado — se reintentará en la próxima ejecución",
             code_id,
-            len(urls),
         )
-        for url in urls:
-            if self._download_and_process_crest(url, dest):
-                logger.info("Crest %s encontrado via Google CSE", code_id)
-                return CrestResult(code_id, code_name, dest, SOURCE_GOOGLE, True)
-
-        logger.info("Crest %s: ninguna URL de Google CSE descargable — placeholder", code_id)
-        self._generate_placeholder_crest(code_id, dest)
         return CrestResult(
             code_id,
             code_name,
             dest,
-            SOURCE_PLACEHOLDER,
-            True,
-            error="Ninguna URL de Google CSE pudo descargarse",
+            SOURCE_NOT_FOUND,
+            False,
+            error="No se encontró escudo en Google CSE",
         )
 
     def find_all_crests(
@@ -325,6 +324,31 @@ class CrestFinder:
             return CrestResult(code_id, code_id, dest, SOURCE_MANUAL, False, error=str(exc))
         return CrestResult(code_id, code_id, dest, SOURCE_MANUAL, True)
 
+    def cleanup_failed_placeholders(
+        self,
+        codes: list[tuple[str, str]],
+    ) -> int:
+        """Borra placeholders previos de códigos NO especiales.
+
+        Los `SOURCE_PLACEHOLDER` que quedaron en disco antes del cambio a
+        `SOURCE_NOT_FOUND` siguen siendo "cache válido" y bloquean reintentos.
+        Llamar antes de `find_all_crests` cuando el usuario pide buscar de
+        nuevo, para que esos países se reintenten en vez de devolverse del
+        cache. SPECIAL_CODES NO se tocan (su placeholder es intencional).
+
+        Retorna cuántos archivos borró.
+        """
+        deleted = 0
+        for code_id, _ in codes:
+            if code_id in SPECIAL_CODES:
+                continue
+            path = get_crest_path(code_id)
+            if path.exists():
+                path.unlink(missing_ok=True)
+                deleted += 1
+                logger.debug("Borrado placeholder previo: %s", code_id)
+        return deleted
+
     # ------------------------------------------------------------------
     # Google Custom Search
     # ------------------------------------------------------------------
@@ -357,17 +381,31 @@ class CrestFinder:
             if img_type:
                 params["imgType"] = img_type
 
+            logger.info(
+                "[google_cse] request: q=%r imgType=%r",
+                params["q"],
+                params.get("imgType", ""),
+            )
             try:
                 r = requests.get(
                     GOOGLE_CSE_URL,
                     params=params,
                     timeout=DOWNLOAD_TIMEOUT,
                 )
+                items_count = len(r.json().get("items", [])) if r.status_code == 200 else 0
+                logger.info(
+                    "[google_cse] response: status=%s items=%d",
+                    r.status_code,
+                    items_count,
+                )
                 if r.status_code == 429:
-                    logger.warning("Google CSE: cuota diaria agotada")
+                    logger.warning("[google_cse] cuota diaria agotada")
                     return []
                 if r.status_code != 200:
-                    logger.debug("Google CSE: HTTP %s para query %r", r.status_code, query)
+                    # Body completo (truncado) para diagnóstico — los errores
+                    # de la API (key inválida, cse_id mal, billing, etc.)
+                    # vienen acá.
+                    logger.warning("[google_cse] body inesperado: %s", r.text[:500])
                     continue
                 items = r.json().get("items", []) or []
                 urls = [
@@ -376,7 +414,7 @@ class CrestFinder:
                 if urls:
                     return urls
             except Exception as exc:  # noqa: BLE001
-                logger.debug("Google CSE falló para %r: %s", query, exc)
+                logger.warning("[google_cse] excepción para %r: %s", query, exc)
                 continue
 
         return []

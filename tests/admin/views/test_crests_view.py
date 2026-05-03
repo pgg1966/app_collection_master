@@ -20,8 +20,8 @@ from collections_app.admin.crests.crest_finder import (
 )
 from collections_app.admin.views import crests_view as view_mod
 from collections_app.admin.views.crests_view import (
+    STATUS_FOUND,
     STATUS_NONE,
-    STATUS_ONLINE,
     STATUS_PLACEHOLDER,
     CrestsView,
     _CrestSearchWorker,
@@ -127,14 +127,14 @@ def test_invalid_crest_shown_as_sin_escudo(qtbot, tmp_path, monkeypatch, memory_
     assert view._compute_status("ARG", path) == STATUS_NONE
 
 
-def test_valid_crest_shown_as_online(qtbot, tmp_path, monkeypatch, memory_db):
+def test_valid_crest_shown_as_found(qtbot, tmp_path, monkeypatch, memory_db):
     _redirect_crest_dir(monkeypatch, tmp_path)
     path = tmp_path / "ARG.png"
     path.write_bytes(VALID_BYTES)
 
     view = CrestsView(memory_db, _DUMMY_DB_PATH)
     qtbot.addWidget(view)
-    assert view._compute_status("ARG", path) == STATUS_ONLINE
+    assert view._compute_status("ARG", path) == STATUS_FOUND
 
 
 def test_special_code_invalid_falls_to_placeholder(qtbot, tmp_path, monkeypatch, memory_db):
