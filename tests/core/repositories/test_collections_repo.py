@@ -128,3 +128,57 @@ def test_invalid_code_header_fk(memory_db):
     repo = CollectionsRepository(memory_db)
     with pytest.raises(sqlite3.IntegrityError):
         repo.create(_build(header_id=999))
+
+
+# ----------------------------------------------------------------------
+# Layout álbum (migración 004)
+# ----------------------------------------------------------------------
+
+
+def test_create_uses_default_album_layout(memory_db, sample_code_header):
+    """Sin pasar campos de álbum, se persisten los defaults 3×4 portrait."""
+    repo = CollectionsRepository(memory_db)
+    created = repo.create(_build(sample_code_header.code_header_id))
+    found = repo.get_by_id(created.collection_id)
+    assert found is not None
+    assert found.album_columns == 3
+    assert found.album_rows == 4
+    assert found.album_orientation == "portrait"
+
+
+def test_create_persists_custom_album_layout(memory_db, sample_code_header):
+    """Layout custom (5×3 landscape) se persiste y se lee correctamente."""
+    repo = CollectionsRepository(memory_db)
+    created = repo.create(
+        _build(
+            sample_code_header.code_header_id,
+            name="LandscapeCol",
+            album_columns=5,
+            album_rows=3,
+            album_orientation="landscape",
+        )
+    )
+    found = repo.get_by_id(created.collection_id)
+    assert found is not None
+    assert found.album_columns == 5
+    assert found.album_rows == 3
+    assert found.album_orientation == "landscape"
+
+
+def test_update_modifies_album_layout(memory_db, sample_collection):
+    """update() persiste cambios en los 3 campos de álbum."""
+    from dataclasses import replace
+
+    repo = CollectionsRepository(memory_db)
+    modified = replace(
+        sample_collection,
+        album_columns=4,
+        album_rows=6,
+        album_orientation="landscape",
+    )
+    repo.update(modified)
+    found = repo.get_by_id(sample_collection.collection_id)
+    assert found is not None
+    assert found.album_columns == 4
+    assert found.album_rows == 6
+    assert found.album_orientation == "landscape"

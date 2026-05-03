@@ -102,3 +102,45 @@ def test_collections_abm_validate_premium_requires_license(qtbot, memory_db, sam
     qtbot.mouseClick(view.abm._save_button, Qt.MouseButton.LeftButton)
     assert "licencia" in view.abm._status_label.text().lower()
     assert CollectionsRepository(memory_db).list_all() == []
+
+
+def test_collections_abm_album_inputs_have_defaults(qtbot, memory_db, sample_code_header):
+    """Al instanciar el ABM, los inputs de álbum arrancan con sus defaults."""
+    from PySide6.QtWidgets import QComboBox, QSpinBox
+
+    view = CollectionsAbmView(memory_db)
+    qtbot.addWidget(view)
+    view.show()
+
+    cols = view.abm._inputs["album_columns"]
+    rows = view.abm._inputs["album_rows"]
+    orient = view.abm._inputs["album_orientation"]
+    assert isinstance(cols, QSpinBox) and cols.value() == 3
+    assert isinstance(rows, QSpinBox) and rows.value() == 4
+    assert isinstance(orient, QComboBox) and orient.currentData() == "portrait"
+
+
+def test_collections_abm_save_persists_album_layout(qtbot, memory_db, sample_code_header):
+    """El save guarda los valores custom de álbum."""
+    from PySide6.QtWidgets import QComboBox
+
+    view = CollectionsAbmView(memory_db)
+    qtbot.addWidget(view)
+    view.show()
+
+    view.abm._inputs["collection_name"].setText("LandscapeColl")
+    view.abm._inputs["card_count"].setValue(50)
+    view.abm._inputs["code_header_id"].setCurrentIndex(0)
+    view.abm._inputs["album_columns"].setValue(5)
+    view.abm._inputs["album_rows"].setValue(2)
+    orient = view.abm._inputs["album_orientation"]
+    assert isinstance(orient, QComboBox)
+    orient.setCurrentIndex(orient.findData("landscape"))
+
+    qtbot.mouseClick(view.abm._save_button, Qt.MouseButton.LeftButton)
+
+    cols = CollectionsRepository(memory_db).list_all()
+    assert len(cols) == 1
+    assert cols[0].album_columns == 5
+    assert cols[0].album_rows == 2
+    assert cols[0].album_orientation == "landscape"

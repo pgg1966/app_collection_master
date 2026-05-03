@@ -83,6 +83,36 @@ class CollectionsAbmView(QWidget):
                     is_required=False,
                     show_in_grid=False,
                 ),
+                # Layout del PDF álbum: configurable por colección porque
+                # cards horizontales y verticales necesitan distintas grillas.
+                FieldDef(
+                    "album_columns",
+                    "Álbum: columnas",
+                    FieldType.INT,
+                    is_required=False,
+                    grid_width=100,
+                    default_value=3,
+                ),
+                FieldDef(
+                    "album_rows",
+                    "Álbum: filas",
+                    FieldType.INT,
+                    is_required=False,
+                    grid_width=100,
+                    default_value=4,
+                ),
+                FieldDef(
+                    "album_orientation",
+                    "Álbum: orientación",
+                    FieldType.COMBO,
+                    combo_choices=[
+                        ("Vertical (portrait)", "portrait"),
+                        ("Horizontal (landscape)", "landscape"),
+                    ],
+                    is_required=False,
+                    grid_width=170,
+                    default_value="portrait",
+                ),
             ],
             filter_field="collection_name",
             filter_label=self.tr("Buscar por nombre"),
@@ -131,4 +161,10 @@ class CollectionsAbmView(QWidget):
             return False, self.tr("Si requiere código, debe especificarse la etiqueta del campo.")
         if collection.is_premium and not collection.license_key_required:
             return False, self.tr("Las colecciones premium deben tener hash de licencia.")
+        if not 1 <= collection.album_columns <= 8:
+            return False, self.tr("Álbum: columnas debe estar entre 1 y 8.")
+        if not 1 <= collection.album_rows <= 8:
+            return False, self.tr("Álbum: filas debe estar entre 1 y 8.")
+        if collection.album_orientation not in ("portrait", "landscape"):
+            return False, self.tr("Álbum: orientación debe ser 'portrait' o 'landscape'.")
         return True, ""

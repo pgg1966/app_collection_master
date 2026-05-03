@@ -16,12 +16,16 @@ def _row_to_collection(row: sqlite3.Row) -> Collection:
         code_header_id=row["code_header_id"],
         is_premium=bool(row["is_premium"]),
         license_key_required=row["license_key_required"],
+        album_columns=row["album_columns"],
+        album_rows=row["album_rows"],
+        album_orientation=row["album_orientation"],
     )
 
 
 _SELECT_COLS = (
     "collection_id, collection_name, card_count, requires_code, "
-    "code_field_name, code_header_id, is_premium, license_key_required"
+    "code_field_name, code_header_id, is_premium, license_key_required, "
+    "album_columns, album_rows, album_orientation"
 )
 
 
@@ -56,8 +60,9 @@ class CollectionsRepository(BaseRepository):
         cursor = self.conn.execute(
             "INSERT INTO collections "
             "(collection_name, card_count, requires_code, code_field_name, "
-            " code_header_id, is_premium, license_key_required) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            " code_header_id, is_premium, license_key_required, "
+            " album_columns, album_rows, album_orientation) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 collection.collection_name,
                 collection.card_count,
@@ -66,6 +71,9 @@ class CollectionsRepository(BaseRepository):
                 collection.code_header_id,
                 int(collection.is_premium),
                 collection.license_key_required,
+                collection.album_columns,
+                collection.album_rows,
+                collection.album_orientation,
             ),
         )
         return Collection(
@@ -77,6 +85,9 @@ class CollectionsRepository(BaseRepository):
             code_header_id=collection.code_header_id,
             is_premium=collection.is_premium,
             license_key_required=collection.license_key_required,
+            album_columns=collection.album_columns,
+            album_rows=collection.album_rows,
+            album_orientation=collection.album_orientation,
         )
 
     def update(self, collection: Collection) -> Collection:
@@ -87,7 +98,8 @@ class CollectionsRepository(BaseRepository):
             "UPDATE collections SET "
             "collection_name = ?, card_count = ?, requires_code = ?, "
             "code_field_name = ?, code_header_id = ?, is_premium = ?, "
-            "license_key_required = ? "
+            "license_key_required = ?, album_columns = ?, album_rows = ?, "
+            "album_orientation = ? "
             "WHERE collection_id = ?",
             (
                 collection.collection_name,
@@ -97,6 +109,9 @@ class CollectionsRepository(BaseRepository):
                 collection.code_header_id,
                 int(collection.is_premium),
                 collection.license_key_required,
+                collection.album_columns,
+                collection.album_rows,
+                collection.album_orientation,
                 collection.collection_id,
             ),
         )

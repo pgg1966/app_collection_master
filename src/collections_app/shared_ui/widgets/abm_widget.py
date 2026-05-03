@@ -99,6 +99,10 @@ class FieldDef:
     placeholder: str = ""
     show_in_grid: bool = True
     grid_width: int | None = None
+    # Valor inicial al hacer "Nuevo" — útil para INT (default numérico) o
+    # COMBO (key seleccionada por default). Si es None, el widget arranca
+    # con su default nativo de Qt (0 para SpinBox, primer item para Combo).
+    default_value: Any = None
 
 
 @dataclass
@@ -341,6 +345,8 @@ class AbmWidget(QWidget):
             case FieldType.INT:
                 spin = QSpinBox()
                 spin.setRange(0, 999_999)
+                if fdef.default_value is not None:
+                    spin.setValue(int(fdef.default_value))
                 return spin
             case FieldType.BOOL:
                 return QCheckBox()
@@ -348,6 +354,10 @@ class AbmWidget(QWidget):
                 combo = QComboBox()
                 for label, value in self._resolve_combo_choices(fdef):
                     combo.addItem(label, userData=value)
+                if fdef.default_value is not None:
+                    idx = combo.findData(fdef.default_value)
+                    if idx >= 0:
+                        combo.setCurrentIndex(idx)
                 return combo
 
     def _build_buttons(self) -> QHBoxLayout:
@@ -516,6 +526,12 @@ class AbmWidget(QWidget):
 
     def _set_input_value(self, fdef: FieldDef, value: Any) -> None:
         widget = self._inputs[fdef.name]
+        # Si no hay valor explícito y existe `default_value` definido, usarlo.
+        # Esto hace que "Nuevo" pre-rellene los campos con sus defaults
+        # (importante para INT y COMBO con valores semánticos como
+        # `album_columns=3` o `album_orientation="portrait"`).
+        if value is None and fdef.default_value is not None:
+            value = fdef.default_value
         if fdef.field_type in (FieldType.TEXT, FieldType.READONLY):
             assert isinstance(widget, QLineEdit)
             widget.setText("" if value is None else str(value))

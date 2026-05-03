@@ -16,6 +16,10 @@ class Collection:
         code_header_id: FK al CodeHeader que define el universo de códigos.
         is_premium: si True, requiere licencia para usar.
         license_key_required: hash de la key requerida (None si free).
+        album_columns: cards por fila en el PDF álbum (default 3).
+        album_rows: filas por página en el PDF álbum (default 4).
+        album_orientation: 'portrait' o 'landscape' — algunas colecciones
+            tienen cards horizontales y necesitan landscape (default portrait).
     """
 
     collection_id: int | None
@@ -26,3 +30,6 @@ class Collection:
     code_header_id: int
     is_premium: bool = False
     license_key_required: str | None = None
+    album_columns: int = 3
+    album_rows: int = 4
+    album_orientation: str = "portrait"

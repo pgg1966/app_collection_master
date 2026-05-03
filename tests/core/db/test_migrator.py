@@ -12,7 +12,7 @@ def test_migrator_applies_all_migrations():
     """Verifica que el migrator aplica todas las migraciones disponibles."""
     conn = create_connection(":memory:")
     final_version = run_migrations(conn)
-    assert final_version >= 3  # 001 + 002 + 003
+    assert final_version >= 4  # 001 + 002 + 003 + 004
 
 
 def test_migrator_creates_all_expected_tables(memory_db: sqlite3.Connection):
@@ -94,6 +94,9 @@ def test_migration_002_assigns_alphabetical_order_to_existing():
     """Aplicada en una DB con datos preexistentes, asigna orden alfabético."""
     conn = create_connection(":memory:")
     # Aplicar solo migración 001 simulando estado pre-002
+    # Schema mínimo de la versión 1: incluye `collections` (mínimas) porque
+    # migraciones posteriores (003, 004) la alteran. Si se omite, ALTER TABLE
+    # falla en cuanto se aplique cualquier migración futura sobre `collections`.
     schema_001 = (
         "CREATE TABLE schema_version (version INTEGER PRIMARY KEY, "
         "applied_at TEXT NOT NULL DEFAULT (datetime('now')));"
@@ -107,6 +110,23 @@ def test_migration_002_assigns_alphabetical_order_to_existing():
         "  code_name TEXT NOT NULL,"
         "  PRIMARY KEY (code_header_id, code_id),"
         "  FOREIGN KEY (code_header_id) REFERENCES codes_headers(code_header_id));"
+        "CREATE TABLE collections ("
+        "  collection_id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  collection_name TEXT NOT NULL UNIQUE,"
+        "  card_count INTEGER NOT NULL,"
+        "  requires_code INTEGER NOT NULL DEFAULT 0,"
+        "  code_field_name TEXT,"
+        "  code_header_id INTEGER NOT NULL,"
+        "  is_premium INTEGER NOT NULL DEFAULT 0,"
+        "  license_key_required TEXT,"
+        "  FOREIGN KEY (code_header_id) REFERENCES codes_headers(code_header_id));"
+        "CREATE TABLE cards ("
+        "  collection_id INTEGER NOT NULL,"
+        "  code_id TEXT NOT NULL,"
+        "  card_number INTEGER NOT NULL,"
+        "  card_name TEXT NOT NULL,"
+        "  PRIMARY KEY (collection_id, code_id, card_number),"
+        "  FOREIGN KEY (collection_id) REFERENCES collections(collection_id) ON DELETE CASCADE);"
         "INSERT INTO schema_version (version) VALUES (1);"
         "INSERT INTO codes_headers (code_header_name) VALUES ('FIFA');"
         "INSERT INTO codes_lines (code_header_id, code_id, code_name) VALUES "
@@ -120,3 +140,48 @@ def test_migration_002_assigns_alphabetical_order_to_existing():
     rows = conn.execute("SELECT code_id, code_order FROM codes_lines ORDER BY code_id").fetchall()
     orders = {r["code_id"]: r["code_order"] for r in rows}
     assert orders == {"ARG": 1, "BRA": 2, "CHI": 3}
+
+
+# ----------------------------------------------------------------------
+# Migración 004 — layout álbum por colección
+# ----------------------------------------------------------------------
+
+
+def test_migration_004_adds_album_layout_columns(memory_db: sqlite3.Connection):
+    """La migración 004 agrega album_columns/rows/orientation a collections."""
+    cols = {row["name"] for row in memory_db.execute("PRAGMA table_info(collections)").fetchall()}
+    assert "album_columns" in cols
+    assert "album_rows" in cols
+    assert "album_orientation" in cols
+
+
+def test_migration_004_defaults_for_existing_rows(memory_db: sqlite3.Connection):
+    """Colecciones creadas antes de la 004 reciben defaults razonables (3, 4, portrait)."""
+    # Insertar header + colección omitiendo los nuevos campos (deben default)
+    memory_db.execute("INSERT INTO codes_headers (code_header_name) VALUES ('TestHdr')")
+    memory_db.execute(
+        "INSERT INTO collections "
+        "(collection_name, card_count, requires_code, code_field_name, code_header_id) "
+        "VALUES ('TestCol', 100, 0, NULL, 1)"
+    )
+    memory_db.commit()
+
+    row = memory_db.execute(
+        "SELECT album_columns, album_rows, album_orientation "
+        "FROM collections WHERE collection_name = 'TestCol'"
+    ).fetchone()
+    assert row["album_columns"] == 3
+    assert row["album_rows"] == 4
+    assert row["album_orientation"] == "portrait"
+
+
+def test_migration_004_orientation_check_constraint(memory_db: sqlite3.Connection):
+    """`album_orientation` solo acepta 'portrait' | 'landscape' (CHECK)."""
+    memory_db.execute("INSERT INTO codes_headers (code_header_name) VALUES ('Hdr')")
+    with pytest.raises(sqlite3.IntegrityError):
+        memory_db.execute(
+            "INSERT INTO collections "
+            "(collection_name, card_count, requires_code, code_field_name, "
+            " code_header_id, album_orientation) "
+            "VALUES ('C', 1, 0, NULL, 1, 'invalid')"
+        )
