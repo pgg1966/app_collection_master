@@ -406,3 +406,53 @@ def test_completer_uses_contains_match_filter(qtbot, memory_db, collection_with_
     view.show()
     assert view._completer.filterMode() == Qt.MatchFlag.MatchContains
     assert view._completer.caseSensitivity() == Qt.CaseSensitivity.CaseInsensitive
+
+
+def test_arrow_down_opens_completer_popup(qtbot, memory_db, collection_with_code):
+    """Down/Up con popup cerrado: abrir el popup para que se pueda navegar."""
+    view = CardLoaderView(memory_db, collection_with_code)
+    qtbot.addWidget(view)
+    view.show()
+    view._code_edit.setFocus()
+    qtbot.wait(20)
+
+    popup = view._completer.popup()
+    assert popup is not None
+    assert popup.isVisible() is False
+    qtbot.keyClick(view._code_edit, Qt.Key.Key_Down)
+    qtbot.wait(50)
+    assert popup.isVisible() is True
+
+
+def test_arrow_down_uses_text_as_prefix_filter(qtbot, memory_db, sample_code_header):
+    """Tipear 'AR' + Down filtra el popup a los matches que contienen 'AR'."""
+    hid = sample_code_header.code_header_id
+    lines_repo = CodesLinesRepository(memory_db)
+    for code, name in [("ARG", "ARGENTINA"), ("BRA", "BRAZIL"), ("MAR", "MOROCCO")]:
+        lines_repo.upsert(CodeLine(hid, code, name))
+    col = CollectionsRepository(memory_db).create(
+        Collection(
+            collection_id=None,
+            collection_name="C",
+            card_count=10,
+            requires_code=True,
+            code_field_name="P",
+            code_header_id=hid,
+        )
+    )
+    memory_db.commit()
+    view = CardLoaderView(memory_db, col)
+    qtbot.addWidget(view)
+    view.show()
+
+    view._code_edit.setText("AR")
+    qtbot.keyClick(view._code_edit, Qt.Key.Key_Down)
+    # Tras complete() con prefix "AR", el modelo de completion solo
+    # contiene los matches con "AR" (ARG y MAR, no BRA).
+    matches = []
+    completion_model = view._completer.completionModel()
+    for i in range(completion_model.rowCount()):
+        matches.append(completion_model.data(completion_model.index(i, 0)))
+    assert any("ARG" in m for m in matches)
+    assert any("MAR" in m for m in matches)
+    assert not any("BRA - " in m for m in matches)

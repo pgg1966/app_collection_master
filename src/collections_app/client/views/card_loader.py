@@ -17,7 +17,7 @@ import logging
 import sqlite3
 
 from PySide6.QtCore import QEvent, QObject, QStringListModel, Qt, QTimer, Signal
-from PySide6.QtGui import QIntValidator
+from PySide6.QtGui import QIntValidator, QKeyEvent
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCompleter,
@@ -143,6 +143,10 @@ class CardLoaderView(QWidget):
         self._code_edit.setCompleter(self._completer)
         self._code_edit.textChanged.connect(self._on_code_text_changed)
         self._code_edit.returnPressed.connect(self._on_code_return_pressed)
+        # eventFilter para que Down/Up abran el popup del completer cuando
+        # está cerrado — por default QLineEdit ignora esas teclas y el
+        # popup solo navega cuando ya está visible.
+        self._code_edit.installEventFilter(self)
         grid.addWidget(self._code_label, row, 0)
         grid.addWidget(self._code_edit, row, 1)
         row += 1
@@ -343,8 +347,29 @@ class CardLoaderView(QWidget):
         return self._number_input
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
-        if watched is self._qty_input and event.type() == QEvent.Type.FocusIn:
-            self._qty_input.selectAll()
+        # `_qty_input` se construye después de `_code_edit` y este filter
+        # puede dispararse durante setup. Guard con getattr.
+        qty_input = getattr(self, "_qty_input", None)
+        if (
+            qty_input is not None
+            and watched is qty_input
+            and event.type() == QEvent.Type.FocusIn
+        ):
+            qty_input.selectAll()
+        # Up/Down sobre el code_edit: abrir popup del completer si no está
+        # visible. Una vez abierto, el popup procesa las flechas nativamente.
+        if (
+            watched is self._code_edit
+            and event.type() == QEvent.Type.KeyPress
+            and isinstance(event, QKeyEvent)
+            and event.key() in (Qt.Key.Key_Down, Qt.Key.Key_Up)
+        ):
+            popup = self._completer.popup()
+            if popup is None or not popup.isVisible():
+                # Prefijo vacío → muestra TODAS las opciones; con texto, filtra.
+                self._completer.setCompletionPrefix(self._code_edit.text())
+                self._completer.complete()
+                return True
         return super().eventFilter(watched, event)
 
     # ------------------------------------------------------------------
