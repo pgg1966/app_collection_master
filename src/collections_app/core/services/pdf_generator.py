@@ -86,6 +86,10 @@ class AlbumCard:
 
     `image_path` es `None` si la imagen no está descargada todavía. En ese
     caso se usa placeholder celeste (si `quantity > 0`) o blanco.
+
+    `code_order` es la posición de la categoría dentro del header (ver
+    `CodeLine.code_order`). El renderer lo usa para mostrar las categorías
+    en el orden definido por el admin, no en orden alfabético del code_id.
     """
 
     card: Card
@@ -93,6 +97,7 @@ class AlbumCard:
     image_path: Path | None
     requires_code: bool
     code_name: str  # nombre humano del código (ej. "ARGENTINA")
+    code_order: int = 0  # default 0 → cae al final si está sin ordenar
 
 
 @dataclass
@@ -305,14 +310,20 @@ def _draw_album_cell(
     h: float,
     result: PdfGeneratorResult,
 ) -> None:
-    """Dibuja una celda según el caso (A/B/C) y actualiza contadores."""
+    """Dibuja una celda según el caso (A/B/C) y actualiza contadores.
+
+    REGLA IMPORTANTE: la foto solo se dibuja si la card está en inventario
+    (`quantity > 0`). Si no la tengo, siempre va al placeholder blanco —
+    aunque la foto exista en disco — porque el álbum representa MI
+    colección, no el catálogo.
+    """
     inner_x = x + CELL_PADDING_PT
     inner_y = y + CELL_PADDING_PT
     inner_w = w - 2 * CELL_PADDING_PT
     inner_h = h - 2 * CELL_PADDING_PT
 
-    if ac.image_path is not None and ac.image_path.exists():
-        # CASO A: imagen real
+    if ac.quantity > 0 and ac.image_path is not None and ac.image_path.exists():
+        # CASO A: tengo la card y hay foto descargada → mostrar foto
         try:
             img = ImageReader(str(ac.image_path))
             c.drawImage(
@@ -329,16 +340,15 @@ def _draw_album_cell(
         except Exception as exc:  # noqa: BLE001
             logger.debug("Falló drawImage para card %s: %s", ac.card.card_number, exc)
             _draw_placeholder_cell(c, ac, inner_x, inner_y, inner_w, inner_h)
-            if ac.quantity > 0:
-                result.cards_celeste_placeholder += 1
-            else:
-                result.cards_missing += 1
+            result.cards_celeste_placeholder += 1
     elif ac.quantity > 0:
-        # CASO B: tengo la card pero sin imagen
+        # CASO B: tengo la card pero sin foto → placeholder celeste
         _draw_placeholder_cell(c, ac, inner_x, inner_y, inner_w, inner_h)
         result.cards_celeste_placeholder += 1
     else:
-        # CASO C: no la tengo
+        # CASO C: NO la tengo → placeholder blanco con borde gris.
+        # Aunque la foto esté en disco, no se muestra: el álbum
+        # representa la colección del usuario, no el catálogo.
         _draw_placeholder_cell(c, ac, inner_x, inner_y, inner_w, inner_h)
         result.cards_missing += 1
 

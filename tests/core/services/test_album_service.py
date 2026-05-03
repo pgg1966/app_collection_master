@@ -10,12 +10,20 @@ from collections_app.core.services import AlbumService
 
 
 def _seed(memory_db, sample_collection, codes_lines, cards, inventory=None):
-    """Helper: popula codes_lines, cards e (opcional) inventory."""
+    """Helper: popula codes_lines, cards e (opcional) inventory.
+
+    `codes_lines` es lista de `(code_id, code_name)` o `(code_id, code_name, order)`.
+    """
     hid = sample_collection.code_header_id
     cid = sample_collection.collection_id
     cl_repo = CodesLinesRepository(memory_db)
-    for code_id, code_name in codes_lines:
-        cl_repo.upsert(CodeLine(hid, code_id, code_name))
+    for entry in codes_lines:
+        if len(entry) == 2:
+            code_id, code_name = entry
+            order = 0
+        else:
+            code_id, code_name, order = entry
+        cl_repo.upsert(CodeLine(hid, code_id, code_name, code_order=order))
     c_repo = CardsRepository(memory_db)
     for code_id, n, name in cards:
         c_repo.upsert(Card(cid, code_id, n, name))
@@ -59,23 +67,74 @@ def test_build_album_cards_missing_have_quantity_zero(memory_db, sample_collecti
     assert by_n == {1: 0, 2: 1, 3: 0}
 
 
-def test_build_album_cards_sorted_by_code_then_number(memory_db, sample_collection):
-    """Cards insertadas en orden caótico → resultado ordenado por (code_id, n)."""
+def test_build_album_cards_sorted_by_code_order_then_number(memory_db, sample_collection):
+    """Categorías ordenadas por `code_order` (no alfabético por code_id)."""
+    # ZIM (Zimbabwe) tiene code_order=1, ALG (Argelia) tiene order=2,
+    # ARG order=3. Si fuera alfabético, ALG iría primero. Con el sort
+    # nuevo, ZIM va primero porque tiene order menor.
     _seed(
         memory_db,
         sample_collection,
-        [("ARG", "ARGENTINA"), ("BRA", "BRAZIL")],
         [
-            ("BRA", 2, "X"),
-            ("ARG", 3, "Y"),
-            ("ARG", 1, "Z"),
-            ("BRA", 1, "W"),
-            ("ARG", 2, "V"),
+            ("ZIM", "ZIMBABWE", 1),
+            ("ALG", "ALGERIA", 2),
+            ("ARG", "ARGENTINA", 3),
+        ],
+        [
+            ("ARG", 1, "Messi"),
+            ("ALG", 2, "Mahrez"),
+            ("ZIM", 3, "Player"),
+            ("ALG", 1, "Brahimi"),
         ],
     )
     cards = AlbumService(memory_db).build_album_cards(sample_collection)
     keys = [(ac.card.code_id, ac.card.card_number) for ac in cards]
-    assert keys == [("ARG", 1), ("ARG", 2), ("ARG", 3), ("BRA", 1), ("BRA", 2)]
+    # ZIM (order=1) → ALG (order=2) → ARG (order=3); dentro de cada
+    # categoría, por card_number ascendente.
+    assert keys == [
+        ("ZIM", 3),
+        ("ALG", 1),
+        ("ALG", 2),
+        ("ARG", 1),
+    ]
+
+
+def test_build_album_cards_falls_back_to_alpha_when_orders_tied(memory_db, sample_collection):
+    """Si dos categorías tienen el mismo code_order (default 0), desempata code_id alfa."""
+    _seed(
+        memory_db,
+        sample_collection,
+        [("BRA", "BRAZIL"), ("ARG", "ARGENTINA")],  # ambos order=0 implícito
+        [("BRA", 1, "Vini"), ("ARG", 1, "Messi")],
+    )
+    cards = AlbumService(memory_db).build_album_cards(sample_collection)
+    keys = [ac.card.code_id for ac in cards]
+    assert keys == ["ARG", "BRA"]
+
+
+def test_build_album_cards_populates_code_order(memory_db, sample_collection):
+    """AlbumCard.code_order viene poblado desde codes_lines."""
+    _seed(
+        memory_db,
+        sample_collection,
+        [("ARG", "ARGENTINA", 5), ("BRA", "BRAZIL", 7)],
+        [("ARG", 1, "Messi"), ("BRA", 1, "Vini")],
+    )
+    cards = AlbumService(memory_db).build_album_cards(sample_collection)
+    by_code = {ac.card.code_id: ac.code_order for ac in cards}
+    assert by_code == {"ARG": 5, "BRA": 7}
+
+
+def test_build_album_cards_unknown_code_has_order_zero(memory_db, sample_collection):
+    """Card con code_id no registrado en codes_lines → code_order=0 (default)."""
+    _seed(
+        memory_db,
+        sample_collection,
+        [("ARG", "ARGENTINA", 5)],
+        [("XYZ", 1, "Player")],  # XYZ no está en codes_lines
+    )
+    cards = AlbumService(memory_db).build_album_cards(sample_collection)
+    assert cards[0].code_order == 0
 
 
 def test_build_album_cards_resolves_code_name(memory_db, sample_collection):

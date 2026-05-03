@@ -156,6 +156,22 @@ def test_album_pdf_stats_count_each_case(tmp_path):
     assert result.cards_missing == 2
 
 
+def test_album_pdf_no_photo_when_quantity_zero(tmp_path):
+    """Aunque la foto exista en disco, si quantity=0 NO se muestra (CASO C).
+
+    El álbum representa la colección del usuario, no el catálogo.
+    """
+    col = _collection()
+    img = _make_jpeg(tmp_path / "exists.jpg")
+    cards = [
+        _ac("ARG", 1, qty=0, image_path=img),  # foto en disco PERO no la tengo
+    ]
+    result = generate_album_pdf(col, cards, tmp_path / "album.pdf")
+    # Debe contar como missing (CASO C), NO como with_image (CASO A).
+    assert result.cards_with_image == 0
+    assert result.cards_missing == 1
+
+
 def test_album_pdf_landscape_uses_landscape_pagesize(tmp_path):
     """Si la colección es landscape, el PDF también lo es (ancho > alto)."""
     col = _collection(orientation="landscape")

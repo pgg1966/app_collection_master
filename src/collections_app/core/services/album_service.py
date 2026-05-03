@@ -46,11 +46,12 @@ class AlbumService:
     # ------------------------------------------------------------------
 
     def build_album_cards(self, collection: Collection) -> list[AlbumCard]:
-        """Cruza cards con inventario + nombres de código + imágenes.
+        """Cruza cards con inventario + nombres de código + orden + imágenes.
 
-        Ordenado por (code_id, card_number) para que los renderers puedan
-        agrupar por categoría con `itertools.groupby`. Las cards sin
-        entrada en inventario quedan con `quantity=0`.
+        Ordenado por `(code_order, code_id, card_number)`: las categorías
+        respetan el `CodeLine.code_order` configurado en Admin (no alfabético
+        por code_id). El secundario `code_id` desempata casos de igual
+        code_order. Las cards sin entrada en inventario quedan con `quantity=0`.
         """
         assert collection.collection_id is not None
         cid: int = collection.collection_id
@@ -60,10 +61,12 @@ class AlbumService:
             (i.code_id, i.card_number): i.quantity
             for i in InventoryRepository(self._conn).list_by_collection(cid)
         }
-        code_names = self.get_code_names(collection)
+        # Una sola lectura de codes_lines: nombre + orden por code_id.
+        code_meta = self._get_code_meta(collection)
 
         result: list[AlbumCard] = []
         for card in cards:
+            name, order = code_meta.get(card.code_id, (card.code_id, 0))
             qty = inv.get((card.code_id, card.card_number), 0)
             result.append(
                 AlbumCard(
@@ -71,10 +74,11 @@ class AlbumService:
                     quantity=qty,
                     image_path=find_card_image(cid, card.card_number),
                     requires_code=collection.requires_code,
-                    code_name=code_names.get(card.code_id, card.code_id),
+                    code_name=name,
+                    code_order=order,
                 )
             )
-        result.sort(key=lambda ac: (ac.card.code_id, ac.card.card_number))
+        result.sort(key=lambda ac: (ac.code_order, ac.card.code_id, ac.card.card_number))
         return result
 
     def get_code_names(self, collection: Collection) -> dict[str, str]:
@@ -83,8 +87,12 @@ class AlbumService:
         Útil para renderear headers de categoría con el nombre humano
         ("ARGENTINA") en vez del id corto ("ARG").
         """
+        return {code_id: name for code_id, (name, _) in self._get_code_meta(collection).items()}
+
+    def _get_code_meta(self, collection: Collection) -> dict[str, tuple[str, int]]:
+        """Mapeo `code_id → (code_name, code_order)`. Una sola query."""
         lines = CodesLinesRepository(self._conn).list_by_header(collection.code_header_id)
-        return {line.code_id: line.code_name for line in lines}
+        return {line.code_id: (line.code_name, line.code_order) for line in lines}
 
     # ------------------------------------------------------------------
     # Wrappers de generación (render layer)
