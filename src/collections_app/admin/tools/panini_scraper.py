@@ -49,12 +49,14 @@ ADRENALYN_SEED_URL = (
     "panini-adrenalyn-xl-fifa-world-cup-2026_0501236099.html"
 )
 STICKERS_SEED_URL = (
-    "https://cartophilic-info-exch.blogspot.com/2026/04/"
-    "panini-fifa-world-cup-2026-23-brazil.html"
+    "https://cartophilic-info-exch.blogspot.com/2026/03/"
+    "panini-fifa-world-cup-2026-mexusacan-09_030880692.html"
 )
 
 # Términos que descalifican una página aunque su título matchee la keyword:
 # son sets paralelos / accesorios / variantes que no nos interesan.
+# La página seed de Stickers (Checklist) cae acá → deja de ser scrapeada
+# para cards, pero `run()` igual usa sus links para descubrir otras páginas.
 _BLACKLIST_TITLE_TERMS = (
     "limited edition",
     "special box",
@@ -67,6 +69,50 @@ _BLACKLIST_TITLE_TERMS = (
     "checklist",
     "cosmic",
     "parallel",
+    # Variantes específicas del set Stickers FIFA WC 2026:
+    "album",
+    "stadium kit",
+    "coca-cola",
+    "coca cola",
+    "mcdonald",
+    "free digital pack",
+    "play-offs",
+    "play offs",
+    "extra sticker",
+    "fifa rewards",
+    "mobile tour",
+    "crumple",
+    "gold numbered",
+)
+
+# Substrings (lowercase) que descalifican una URL de imagen aunque su nombre
+# matchee `filename_pattern`. Cubre hojas grupales por país, variantes
+# patrocinadas y scans del álbum impreso.
+FILENAME_BLACKLIST_TOKENS: tuple[str, ...] = (
+    "coca-cola",
+    "coca cola",
+    "mcdoanld",  # typo del blog (sic)
+    "mcdonald",
+    "play-offs",
+    "play offs",
+    "playoffs",
+    "free digital",
+    "extra sticker",
+    "album",
+    "stadium",
+    "starter pack",
+    "crumple",
+    "gold flood",
+    "limited edition",
+    "hologram",
+    "xxl",
+    # Cualquier país entre guiones suele ser hoja grupal o variante de país.
+    " - germany - ",
+    " - france - ",
+    " - brazil - ",
+    " - usa - ",
+    " - mexico - ",
+    " - spain - ",
 )
 
 
@@ -94,13 +140,20 @@ COLLECTIONS: dict[str, CollectionConfig] = {
     ),
     "stickers": CollectionConfig(
         name="stickers",
-        collection_id=2,
+        collection_id=3,
         seed_url=STICKERS_SEED_URL,
         title_keyword="FIFA World Cup 2026",
-        # ej: "FIFA World Cup 2026 - Brazil-001.jpg" / "...-001a.jpg"
-        # TODO: refinar tras probar empíricamente con la URL semilla.
+        # Patrón estricto para PASO 1: solo individuales con número.
+        # Exige " -NNNa.jpg" (espacio-guión-3dígitos-1a3letras), después de
+        # "FIFA World Cup 2026". Esto rechaza:
+        # - "...Coca-Cola -001a.jpg" (hay tokens entre "2026" y "-001")
+        # - "...USA1bbb.jpg" (sin guión inmediato + número)
+        # - "...- Brazil2cc.jpg" (país en lugar de número)
+        # Hojas grupales por país y variantes patrocinadas se manejan en
+        # PASO 2 (futuro). Adicionalmente FILENAME_BLACKLIST_TOKENS aporta
+        # una segunda capa de filtrado.
         filename_pattern=re.compile(
-            r"FIFA World Cup 2026[^/]*?-(\d{1,3})[a-z]*\.jpe?g$",
+            r"FIFA World Cup 2026 -(\d{1,3})[a-z]{1,3}\.jpe?g$",
             re.IGNORECASE,
         ),
         expected_total=980,
@@ -259,10 +312,15 @@ class PaniniScraper:
         - Solo busca dentro del `div.post-body` cuando existe (evita el
           sidebar "Popular Posts" del blog que tiene thumbnails que
           también matchean por accidente).
-        - Itera `<a href="…blogger.googleusercontent.com…">` cuya URL,
-          tras URL-decode, matchee `filename_pattern`.
+        - Itera `<a href="…blogger.googleusercontent.com…">`. Aplica dos
+          filtros antes de aceptar:
+            1. `FILENAME_BLACKLIST_TOKENS` — descarta variantes
+               (Coca-Cola, McDonald's, Album, etc.) y hojas grupales
+               por país aunque el nombre matchee la regex.
+            2. `filename_pattern` — extrae el card_number.
         - Upgrade de resolución reemplazando `/sNNN/` por `/s1600/`.
-        - Deduplica por `card_number` (la primera aparición gana).
+        - Deduplica por `card_number` dentro de la página (la primera
+          aparición gana).
         """
         scope: BeautifulSoup | Tag = soup
         post_body = soup.find("div", class_="post-body")
@@ -280,6 +338,9 @@ class PaniniScraper:
             if "blogger.googleusercontent.com" not in href:
                 continue
             decoded = unquote(href)
+            decoded_lower = decoded.lower()
+            if any(token in decoded_lower for token in FILENAME_BLACKLIST_TOKENS):
+                continue
             match = self._config.filename_pattern.search(decoded)
             if not match:
                 continue
@@ -342,6 +403,13 @@ class PaniniScraper:
         """Descarga `card`. Retorna `'downloaded'` | `'skipped'` | `'failed'`."""
         dest = self._output_dir / format_card_filename(card.card_number, "jpg")
 
+        # Dedupe cross-página: si ya bajamos la card en una visita anterior
+        # del mismo run, evitar el HTTP request (la misma sticker aparece
+        # en checklist + página país + páginas individuales).
+        if card.card_number in self._downloaded_numbers and not self._force:
+            self._info("Card %04d → ya descargada en este run, skip", card.card_number)
+            return "skipped"
+
         if dest.exists() and not self._force:
             self._info("Card %04d → ya existe, skip", card.card_number)
             return "skipped"
@@ -384,6 +452,29 @@ class PaniniScraper:
         message = fmt % args if args else fmt
         logger.info("[scraper] %s", message)
         self._log(f"[scraper] {message}")
+
+
+def _compress_ranges(numbers: list[int]) -> str:
+    """Comprime una lista de enteros consecutivos en rangos legibles.
+
+    Ejemplos:
+        _compress_ranges([])                  → ""
+        _compress_ranges([1])                 → "001"
+        _compress_ranges([1, 2, 3])           → "001-003"
+        _compress_ranges([1, 2, 3, 5, 7, 8])  → "001-003, 005, 007-008"
+    """
+    if not numbers:
+        return ""
+    ranges: list[str] = []
+    start = end = numbers[0]
+    for n in numbers[1:]:
+        if n == end + 1:
+            end = n
+        else:
+            ranges.append(f"{start:03d}" if start == end else f"{start:03d}-{end:03d}")
+            start = end = n
+    ranges.append(f"{start:03d}" if start == end else f"{start:03d}-{end:03d}")
+    return ", ".join(ranges)
 
 
 # ----------------------------------------------------------------------
@@ -445,9 +536,13 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Cards omitidas:     {result.skipped}")
     print(f"Fallos:             {result.failed}")
     if result.missing_numbers:
-        preview = result.missing_numbers[:20]
-        tail = "..." if len(result.missing_numbers) > 20 else ""
-        print(f"Cards faltantes ({len(result.missing_numbers)}): {preview}{tail}")
+        total_missing = len(result.missing_numbers)
+        print(f"Cards faltantes:    {total_missing} de {config.expected_total}")
+        # Comprimir en rangos y mostrar primeros 30 grupos para no saturar.
+        compressed = _compress_ranges(result.missing_numbers).split(", ")
+        preview = ", ".join(compressed[:30])
+        suffix = f" (+{len(compressed) - 30} rangos más)" if len(compressed) > 30 else ""
+        print(f"Rangos: {preview}{suffix}")
     return 0 if result.failed == 0 else 1
 
 

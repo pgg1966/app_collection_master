@@ -24,6 +24,7 @@ from collections_app.admin.tools.panini_scraper import (
     CardImage,
     PaniniScraper,
     ScrapeResult,
+    _compress_ranges,
     main,
 )
 
@@ -520,3 +521,216 @@ def test_collections_config_complete(name):
     assert cfg.title_keyword
     assert cfg.expected_total > 0
     assert cfg.filename_pattern.pattern  # regex no vacía
+
+
+# ----------------------------------------------------------------------
+# Stickers — regex y blacklist (PASO 1)
+# ----------------------------------------------------------------------
+
+
+STICKERS = COLLECTIONS["stickers"]
+
+
+def test_collections_stickers_config_is_id_3():
+    """La colección stickers debe usar collection_id=3 y el seed correcto."""
+    assert STICKERS.collection_id == 3
+    assert STICKERS.expected_total == 980
+    assert STICKERS.seed_url.startswith("https://cartophilic-info-exch.blogspot.com")
+    # Seed actualizado al post de Checklist (mexusacan)
+    assert "mexusacan" in STICKERS.seed_url
+
+
+def test_stickers_pattern_matches_basic_filename():
+    """El regex matchea filenames de stickers individuales."""
+    pat = STICKERS.filename_pattern
+    cases = {
+        "2026 Panini - FIFA World Cup 2026 -001aa.jpg": 1,
+        "2026 Panini - FIFA World Cup 2026 -042b.jpg": 42,
+        "2026 Panini - FIFA World Cup 2026 -301a.jpg": 301,
+        "2026 Panini - FIFA World Cup 2026 -980abc.jpg": 980,
+    }
+    for filename, expected in cases.items():
+        m = pat.search(filename)
+        assert m is not None, f"Esperaba match para {filename!r}"
+        assert int(m.group(1)) == expected
+
+
+def test_stickers_pattern_rejects_country_filenames():
+    """El regex NO matchea filenames con código de país en lugar de número."""
+    pat = STICKERS.filename_pattern
+    rejected = (
+        "2026 Panini - FIFA World Cup 2026 -USA1bbb.jpg",
+        "2026 Panini - FIFA World Cup 2026 - Brazil2cc.jpg",
+        "2026 Panini - FIFA World Cup - Brazil2cc.jpg",  # falta "2026"
+    )
+    for filename in rejected:
+        assert pat.search(filename) is None, f"NO debería matchear {filename!r}"
+
+
+def test_stickers_pattern_rejects_variants():
+    """El regex NO matchea variantes patrocinadas / Play-Offs / Free Digital."""
+    pat = STICKERS.filename_pattern
+    rejected = (
+        # Hay tokens entre "2026" y "-001a" (Coca-Cola, Play-Offs, etc.)
+        "2026 Panini - FIFA World Cup 2026 - Coca-Cola -001a.jpg",
+        "2026 Panini - FIFA World Cup 2026 - Play-Offs - 001a.jpg",
+        "2026 Panini - FIFA World Cup 2026 - Free Digital Pack -001aa.jpg",
+        "2026 Panini - FIFA World Cup 2026 - McDoanlds - Mexico2.jpg",
+    )
+    for filename in rejected:
+        assert pat.search(filename) is None, f"NO debería matchear {filename!r}"
+
+
+def _stickers_scraper(tmp_path: Path) -> PaniniScraper:
+    return PaniniScraper(config=STICKERS, output_dir=tmp_path)
+
+
+def _stickers_post(inner_html: str, title: str = "FIFA World Cup 2026 (07)") -> str:
+    return f"""
+    <html><head><title>{title}</title></head><body>
+      <div class="post-body">{inner_html}</div>
+      <a class="blog-pager-older-link" href="/2026/03/older.html">Older</a>
+      <a class="blog-pager-newer-link" href="/2026/03/newer.html">Newer</a>
+    </body></html>
+    """
+
+
+def test_blacklist_filters_country_grupal_sheets(tmp_path):
+    """URL con ' - germany - ' es hoja grupal — descartar aunque tenga regex válido."""
+    inner = """
+    <a href="https://blogger.googleusercontent.com/img/x/s620/2026 Panini - FIFA World Cup 2026 - Germany - Album1a.jpg">x</a>
+    <a href="https://blogger.googleusercontent.com/img/x/s620/2026 Panini - FIFA World Cup 2026 -005aa.jpg">ok</a>
+    """  # noqa: E501
+    soup = BeautifulSoup(_stickers_post(inner), "html.parser")
+    cards = _stickers_scraper(tmp_path)._extract_card_images(soup, "src")
+    numbers = [c.card_number for c in cards]
+    assert numbers == [5]  # solo el individual válido
+
+
+def test_blacklist_filters_coca_cola(tmp_path):
+    """URL con 'coca-cola' se descarta vía FILENAME_BLACKLIST_TOKENS."""
+    inner = """
+    <a href="https://blogger.googleusercontent.com/img/x/s620/2026 Panini FIFA WC 2026 Coca-Cola -001a.jpg">x</a>
+    <a href="https://blogger.googleusercontent.com/img/x/s620/2026 Panini - FIFA World Cup 2026 -042a.jpg">ok</a>
+    """  # noqa: E501
+    soup = BeautifulSoup(_stickers_post(inner), "html.parser")
+    cards = _stickers_scraper(tmp_path)._extract_card_images(soup, "src")
+    assert [c.card_number for c in cards] == [42]
+
+
+def test_seed_page_not_relevant_but_provides_links(tmp_path, monkeypatch):
+    """Página seed (Checklist) no se scrapea para cards pero sí para links."""
+    monkeypatch.setattr(panini_scraper.time, "sleep", lambda _s: None)
+
+    title = "Panini FIFA World Cup 2026 - Checklist"
+    inner = (
+        '<a href="https://blogger.googleusercontent.com/img/x/s620/'
+        "2026 Panini - FIFA World Cup 2026 -010aa.jpg"
+        '">x</a>'
+    )
+    html = _stickers_post(inner, title=title)
+    scraper = _stickers_scraper(tmp_path)
+    soup = BeautifulSoup(html, "html.parser")
+
+    # 1) La página NO se considera relevante (matchea blacklist 'checklist')
+    assert scraper._is_relevant_page(soup, "u") is False
+
+    # 2) Pero `_find_next_pages` SÍ devuelve links (Older/Newer Post)
+    links = scraper._find_next_pages(soup, "https://cartophilic-info-exch.blogspot.com/cur")
+    assert any(link.endswith("/2026/03/older.html") for link in links)
+    assert any(link.endswith("/2026/03/newer.html") for link in links)
+
+    # 3) El loop de run() también: visitamos la seed y NO bajamos cards
+    #    (las descarta por título), pero el link aporta páginas a la queue.
+    with (
+        patch.object(scraper, "_fetch_html", return_value=html),
+        patch.object(scraper, "_download_card") as mock_dl,
+    ):
+        # Restringimos a 1 página para acotar el test (la primera es la seed)
+        scraper._max_pages = 1
+        result = scraper.run()
+    mock_dl.assert_not_called()
+    assert result.pages_visited == 1
+
+
+def test_run_skips_already_downloaded_numbers(tmp_path, monkeypatch):
+    """Misma card en 3 páginas: solo la primera baja, las demás 'skipped'."""
+    monkeypatch.setattr(panini_scraper.time, "sleep", lambda _s: None)
+
+    page_idx = {"n": 0}
+    base = "https://cartophilic-info-exch.blogspot.com"
+
+    def fake_fetch(_url: str) -> str:
+        page_idx["n"] += 1
+        # Cada página linkea a la siguiente y contiene la misma card 042
+        next_n = page_idx["n"] + 1
+        inner = (
+            '<a href="https://blogger.googleusercontent.com/img/x/s620/'
+            "2026 Panini - FIFA World Cup 2026 -042aa.jpg"
+            '">x</a>'
+        )
+        return (
+            _stickers_post(inner)
+            .replace("/2026/03/older.html", f"{base}/p{next_n}.html")
+            .replace("/2026/03/newer.html", f"{base}/p{next_n}.html")
+        )
+
+    scraper = PaniniScraper(config=STICKERS, output_dir=tmp_path, max_pages=3)
+    download_calls: list[int] = []
+
+    def fake_download(card: CardImage) -> str:
+        download_calls.append(card.card_number)
+        # La primera retorna 'downloaded'; las siguientes el dedupe del run
+        # (en _download_card real) las marca skipped sin entrar acá.
+        # Pero como acá mockeamos _download_card completamente, contamos
+        # cuántas veces lo llama el loop principal.
+        return "downloaded"
+
+    with (
+        patch.object(scraper, "_fetch_html", side_effect=fake_fetch),
+        patch.object(scraper, "_download_card", side_effect=fake_download),
+    ):
+        result = scraper.run()
+
+    # _download_card se invoca para cada aparición de la card en cada página.
+    # El dedupe real vive DENTRO de _download_card (chequea
+    # _downloaded_numbers); ese path se ejercita en su propio test abajo.
+    assert len(download_calls) == 3
+    # Pero result.downloaded sigue siendo 3 sólo porque mockeamos el outcome.
+    assert result.downloaded == 3
+
+
+def test_download_card_skips_when_already_in_downloaded_numbers(tmp_path, monkeypatch):
+    """`_download_card` detecta dedupe vía `_downloaded_numbers` antes del HTTP."""
+    monkeypatch.setattr(panini_scraper.time, "sleep", lambda _s: None)
+    scraper = _stickers_scraper(tmp_path)
+    scraper._downloaded_numbers.add(42)
+
+    card = CardImage(
+        card_number=42,
+        url="https://example.com/should-not-be-called.jpg",
+        original_url="...",
+        source_page="src",
+    )
+    with responses.RequestsMock():  # cero requests permitidos
+        outcome = scraper._download_card(card)
+    assert outcome == "skipped"
+
+
+# ----------------------------------------------------------------------
+# _compress_ranges
+# ----------------------------------------------------------------------
+
+
+def test_compress_ranges_basic():
+    assert _compress_ranges([]) == ""
+    assert _compress_ranges([1]) == "001"
+    assert _compress_ranges([1, 2, 3]) == "001-003"
+    assert _compress_ranges([1, 2, 3, 5, 7, 8, 9]) == "001-003, 005, 007-009"
+    assert _compress_ranges([42, 100, 101, 102, 200]) == "042, 100-102, 200"
+
+
+def test_compress_ranges_padding_at_three_digits():
+    """El formato siempre usa 3 dígitos, incluso para números pequeños."""
+    assert _compress_ranges([7]) == "007"
+    assert _compress_ranges([7, 8, 9]) == "007-009"
