@@ -5,14 +5,17 @@ import shutil
 import sqlite3
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt, QThread, Signal
+from PySide6.QtCore import QSize, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QIcon, QPixmap, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
+    QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QProgressDialog,
     QPushButton,
@@ -27,6 +30,8 @@ from collections_app.admin.crests import (
     is_valid_crest_file,
 )
 from collections_app.admin.crests.crest_finder import (
+    SETTING_GOOGLE_API_KEY,
+    SETTING_GOOGLE_CSE_ID,
     SOURCE_GOOGLE,
     SOURCE_PLACEHOLDER,
     CrestResult,
@@ -37,6 +42,7 @@ from collections_app.core.repositories import (
     CodesLinesRepository,
     CollectionsRepository,
 )
+from collections_app.core.repositories.settings_repo import SettingsRepository
 from collections_app.core.utils.paths import get_crest_path
 from collections_app.shared_ui.theme import Spacing
 
@@ -76,9 +82,21 @@ class _CrestSearchWorker(QThread):
         self._db_path = db_path
 
     def run(self) -> None:
+        logger.debug("_CrestSearchWorker: abriendo DB en %s", self._db_path)
         try:
             conn = create_connection(self._db_path)
             try:
+                # Diagnóstico: verificar si la conn del worker ve las keys.
+                # Útil cuando "configuré las keys" pero el worker no las
+                # encuentra (DB diferente, transacción no commiteada, etc.).
+                repo = SettingsRepository(conn)
+                logger.debug(
+                    "_CrestSearchWorker: %s presente=%s, %s presente=%s",
+                    SETTING_GOOGLE_API_KEY,
+                    repo.get(SETTING_GOOGLE_API_KEY) is not None,
+                    SETTING_GOOGLE_CSE_ID,
+                    repo.get(SETTING_GOOGLE_CSE_ID) is not None,
+                )
                 results = self._finder.find_all_crests(self._codes, conn, on_progress=self._emit)
             finally:
                 conn.close()
@@ -125,6 +143,10 @@ class CrestsView(QWidget):
         title = QLabel(self.tr("Gestión de Escudos"))
         title.setStyleSheet("font-weight: bold; font-size: 14pt;")
         layout.addWidget(title)
+
+        # Configuración de Google Custom Search (inline en este tab para que
+        # el usuario no tenga que ir a otra pantalla a configurar las keys).
+        layout.addWidget(self._build_google_section())
 
         # Combo de colecciones
         combo_row = QHBoxLayout()
@@ -180,6 +202,57 @@ class CrestsView(QWidget):
         preview_row.addWidget(self._preview_label)
         preview_row.addStretch()
         layout.addLayout(preview_row)
+
+    def _build_google_section(self) -> QGroupBox:
+        """GroupBox con campos para configurar las API keys de Google CSE.
+
+        Los campos se cargan desde `app_settings` al abrir la vista. El
+        botón "Guardar" persiste vía la conexión del main thread (NO el
+        worker — es una escritura rápida y `sqlite3.Connection` no se
+        comparte entre threads). Un label efímero confirma el guardado.
+        """
+        box = QGroupBox(self.tr("Google Custom Search (para buscar escudos)"))
+        form = QFormLayout(box)
+
+        repo = SettingsRepository(self.conn)
+        self._api_key_input = QLineEdit(repo.get(SETTING_GOOGLE_API_KEY) or "")
+        self._api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self._cse_id_input = QLineEdit(repo.get(SETTING_GOOGLE_CSE_ID) or "")
+        self._cse_id_input.setEchoMode(QLineEdit.EchoMode.Password)
+
+        form.addRow(self.tr("API Key:"), self._api_key_input)
+        form.addRow(self.tr("Search ID:"), self._cse_id_input)
+
+        action_row = QHBoxLayout()
+        save_button = QPushButton(self.tr("Guardar"))
+        save_button.clicked.connect(self._save_google_keys)
+        self._google_status_label = QLabel("")
+        self._google_status_label.setStyleSheet("color: #2e7d32;")  # verde éxito
+        action_row.addWidget(save_button)
+        action_row.addWidget(self._google_status_label)
+        action_row.addStretch()
+        form.addRow("", action_row)
+
+        return box
+
+    def _save_google_keys(self) -> None:
+        """Persiste las keys en `app_settings` y muestra confirmación efímera."""
+        api_key = self._api_key_input.text().strip()
+        cse_id = self._cse_id_input.text().strip()
+        repo = SettingsRepository(self.conn)
+        if api_key:
+            repo.set(SETTING_GOOGLE_API_KEY, api_key)
+        else:
+            repo.delete(SETTING_GOOGLE_API_KEY)
+        if cse_id:
+            repo.set(SETTING_GOOGLE_CSE_ID, cse_id)
+        else:
+            repo.delete(SETTING_GOOGLE_CSE_ID)
+        self.conn.commit()
+        logger.info("Google CSE keys actualizadas en app_settings")
+
+        self._google_status_label.setText(self.tr("✓ Keys guardadas"))
+        QTimer.singleShot(3000, lambda: self._google_status_label.setText(""))
 
     def _populate_collections_combo(self) -> None:
         self._collection_combo.blockSignals(True)

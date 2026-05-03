@@ -13,15 +13,22 @@ from pathlib import Path
 
 from PIL import Image
 
+from collections_app.admin.crests.crest_finder import (
+    SETTING_GOOGLE_API_KEY,
+    SETTING_GOOGLE_CSE_ID,
+    CrestFinder,
+)
 from collections_app.admin.views import crests_view as view_mod
 from collections_app.admin.views.crests_view import (
     STATUS_NONE,
     STATUS_ONLINE,
     STATUS_PLACEHOLDER,
     CrestsView,
+    _CrestSearchWorker,
 )
 from collections_app.core.models import CodeLine
 from collections_app.core.repositories import CodesLinesRepository
+from collections_app.core.repositories.settings_repo import SettingsRepository
 
 # `db_path` dummy para inicializar CrestsView en tests: el worker real
 # nunca arranca (los tests del worker mockean _CrestSearchWorker), así
@@ -246,3 +253,81 @@ def test_refresh_grid_cleans_invalid_files(
 
     assert not invalid.exists(), "El archivo inválido debió ser eliminado"
     assert valid.exists(), "El archivo válido NO debe tocarse"
+
+
+# ----------------------------------------------------------------------
+# FIX 3 — UI inline para guardar las API keys de Google CSE
+# ----------------------------------------------------------------------
+
+
+def test_save_google_keys_persists_to_settings(qtbot, memory_db):
+    """Click en Guardar persiste api_key/cse_id en `app_settings`."""
+    view = CrestsView(memory_db, _DUMMY_DB_PATH)
+    qtbot.addWidget(view)
+
+    view._api_key_input.setText("MY-API-KEY")
+    view._cse_id_input.setText("MY-CSE-ID")
+    view._save_google_keys()
+
+    repo = SettingsRepository(memory_db)
+    assert repo.get(SETTING_GOOGLE_API_KEY) == "MY-API-KEY"
+    assert repo.get(SETTING_GOOGLE_CSE_ID) == "MY-CSE-ID"
+    # El label de confirmación se muestra (se limpia 3s después vía QTimer)
+    assert "guardadas" in view._google_status_label.text().lower()
+
+
+def test_save_google_keys_empty_input_deletes(qtbot, memory_db):
+    """Borrar el contenido del input y guardar elimina la entry de settings."""
+    SettingsRepository(memory_db).set(SETTING_GOOGLE_API_KEY, "OLD-KEY")
+    SettingsRepository(memory_db).set(SETTING_GOOGLE_CSE_ID, "OLD-CSE")
+    memory_db.commit()
+
+    view = CrestsView(memory_db, _DUMMY_DB_PATH)
+    qtbot.addWidget(view)
+
+    view._api_key_input.setText("")
+    view._cse_id_input.setText("")
+    view._save_google_keys()
+
+    repo = SettingsRepository(memory_db)
+    assert repo.get(SETTING_GOOGLE_API_KEY) is None
+    assert repo.get(SETTING_GOOGLE_CSE_ID) is None
+
+
+def test_google_keys_inputs_use_password_echo_mode(qtbot, memory_db):
+    """Los inputs de keys deben enmascararse (echoMode = Password)."""
+    from PySide6.QtWidgets import QLineEdit
+
+    view = CrestsView(memory_db, _DUMMY_DB_PATH)
+    qtbot.addWidget(view)
+    assert view._api_key_input.echoMode() == QLineEdit.EchoMode.Password
+    assert view._cse_id_input.echoMode() == QLineEdit.EchoMode.Password
+
+
+def test_google_keys_loaded_from_settings_on_init(qtbot, memory_db):
+    """Al construir la vista, los inputs se prellenan con los valores de settings."""
+    SettingsRepository(memory_db).set(SETTING_GOOGLE_API_KEY, "LOADED-KEY")
+    SettingsRepository(memory_db).set(SETTING_GOOGLE_CSE_ID, "LOADED-CSE")
+    memory_db.commit()
+
+    view = CrestsView(memory_db, _DUMMY_DB_PATH)
+    qtbot.addWidget(view)
+    assert view._api_key_input.text() == "LOADED-KEY"
+    assert view._cse_id_input.text() == "LOADED-CSE"
+
+
+# ----------------------------------------------------------------------
+# FIX 2 — Worker logea db_path al iniciar run()
+# ----------------------------------------------------------------------
+
+
+def test_worker_logs_db_path(file_db_path, caplog):
+    """`_CrestSearchWorker.run()` debe logear el db_path que abre."""
+    worker = _CrestSearchWorker(CrestFinder(), [], file_db_path)
+    with caplog.at_level("DEBUG", logger="collections_app.admin.views.crests_view"):
+        worker.run()  # llamado directo (no via start) — corre en este thread
+
+    msgs = [r.message for r in caplog.records]
+    assert any(
+        str(file_db_path) in m for m in msgs
+    ), f"Esperaba ver el db_path en los logs, vi: {msgs}"

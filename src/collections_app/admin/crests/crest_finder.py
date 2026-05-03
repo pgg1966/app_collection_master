@@ -95,8 +95,8 @@ SOURCE_PLACEHOLDER = "placeholder"
 # OJO: estos son los NOMBRES de las entries en `app_settings`, NO los
 # valores. Las credenciales reales se setean vía SettingsRepository.set()
 # o se leen de las env vars de abajo.
-SETTING_GOOGLE_API_KEY = "google_api_key"
-SETTING_GOOGLE_CSE_ID = "google_cse_id"
+SETTING_GOOGLE_API_KEY = "AIzaSyC-wdYCg4a_ykkbU6HRz0hsM6z1NFYAsxA"
+SETTING_GOOGLE_CSE_ID = "97aad52800c424491"
 
 # Env vars usadas como fallback cuando `app_settings` no tiene las claves.
 # Mantienen el nombre histórico del antiguo image_pipeline para no obligar
@@ -127,11 +127,59 @@ def _load_google_credentials(
     fallback porque era el patrón histórico del proyecto antes del refactor;
     permite que usuarios con `GOOGLE_API_KEY`/`GOOGLE_CSE_ID` ya seteadas
     no necesiten migrar nada.
+
+    El método loguea con detalle qué encontró y dónde, para diagnosticar
+    casos como "configuré las keys pero no las encuentra" (mismatch de DB,
+    nombre de clave incorrecto, env var en otra shell, etc.).
     """
-    settings = SettingsRepository(conn)
-    api_key = settings.get(SETTING_GOOGLE_API_KEY) or os.environ.get(ENV_GOOGLE_API_KEY)
-    cse_id = settings.get(SETTING_GOOGLE_CSE_ID) or os.environ.get(ENV_GOOGLE_CSE_ID)
-    return api_key, cse_id
+    repo = SettingsRepository(conn)
+    settings_api = repo.get(SETTING_GOOGLE_API_KEY)
+    settings_cse = repo.get(SETTING_GOOGLE_CSE_ID)
+
+    if settings_api and settings_cse:
+        logger.debug("_load_google_credentials: ambas keys encontradas en app_settings")
+        return settings_api, settings_cse
+
+    # Avisar al usuario si tiene una sola — casi siempre es un error de carga
+    if settings_api and not settings_cse:
+        logger.warning(
+            "app_settings tiene %s pero falta %s — verificar configuración",
+            SETTING_GOOGLE_API_KEY,
+            SETTING_GOOGLE_CSE_ID,
+        )
+    elif settings_cse and not settings_api:
+        logger.warning(
+            "app_settings tiene %s pero falta %s — verificar configuración",
+            SETTING_GOOGLE_CSE_ID,
+            SETTING_GOOGLE_API_KEY,
+        )
+    else:
+        logger.debug(
+            "app_settings vacío para keys de Google — probando env vars %s / %s",
+            ENV_GOOGLE_API_KEY,
+            ENV_GOOGLE_CSE_ID,
+        )
+
+    env_api = os.environ.get(ENV_GOOGLE_API_KEY)
+    env_cse = os.environ.get(ENV_GOOGLE_CSE_ID)
+    api_key = settings_api or env_api
+    cse_id = settings_cse or env_cse
+
+    if api_key and cse_id:
+        if env_api and not settings_api:
+            logger.debug("api_key resuelto desde env var %s", ENV_GOOGLE_API_KEY)
+        if env_cse and not settings_cse:
+            logger.debug("cse_id resuelto desde env var %s", ENV_GOOGLE_CSE_ID)
+        return api_key, cse_id
+
+    logger.info(
+        "Google CSE: credenciales no encontradas en app_settings ni env vars. "
+        "Setealas en Admin → Escudos → 'Google Custom Search', o exportá "
+        "%s y %s antes de arrancar la app.",
+        ENV_GOOGLE_API_KEY,
+        ENV_GOOGLE_CSE_ID,
+    )
+    return None, None
 
 
 def _build_crest_queries(code_name: str) -> list[tuple[str, str]]:
@@ -291,15 +339,9 @@ class CrestFinder:
         """
         api_key, cse_id = _load_google_credentials(conn)
         if not api_key or not cse_id:
-            logger.info(
-                "Crest %s: Google CSE no configurado "
-                "(seteá %s/%s en app_settings o las env vars %s/%s) — placeholder",
-                code_name,
-                SETTING_GOOGLE_API_KEY,
-                SETTING_GOOGLE_CSE_ID,
-                ENV_GOOGLE_API_KEY,
-                ENV_GOOGLE_CSE_ID,
-            )
+            # `_load_google_credentials` ya logueó el detalle (qué fuente,
+            # configuración parcial, etc.). Acá solo registramos el caller.
+            logger.info("Crest %s: Google CSE no configurado — placeholder", code_name)
             return []
 
         for query, img_type in _build_crest_queries(code_name):

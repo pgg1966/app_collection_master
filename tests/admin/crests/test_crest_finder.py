@@ -374,6 +374,41 @@ def test_load_credentials_returns_none_when_neither_present(monkeypatch, memory_
     assert cse_id is None
 
 
+def test_load_credentials_logs_partial_config_warning(monkeypatch, memory_db, caplog):
+    """Si solo está api_key (sin cse_id) en settings, debe logear WARNING."""
+    SettingsRepository(memory_db).set(SETTING_GOOGLE_API_KEY, "only-api-key")
+    memory_db.commit()
+    monkeypatch.delenv(ENV_GOOGLE_API_KEY, raising=False)
+    monkeypatch.delenv(ENV_GOOGLE_CSE_ID, raising=False)
+
+    with caplog.at_level("WARNING", logger="collections_app.admin.crests.crest_finder"):
+        api_key, cse_id = _load_google_credentials(memory_db)
+
+    assert api_key is None  # incompleto → no usable
+    assert cse_id is None
+    # Debe haber un WARNING que mencione el campo presente y el faltante
+    msgs = [r.message for r in caplog.records if r.levelname == "WARNING"]
+    assert any(
+        SETTING_GOOGLE_API_KEY in m and SETTING_GOOGLE_CSE_ID in m for m in msgs
+    ), f"Esperaba WARNING mencionando ambos campos, vi: {msgs}"
+
+
+def test_load_credentials_logs_partial_config_warning_inverted(monkeypatch, memory_db, caplog):
+    """Caso inverso: solo cse_id presente en settings."""
+    SettingsRepository(memory_db).set(SETTING_GOOGLE_CSE_ID, "only-cse-id")
+    memory_db.commit()
+    monkeypatch.delenv(ENV_GOOGLE_API_KEY, raising=False)
+    monkeypatch.delenv(ENV_GOOGLE_CSE_ID, raising=False)
+
+    with caplog.at_level("WARNING", logger="collections_app.admin.crests.crest_finder"):
+        _load_google_credentials(memory_db)
+
+    msgs = [r.message for r in caplog.records if r.levelname == "WARNING"]
+    assert any(
+        SETTING_GOOGLE_CSE_ID in m and SETTING_GOOGLE_API_KEY in m for m in msgs
+    ), f"Esperaba WARNING mencionando ambos campos, vi: {msgs}"
+
+
 def test_search_google_crest_uses_env_var_fallback(tmp_path, monkeypatch, memory_db):
     """`_search_google_crest` funciona end-to-end leyendo solo de env vars."""
     _redirect_crest_paths(monkeypatch, tmp_path)
