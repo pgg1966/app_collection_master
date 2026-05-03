@@ -1,4 +1,4 @@
-"""Búsqueda y descarga de escudos por code_id desde Google Custom Search.
+"""Búsqueda y descarga de escudos por code_id desde Wikimedia Commons.
 
 Cada `code_id` (ej. "ARG", "BRA") tiene UN escudo en
 `get_crest_path(code_id)`. La cascada de descarga es:
@@ -8,24 +8,24 @@ Cada `code_id` (ej. "ARG", "BRA") tiene UN escudo en
 2. Si el code_id está en `SPECIAL_CODES` (sets temáticos sin equipo
    nacional asociado, p.ej. Golden Ballers), se genera placeholder
    directamente — el usuario debe importar la imagen manualmente.
-3. Google Custom Search API (`searchType=image`, `imgType=clipart`) con
-   queries en orden de especificidad decreciente. Wikipedia/Commons
-   resultaron poco confiables (devolvían fotos de partidos o nada);
-   Google CSE filtrando por `clipart` apunta directo a logos/escudos.
-4. Si todo falla, se genera un placeholder con las iniciales del
-   code_id sobre un círculo gris.
+3. Override manual (`COMMONS_FILE_OVERRIDES`) — si el code_name está
+   en el dict, se usa ese `File:` exacto en vez de buscar.
+4. Búsqueda en Wikimedia Commons API con cascada de queries (logo,
+   crest, badge, federación) y filtros heurísticos para descartar
+   fotos de partidos / jugadores.
+5. Si todo falla, retorna `SOURCE_NOT_FOUND` SIN escribir archivo —
+   permite reintento automático en la próxima ejecución.
 
-Las API keys se leen con cascada: primero `app_settings` (claves
-`google_api_key` / `google_cse_id`), luego env vars `GOOGLE_API_KEY`
-/ `GOOGLE_CSE_ID` como fallback. Si no están en ninguna de las dos
-fuentes, la cascada salta a placeholder con un log explícito (no es
-un error).
+¿Por qué Commons y no Google CSE? Google Custom Search JSON API fue
+cerrada a clientes nuevos en 2025: proyectos de GCP creados después
+de esa fecha reciben HTTP 403 PERMISSION_DENIED aunque la API esté
+"habilitada" en consola, sin workaround. Commons es gratis, sin API
+key, sin cuota práctica, y además es la fuente original de los SVG
+de escudos (Google los servía referenciando a Commons).
 """
 
 import io
 import logging
-import os
-import sqlite3
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -34,22 +34,26 @@ from pathlib import Path
 import requests
 from PIL import Image, ImageDraw
 
-from collections_app.core.repositories.settings_repo import SettingsRepository
 from collections_app.core.utils.paths import get_crest_path, get_crests_dir
 
 logger = logging.getLogger(__name__)
 
-GOOGLE_CSE_URL = "https://www.googleapis.com/customsearch/v1"
-DOWNLOAD_TIMEOUT = 15  # segundos para descargas y para llamados a Google CSE
-USER_AGENT = "CollectionsApp/1.0"
-RATE_LIMIT_DELAY = 1.0  # segundos entre requests reales (no entre cache hits)
+COMMONS_API_URL = "https://commons.wikimedia.org/w/api.php"
+# La API de Wikimedia REQUIERE un User-Agent descriptivo (políticas de uso);
+# sin él pueden devolver 403 silenciosamente.
+COMMONS_USER_AGENT = "CollectionsApp/1.0 (admin tool for FIFA WC 2026 album)"
+COMMONS_THUMB_SIZE = 300  # px — ancho del thumbnail rasterizado
+COMMONS_TIMEOUT = 15
+DOWNLOAD_TIMEOUT = 15
+RATE_LIMIT_DELAY = 1.0  # segundos entre find_crest cuando hay red
+QUERY_DELAY = 0.5  # segundos entre queries dentro del mismo find_crest
+COMMONS_SEARCH_LIMIT = 5  # resultados por query
 CREST_TARGET_SIZE = (200, 200)
 SVG_RENDER_SIZE = 200
-GOOGLE_RESULTS_PER_QUERY = 5
 
 # Tamaño mínimo (en bytes) que debe tener una respuesta HTTP para ser
-# considerada una imagen real. Las descargas válidas (PNG/JPEG/SVG) están
-# bien por encima de este umbral.
+# considerada una imagen real. Las descargas válidas (PNG/JPEG/SVG)
+# están bien por encima de este umbral.
 MIN_DOWNLOAD_BYTES = 500
 
 # Tamaño mínimo (en bytes) de un PNG ya guardado para ser considerado
@@ -57,8 +61,7 @@ MIN_DOWNLOAD_BYTES = 500
 MIN_VALID_FILE_BYTES = 1_000
 
 # "Magic bytes" de los formatos de imagen aceptados. Se chequean cuando
-# el Content-Type de la respuesta no es `image/*` (algunos CDNs sirven
-# las imágenes con `application/octet-stream` o tras un redirect).
+# el Content-Type de la respuesta no es `image/*`.
 IMAGE_MAGIC_BYTES: tuple[bytes, ...] = (
     b"\x89PNG",
     b"\xff\xd8",  # JPEG
@@ -87,26 +90,52 @@ SPECIAL_CODES = frozenset(
 
 # Sources para `CrestResult.source`.
 SOURCE_CACHE = "cache"
-SOURCE_GOOGLE = "google"
+SOURCE_COMMONS = "commons"
+SOURCE_COMMONS_OVERRIDE = "commons_override"
 SOURCE_MANUAL = "manual"
 SOURCE_PLACEHOLDER = "placeholder"
-# `not_found`: Google CSE no devolvió URLs (o ninguna fue descargable). NO
-# se escribe archivo en disco para que la próxima ejecución reintente
-# automáticamente. Solo aplica a códigos NO especiales.
+# `not_found`: la búsqueda no devolvió URLs descargables. NO se escribe
+# archivo en disco para que la próxima ejecución reintente automáticamente.
 SOURCE_NOT_FOUND = "not_found"
 
-# NOMBRES de claves (NO los valores). Estas constantes definen DÓNDE
-# buscar las credenciales — los valores reales se setean vía la UI de
-# CrestsView (que llama `SettingsRepository.set(SETTING_GOOGLE_API_KEY, "AIza...")`)
-# o por env vars del sistema.
-#
-# Si vas a pegar tu key real, NO toques este archivo: usá Admin → Escudos
-# → "Google Custom Search" → Guardar.
-SETTING_GOOGLE_API_KEY = "google_api_key"  # clave en la tabla app_settings
-SETTING_GOOGLE_CSE_ID = "google_cse_id"  # clave en la tabla app_settings
 
-ENV_GOOGLE_API_KEY = "GOOGLE_API_KEY"  # variable de entorno OS
-ENV_GOOGLE_CSE_ID = "GOOGLE_CSE_ID"  # variable de entorno OS
+# Override manual: code_name (UPPER) → File: title exacto en Commons.
+# Usar SOLO si la búsqueda automática falla repetidamente para ese país.
+# Empieza vacío y se puebla iterativamente cuando se detecten faltantes.
+COMMONS_FILE_OVERRIDES: dict[str, str] = {}
+
+
+# Heurísticas para filtrar resultados de búsqueda — los títulos de archivo
+# que matchean BLACKLIST_TERMS son fotos/escenas que no queremos. Los que
+# matchean WHITELIST_TERMS son escudos/logos.
+BLACKLIST_TERMS: tuple[str, ...] = (
+    "match",
+    "vs",
+    "player",
+    "stadium",
+    "fans",
+    "celebration",
+    "kit",
+    "jersey",
+    "shirt",
+    "uniform",
+    "manager",
+    "coach",
+    "training",
+    "fixtures",
+)
+WHITELIST_TERMS: tuple[str, ...] = (
+    "logo",
+    "crest",
+    "badge",
+    "emblem",
+    "shield",
+    "coat of arms",
+    "federation",
+    "association",
+    "fa ",
+    " fa",
+)
 
 
 @dataclass(frozen=True)
@@ -116,93 +145,13 @@ class CrestResult:
     code_id: str
     code_name: str
     local_path: Path
-    source: str  # "cache" | "google" | "manual" | "placeholder"
+    source: str  # "cache" | "commons" | "commons_override" | "manual" | "placeholder" | "not_found"
     success: bool
     error: str | None = None
 
 
-def _truncated(value: str | None, keep: int = 12) -> str:
-    """Helper para loguear un secret: muestra `repr('AIzaSyAbcd…')` o `'None'`."""
-    if not value:
-        return "None"
-    return repr(value[:keep] + "…")
-
-
-def _load_google_credentials(
-    conn: sqlite3.Connection,
-) -> tuple[str | None, str | None]:
-    """Lee las credenciales de Google CSE con cascada `app_settings` → env vars.
-
-    Retorna `(api_key, cse_id)`. Cualquiera puede ser `None` si no está
-    configurado en ninguna de las dos fuentes. Las env vars se usan como
-    fallback porque era el patrón histórico del proyecto antes del refactor;
-    permite que usuarios con `GOOGLE_API_KEY`/`GOOGLE_CSE_ID` ya seteadas
-    no necesiten migrar nada.
-
-    Loguea con prefijo `[credentials]` los valores truncados encontrados en
-    cada fuente — pensado para diagnosticar visualmente "configuré las keys
-    pero no las encuentra" (mismatch de DB, env var en otra shell, etc.).
-    """
-    repo = SettingsRepository(conn)
-    db_api_key = repo.get(SETTING_GOOGLE_API_KEY)
-    db_cse_id = repo.get(SETTING_GOOGLE_CSE_ID)
-    logger.info(
-        "[credentials] app_settings: api_key=%s cse_id=%s",
-        _truncated(db_api_key),
-        _truncated(db_cse_id),
-    )
-
-    env_api_key = os.environ.get(ENV_GOOGLE_API_KEY)
-    env_cse_id = os.environ.get(ENV_GOOGLE_CSE_ID)
-    logger.info(
-        "[credentials] env vars: %s=%s %s=%s",
-        ENV_GOOGLE_API_KEY,
-        _truncated(env_api_key),
-        ENV_GOOGLE_CSE_ID,
-        _truncated(env_cse_id),
-    )
-
-    api_key = db_api_key or env_api_key
-    cse_id = db_cse_id or env_cse_id
-
-    if api_key and cse_id:
-        # Indicar de qué fuente vino cada credencial (pueden venir de fuentes
-        # distintas, p.ej. api_key en settings y cse_id en env var).
-        api_src = "app_settings" if db_api_key else "env"
-        cse_src = "app_settings" if db_cse_id else "env"
-        logger.info("[credentials] usando api_key=%s cse_id=%s ✓", api_src, cse_src)
-        return api_key, cse_id
-
-    logger.warning(
-        "[credentials] NO encontradas. Setealas en Admin → Escudos → "
-        "'Google Custom Search' (claves '%s' y '%s' en app_settings), "
-        "o exportá las env vars %s y %s antes de arrancar la app.",
-        SETTING_GOOGLE_API_KEY,
-        SETTING_GOOGLE_CSE_ID,
-        ENV_GOOGLE_API_KEY,
-        ENV_GOOGLE_CSE_ID,
-    )
-    return None, None
-
-
-def _build_crest_queries(code_name: str) -> list[tuple[str, str]]:
-    """Genera queries Google CSE en orden de especificidad decreciente.
-
-    Cada tupla es `(query, img_type)` donde `img_type` es el valor del
-    parámetro `imgType` de Google CSE (`"clipart"` filtra por
-    logos/íconos, `""` deja la búsqueda sin restringir el tipo).
-    """
-    name = code_name.title()  # "ARGENTINA" → "Argentina"
-    return [
-        (f"{name} national football team badge logo", "clipart"),
-        (f"{name} football federation crest", "clipart"),
-        (f"{name} soccer federation logo", "clipart"),
-        (f"{name} national football team crest logo", ""),
-    ]
-
-
 class CrestFinder:
-    """Busca y descarga escudos de selecciones nacionales via Google CSE."""
+    """Busca y descarga escudos de selecciones nacionales via Wikimedia Commons."""
 
     def __init__(self) -> None:
         self.crests_dir = get_crests_dir()
@@ -211,22 +160,16 @@ class CrestFinder:
     # API pública
     # ------------------------------------------------------------------
 
-    def find_crest(
-        self,
-        code_id: str,
-        code_name: str,
-        conn: sqlite3.Connection,
-    ) -> CrestResult:
+    def find_crest(self, code_id: str, code_name: str) -> CrestResult:
         """Busca el escudo para un `code_id`.
 
         Cascada:
         1. Cache válido (`is_valid_crest_file`).
-        2. Si está en `SPECIAL_CODES` → placeholder con iniciales (sí escribe).
-        3. Google Custom Search (con keys leídas de `app_settings`/env vars).
-        4. `SOURCE_NOT_FOUND` — NO escribe nada en disco para permitir
+        2. Si está en `SPECIAL_CODES` → placeholder con iniciales.
+        3. Override manual (`COMMONS_FILE_OVERRIDES`) si existe.
+        4. Búsqueda en Commons con cascada de queries.
+        5. `SOURCE_NOT_FOUND` — NO escribe nada en disco para permitir
            reintento automático en la próxima ejecución.
-
-        `conn` se usa solo para leer las API keys de Google CSE.
         """
         logger.info("Buscando crest para %s (%s)…", code_id, code_name)
         dest = get_crest_path(code_id)
@@ -234,15 +177,10 @@ class CrestFinder:
         if is_valid_crest_file(dest):
             return CrestResult(code_id, code_name, dest, SOURCE_CACHE, True)
         if dest.exists():
-            # Existe pero es inválido (intento previo fallido). Lo borramos
-            # para que la cascada vuelva a intentar bajarlo limpiamente.
             dest.unlink(missing_ok=True)
             logger.debug("Borrado crest inválido en cache: %s", dest)
 
         if code_id in SPECIAL_CODES:
-            # SPECIAL_CODES sí generan placeholder en disco — son sets que
-            # el usuario debe importar manualmente, el placeholder funciona
-            # como recordatorio visual permanente.
             self._generate_placeholder_crest(code_id, dest)
             return CrestResult(
                 code_id,
@@ -253,44 +191,49 @@ class CrestFinder:
                 error="Set especial — importar imagen manualmente",
             )
 
-        urls = self._search_google_crest(code_name, conn)
-        if urls:
-            logger.info(
-                "Crest %s: Google CSE devolvió %d URLs — intentando descarga",
-                code_id,
-                len(urls),
-            )
-            for url in urls:
-                if self._download_and_process_crest(url, dest):
-                    logger.info("Crest %s encontrado via Google CSE", code_id)
-                    return CrestResult(code_id, code_name, dest, SOURCE_GOOGLE, True)
+        # Override manual: si está mapeado, no buscamos — vamos directo al File:
+        override = COMMONS_FILE_OVERRIDES.get(code_name.upper())
+        if override:
+            url = self._get_commons_thumb_url(override)
+            if url and self._download_and_process_crest(url, dest):
+                logger.info("Crest %s: override Commons %r", code_id, override)
+                return CrestResult(code_id, code_name, dest, SOURCE_COMMONS_OVERRIDE, True)
 
-        # Sin escudo. NO escribimos placeholder en disco: si lo hiciéramos,
-        # la próxima ejecución vería el archivo y consideraría cache válido,
-        # bloqueando reintentos automáticos para siempre.
-        logger.info(
-            "Crest %s: sin resultado — se reintentará en la próxima ejecución",
-            code_id,
-        )
+        # Búsqueda con cascada de queries (de más a menos específica).
+        for query in self._build_commons_queries(code_name):
+            titles = self._search_commons_files(query, limit=COMMONS_SEARCH_LIMIT)
+            for title in titles:
+                url = self._get_commons_thumb_url(title)
+                if url and self._download_and_process_crest(url, dest):
+                    logger.info(
+                        "Crest %s: encontrado vía Commons (query=%r, file=%r)",
+                        code_id,
+                        query,
+                        title,
+                    )
+                    return CrestResult(code_id, code_name, dest, SOURCE_COMMONS, True)
+            # Pequeño delay entre queries para no abusar de la API
+            time.sleep(QUERY_DELAY)
+
+        logger.info("Crest %s: sin resultado — se reintentará la próxima vez", code_id)
         return CrestResult(
             code_id,
             code_name,
             dest,
             SOURCE_NOT_FOUND,
             False,
-            error="No se encontró escudo en Google CSE",
+            error="No se encontró escudo en Wikimedia Commons",
         )
 
     def find_all_crests(
         self,
         codes: list[tuple[str, str]],
-        conn: sqlite3.Connection,
         on_progress: Callable[[int, int, str], None] | None = None,
     ) -> list[CrestResult]:
         """Procesa una lista de `(code_id, code_name)`.
 
-        Aplica un rate-limit de `RATE_LIMIT_DELAY` segundos entre los
-        requests reales (no entre cards cacheadas o especiales).
+        Aplica `RATE_LIMIT_DELAY` segundos entre find_crest reales (no entre
+        cards cacheadas o especiales).
         """
         results: list[CrestResult] = []
         total = len(codes)
@@ -300,7 +243,7 @@ class CrestFinder:
             needs_network = not is_valid_crest_file(dest) and code_id not in SPECIAL_CODES
             if needs_network and not first_network_call:
                 time.sleep(RATE_LIMIT_DELAY)
-            result = self.find_crest(code_id, code_name, conn)
+            result = self.find_crest(code_id, code_name)
             if needs_network:
                 first_network_call = False
             results.append(result)
@@ -309,11 +252,7 @@ class CrestFinder:
         return results
 
     def import_manual_crest(self, code_id: str, source_image: Path) -> CrestResult:
-        """Importa una imagen local como escudo de un code_id.
-
-        Convierte a RGBA, redimensiona a `CREST_TARGET_SIZE` y guarda
-        como PNG en `get_crest_path(code_id)`.
-        """
+        """Importa una imagen local como escudo de un code_id."""
         dest = get_crest_path(code_id)
         try:
             with Image.open(source_image) as img:
@@ -324,17 +263,15 @@ class CrestFinder:
             return CrestResult(code_id, code_id, dest, SOURCE_MANUAL, False, error=str(exc))
         return CrestResult(code_id, code_id, dest, SOURCE_MANUAL, True)
 
-    def cleanup_failed_placeholders(
-        self,
-        codes: list[tuple[str, str]],
-    ) -> int:
+    def cleanup_failed_placeholders(self, codes: list[tuple[str, str]]) -> int:
         """Borra placeholders previos de códigos NO especiales.
 
-        Los `SOURCE_PLACEHOLDER` que quedaron en disco antes del cambio a
-        `SOURCE_NOT_FOUND` siguen siendo "cache válido" y bloquean reintentos.
-        Llamar antes de `find_all_crests` cuando el usuario pide buscar de
-        nuevo, para que esos países se reintenten en vez de devolverse del
-        cache. SPECIAL_CODES NO se tocan (su placeholder es intencional).
+        Los placeholders heredados (ej. cuando find_crest aún escribía
+        `SOURCE_PLACEHOLDER` en disco para errores) siguen siendo "cache
+        válido" y bloquean reintentos. Llamar antes de `find_all_crests`
+        cuando el usuario pide buscar de nuevo, para que esos países se
+        reintenten en vez de devolverse del cache. SPECIAL_CODES NO se
+        tocan (su placeholder es intencional).
 
         Retorna cuántos archivos borró.
         """
@@ -350,74 +287,129 @@ class CrestFinder:
         return deleted
 
     # ------------------------------------------------------------------
-    # Google Custom Search
+    # Wikimedia Commons
     # ------------------------------------------------------------------
 
-    def _search_google_crest(self, code_name: str, conn: sqlite3.Connection) -> list[str]:
-        """Busca escudos via Google CSE. Retorna lista de URLs en orden de relevancia.
+    def _build_commons_queries(self, code_name: str) -> list[str]:
+        """Genera queries para Commons en orden de especificidad decreciente.
 
-        Las queries se prueban en orden de especificidad. La primera que
-        devuelve resultados corta el bucle (no acumulamos URLs de queries
-        sucesivas para no mezclar contextos). Si la API no está
-        configurada o la cuota se agota, retorna `[]` sin levantar.
+        Las primeras queries hintean SVG (escudos vectoriales son los
+        archivos más limpios en Commons), las últimas dejan abierto el tipo.
         """
-        api_key, cse_id = _load_google_credentials(conn)
-        if not api_key or not cse_id:
-            # `_load_google_credentials` ya logueó el detalle (qué fuente,
-            # configuración parcial, etc.). Acá solo registramos el caller.
-            logger.info("Crest %s: Google CSE no configurado — placeholder", code_name)
+        name = code_name.title()
+        return [
+            f"{name} national football team crest svg",
+            f"{name} national football team logo svg",
+            f"{name} football federation logo svg",
+            f"{name} football association crest svg",
+            f"{name} national football team crest",
+            f"{name} football federation logo",
+        ]
+
+    def _search_commons_files(self, query: str, limit: int = 5) -> list[str]:
+        """Busca archivos en Commons en namespace File:. Retorna títulos filtrados.
+
+        El filtro `_is_likely_crest_file` descarta resultados que parecen
+        fotos de partidos / jugadores / estadios.
+        """
+        params: dict[str, str | int] = {
+            "action": "query",
+            "list": "search",
+            "srsearch": query,
+            "srnamespace": 6,  # namespace File:
+            "srlimit": limit,
+            "format": "json",
+        }
+        try:
+            r = requests.get(
+                COMMONS_API_URL,
+                params=params,
+                headers={"User-Agent": COMMONS_USER_AGENT},
+                timeout=COMMONS_TIMEOUT,
+            )
+            if r.status_code != 200:
+                logger.warning(
+                    "[commons] search HTTP %s para %r — body=%s",
+                    r.status_code,
+                    query,
+                    r.text[:300],
+                )
+                return []
+            data = r.json()
+            results = data.get("query", {}).get("search", []) or []
+            raw_titles = [
+                str(item["title"]) for item in results if isinstance(item, dict) and "title" in item
+            ]
+            titles = [t for t in raw_titles if self._is_likely_crest_file(t)]
+            logger.info(
+                "[commons] search %r → %d raw → %d filtrados",
+                query,
+                len(raw_titles),
+                len(titles),
+            )
+            return titles
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[commons] search excepción: %s", exc)
             return []
 
-        for query, img_type in _build_crest_queries(code_name):
-            params: dict[str, str | int] = {
-                "key": api_key,
-                "cx": cse_id,
-                "q": query,
-                "searchType": "image",
-                "num": GOOGLE_RESULTS_PER_QUERY,
-                "safe": "active",
-                "imgSize": "medium",
-            }
-            if img_type:
-                params["imgType"] = img_type
+    def _get_commons_thumb_url(self, file_title: str) -> str | None:
+        """Para un `File:Foo.svg`, retorna la URL del thumbnail PNG rasterizado.
 
-            logger.info(
-                "[google_cse] request: q=%r imgType=%r",
-                params["q"],
-                params.get("imgType", ""),
+        Pide `iiurlwidth=COMMONS_THUMB_SIZE` para forzar a Commons a generar
+        un PNG (incluso si el original es SVG). Esto evita depender de
+        cairosvg para la mayoría de los escudos. Retorna `None` si no se
+        puede resolver.
+        """
+        params: dict[str, str | int] = {
+            "action": "query",
+            "titles": file_title,
+            "prop": "imageinfo",
+            "iiprop": "url|size|mime",
+            "iiurlwidth": COMMONS_THUMB_SIZE,
+            "format": "json",
+        }
+        try:
+            r = requests.get(
+                COMMONS_API_URL,
+                params=params,
+                headers={"User-Agent": COMMONS_USER_AGENT},
+                timeout=COMMONS_TIMEOUT,
             )
-            try:
-                r = requests.get(
-                    GOOGLE_CSE_URL,
-                    params=params,
-                    timeout=DOWNLOAD_TIMEOUT,
-                )
-                items_count = len(r.json().get("items", [])) if r.status_code == 200 else 0
-                logger.info(
-                    "[google_cse] response: status=%s items=%d",
-                    r.status_code,
-                    items_count,
-                )
-                if r.status_code == 429:
-                    logger.warning("[google_cse] cuota diaria agotada")
-                    return []
-                if r.status_code != 200:
-                    # Body completo (truncado) para diagnóstico — los errores
-                    # de la API (key inválida, cse_id mal, billing, etc.)
-                    # vienen acá.
-                    logger.warning("[google_cse] body inesperado: %s", r.text[:500])
+            if r.status_code != 200:
+                return None
+            data = r.json()
+            pages = data.get("query", {}).get("pages", {}) or {}
+            for page in pages.values():
+                if not isinstance(page, dict):
                     continue
-                items = r.json().get("items", []) or []
-                urls = [
-                    str(item["link"]) for item in items if isinstance(item, dict) and "link" in item
-                ]
-                if urls:
-                    return urls
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("[google_cse] excepción para %r: %s", query, exc)
-                continue
+                infos = page.get("imageinfo") or []
+                if not infos or not isinstance(infos[0], dict):
+                    continue
+                info = infos[0]
+                # 1. thumburl: PNG rasterizado al ancho pedido — preferido.
+                thumb_url = info.get("thumburl")
+                if thumb_url:
+                    return str(thumb_url)
+                # 2. url: original. Si NO es SVG, lo usamos directo.
+                orig_url = info.get("url")
+                mime = (info.get("mime") or "").lower()
+                if orig_url and "svg" not in mime:
+                    return str(orig_url)
+                # 3. SVG sin thumb — `_download_and_process_crest` intentará
+                #    convertirlo con cairosvg (degrada a None si no está).
+                return str(orig_url) if orig_url else None
+            return None
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[commons] imageinfo falló para %r: %s", file_title, exc)
+            return None
 
-        return []
+    @staticmethod
+    def _is_likely_crest_file(file_title: str) -> bool:
+        """Heurística de filtrado: el título debe parecer un escudo, no una foto."""
+        lower = file_title.lower()
+        if any(term in lower for term in BLACKLIST_TERMS):
+            return False
+        return any(term in lower for term in WHITELIST_TERMS)
 
     # ------------------------------------------------------------------
     # Descarga y procesamiento
@@ -427,25 +419,15 @@ class CrestFinder:
         """Descarga `url`, convierte a PNG RGBA `CREST_TARGET_SIZE` y guarda.
 
         Devuelve True si la descarga produjo un PNG válido en `dest`. La
-        validación es defensiva en varios pasos:
-
-        1. Status HTTP 200 y tamaño mínimo (`MIN_DOWNLOAD_BYTES`) — descarta
-           respuestas vacías o páginas de error redirigidas.
-        2. Detección de SVG (algunos resultados de Google CSE son SVG y
-           Pillow no los abre): si hay SVG, intenta convertirlo con
-           cairosvg; si no está instalado, falla limpiamente.
-        3. Validación de Content-Type o "magic bytes" — si no es imagen
-           reconocible, descarta antes de invocar a Pillow.
-        4. Conversión a RGBA `CREST_TARGET_SIZE` con `thumbnail` (preserva
-           aspect ratio).
-        5. Re-validación post-save (`MIN_VALID_FILE_BYTES`) — si Pillow
-           guardó algo trivialmente pequeño/corrupto, lo descarta.
+        validación es defensiva: status, tamaño mínimo, detección de SVG
+        (con conversión vía cairosvg si está), magic bytes, conversión a
+        RGBA y re-validación post-save.
         """
         try:
             r = requests.get(
                 url,
                 timeout=DOWNLOAD_TIMEOUT,
-                headers={"User-Agent": USER_AGENT},
+                headers={"User-Agent": COMMONS_USER_AGENT},
             )
             if r.status_code != 200:
                 return False
@@ -508,11 +490,7 @@ class CrestFinder:
 
     @staticmethod
     def _svg_to_png(svg_bytes: bytes) -> bytes | None:
-        """Rasteriza SVG a PNG usando cairosvg (dependencia opcional).
-
-        Retorna `None` si cairosvg no está instalado o si la conversión
-        falla. La degradación es elegante: el caller usa placeholder.
-        """
+        """Rasteriza SVG a PNG usando cairosvg (dependencia opcional)."""
         try:
             import cairosvg
         except ImportError:
@@ -534,13 +512,7 @@ class CrestFinder:
     # ------------------------------------------------------------------
 
     def _generate_placeholder_crest(self, code_id: str, dest: Path) -> None:
-        """Crea un placeholder: círculo gris relleno con las iniciales.
-
-        Se usa cuando Google CSE falla o cuando el code_id está en
-        `SPECIAL_CODES` (sets sin equipo nacional asociado). El círculo
-        va relleno (no solo outline) para garantizar que el PNG resultante
-        supere `MIN_VALID_FILE_BYTES` y el cache lo considere válido.
-        """
+        """Crea un placeholder: círculo gris relleno con las iniciales."""
         size = CREST_TARGET_SIZE
         img = Image.new("RGBA", size, (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
@@ -571,7 +543,5 @@ def is_valid_crest_file(path: Path) -> bool:
     Los crests reales descargados y los placeholders generados internamente
     siempre superan `MIN_VALID_FILE_BYTES`. Cualquier archivo más chico es
     probablemente un intento previo fallido (truncado, vacío, corrupto).
-    La vista usa esta función para evitar mostrar/cachear escudos que estén
-    en disco pero rotos.
     """
     return path.exists() and path.stat().st_size > MIN_VALID_FILE_BYTES

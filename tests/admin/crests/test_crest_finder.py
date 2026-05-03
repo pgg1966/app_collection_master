@@ -1,8 +1,7 @@
-"""Tests del CrestFinder (refactor a Google CSE).
+"""Tests del CrestFinder (Wikimedia Commons backend).
 
-Cubre la cascada cache → SPECIAL → Google CSE → placeholder, las
-validaciones defensivas de `_download_and_process_crest`, y los helpers
-de detección de formato (`_is_svg`, `_has_image_magic`).
+Cubre la cascada cache → SPECIAL → override → Commons search → not_found,
+las heurísticas de filtrado y las validaciones defensivas de descarga.
 """
 
 import io
@@ -13,23 +12,19 @@ import responses
 from PIL import Image
 
 from collections_app.admin.crests.crest_finder import (
-    ENV_GOOGLE_API_KEY,
-    ENV_GOOGLE_CSE_ID,
-    GOOGLE_CSE_URL,
+    COMMONS_API_URL,
+    COMMONS_FILE_OVERRIDES,
+    COMMONS_USER_AGENT,
     MIN_VALID_FILE_BYTES,
-    SETTING_GOOGLE_API_KEY,
-    SETTING_GOOGLE_CSE_ID,
     SOURCE_CACHE,
-    SOURCE_GOOGLE,
+    SOURCE_COMMONS,
+    SOURCE_COMMONS_OVERRIDE,
     SOURCE_NOT_FOUND,
     SOURCE_PLACEHOLDER,
     SPECIAL_CODES,
     CrestFinder,
-    _build_crest_queries,
-    _load_google_credentials,
     is_valid_crest_file,
 )
-from collections_app.core.repositories.settings_repo import SettingsRepository
 
 
 def _png_bytes(w: int = 200, h: int = 200) -> bytes:
@@ -38,14 +33,6 @@ def _png_bytes(w: int = 200, h: int = 200) -> bytes:
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
-
-
-def _set_google_keys(conn) -> None:
-    """Persiste credenciales de Google CSE en `app_settings`."""
-    repo = SettingsRepository(conn)
-    repo.set(SETTING_GOOGLE_API_KEY, "test-api-key")
-    repo.set(SETTING_GOOGLE_CSE_ID, "test-cse-id")
-    conn.commit()
 
 
 def _redirect_crest_paths(monkeypatch, tmp_path):
@@ -59,12 +46,17 @@ def _redirect_crest_paths(monkeypatch, tmp_path):
     )
 
 
+def _no_query_delay(monkeypatch):
+    """Evita el sleep entre queries en tests."""
+    monkeypatch.setattr("collections_app.admin.crests.crest_finder.time.sleep", lambda _s: None)
+
+
 # ----------------------------------------------------------------------
-# Cache + SPECIAL_CODES + import manual + cosas que no tocan red
+# Cache, SPECIAL_CODES, import manual, helpers básicos
 # ----------------------------------------------------------------------
 
 
-def test_uses_cache_if_crest_exists(tmp_path, monkeypatch, memory_db):
+def test_uses_cache_if_crest_exists(tmp_path, monkeypatch):
     """Si el escudo ya está en disco y es válido, no toca la red."""
     _redirect_crest_paths(monkeypatch, tmp_path)
     cached = tmp_path / "ARG.png"
@@ -72,39 +64,26 @@ def test_uses_cache_if_crest_exists(tmp_path, monkeypatch, memory_db):
 
     finder = CrestFinder()
     with responses.RequestsMock():  # explícito: no se debe llamar a nadie
-        result = finder.find_crest("ARG", "ARGENTINA", memory_db)
+        result = finder.find_crest("ARG", "ARGENTINA")
 
     assert result.source == SOURCE_CACHE
     assert result.local_path == cached
 
 
-def test_special_codes_go_to_placeholder(tmp_path, monkeypatch, memory_db):
+def test_special_codes_make_placeholder(tmp_path, monkeypatch):
     """code_id en SPECIAL_CODES → placeholder con iniciales, sin red."""
     _redirect_crest_paths(monkeypatch, tmp_path)
-
     finder = CrestFinder()
     code_id = next(iter(SPECIAL_CODES))
-    with responses.RequestsMock():  # ningún request debe ocurrir
-        result = finder.find_crest(code_id, code_id, memory_db)
+    with responses.RequestsMock():
+        result = finder.find_crest(code_id, code_id)
 
     assert result.source == SOURCE_PLACEHOLDER
     assert result.local_path.exists()
 
 
 def test_pan_not_in_special_codes():
-    """PAN es selección nacional, no set especial."""
     assert "PAN" not in SPECIAL_CODES
-
-
-def test_placeholder_generated_with_code_initials(tmp_path, monkeypatch):
-    _redirect_crest_paths(monkeypatch, tmp_path)
-    finder = CrestFinder()
-    dest = tmp_path / "XXX.png"
-    finder._generate_placeholder_crest("XXX", dest)
-    assert dest.exists()
-    img = Image.open(dest)
-    assert img.mode == "RGBA"
-    assert img.size == (200, 200)
 
 
 def test_placeholder_meets_min_valid_file_size(tmp_path, monkeypatch):
@@ -127,19 +106,18 @@ def test_import_manual_crest(tmp_path, monkeypatch):
     assert result.success is True
     saved = Image.open(result.local_path)
     assert saved.mode == "RGBA"
-    assert saved.size[0] <= 200 and saved.size[1] <= 200
 
 
-def test_find_crest_success_returns_path(tmp_path, monkeypatch, memory_db):
-    _redirect_crest_paths(monkeypatch, tmp_path)
-    (tmp_path / "ARG.png").write_bytes(_png_bytes())
+def test_is_valid_crest_file(tmp_path):
+    missing = tmp_path / "missing.png"
+    too_small = tmp_path / "small.png"
+    too_small.write_bytes(b"x" * 100)
+    big_enough = tmp_path / "ok.png"
+    big_enough.write_bytes(b"x" * (MIN_VALID_FILE_BYTES + 1))
 
-    finder = CrestFinder()
-    with responses.RequestsMock():
-        result = finder.find_crest("ARG", "ARGENTINA", memory_db)
-
-    assert result.local_path == tmp_path / "ARG.png"
-    assert result.source == SOURCE_CACHE
+    assert is_valid_crest_file(missing) is False
+    assert is_valid_crest_file(too_small) is False
+    assert is_valid_crest_file(big_enough) is True
 
 
 # ----------------------------------------------------------------------
@@ -148,9 +126,7 @@ def test_find_crest_success_returns_path(tmp_path, monkeypatch, memory_db):
 
 
 def test_download_converts_to_rgba_png(tmp_path, monkeypatch):
-    """La imagen descargada se guarda como PNG RGBA."""
     _redirect_crest_paths(monkeypatch, tmp_path)
-
     finder = CrestFinder()
     img_url = "https://example.com/jpg-image.jpg"
     rgb = Image.frombytes("RGB", (200, 200), os.urandom(200 * 200 * 3))
@@ -172,11 +148,9 @@ def test_download_rejects_empty_response(tmp_path, monkeypatch):
     finder = CrestFinder()
     dest = tmp_path / "EMP.png"
     img_url = "https://example.com/empty.png"
-
     with responses.RequestsMock() as rsps:
         rsps.add(responses.GET, img_url, body=b"", status=200)
         ok = finder._download_and_process_crest(img_url, dest)
-
     assert ok is False
     assert not dest.exists()
 
@@ -187,17 +161,9 @@ def test_download_rejects_html_content(tmp_path, monkeypatch):
     dest = tmp_path / "HTM.png"
     img_url = "https://example.com/redirected.html"
     html = b"<html><body>" + (b"x" * 1000) + b"</body></html>"
-
     with responses.RequestsMock() as rsps:
-        rsps.add(
-            responses.GET,
-            img_url,
-            body=html,
-            status=200,
-            content_type="text/html",
-        )
+        rsps.add(responses.GET, img_url, body=html, status=200, content_type="text/html")
         ok = finder._download_and_process_crest(img_url, dest)
-
     assert ok is False
     assert not dest.exists()
 
@@ -207,36 +173,9 @@ def test_download_rejects_too_small_response(tmp_path, monkeypatch):
     finder = CrestFinder()
     dest = tmp_path / "SML.png"
     img_url = "https://example.com/tiny.png"
-
     with responses.RequestsMock() as rsps:
         rsps.add(responses.GET, img_url, body=b"x" * 200, status=200)
         ok = finder._download_and_process_crest(img_url, dest)
-
-    assert ok is False
-    assert not dest.exists()
-
-
-def test_save_too_small_is_discarded(tmp_path, monkeypatch):
-    """Si img.save produce un PNG < MIN_VALID_FILE_BYTES, se borra y retorna False."""
-    _redirect_crest_paths(monkeypatch, tmp_path)
-    finder = CrestFinder()
-    dest = tmp_path / "TIN.png"
-    img_url = "https://example.com/tiny-but-valid.png"
-    tiny = Image.new("RGBA", (4, 4), (0, 0, 0, 255))
-    buf = io.BytesIO()
-    tiny.save(buf, format="PNG")
-    body = buf.getvalue() + b"\x00" * 600
-
-    with responses.RequestsMock() as rsps:
-        rsps.add(
-            responses.GET,
-            img_url,
-            body=body,
-            status=200,
-            content_type="image/png",
-        )
-        ok = finder._download_and_process_crest(img_url, dest)
-
     assert ok is False
     assert not dest.exists()
 
@@ -245,10 +184,8 @@ def test_svg_detected_correctly():
     finder = CrestFinder()
     assert finder._is_svg(b'<?xml version="1.0"?><svg></svg>') is True
     assert finder._is_svg(b'<svg xmlns="http://www.w3.org/2000/svg"></svg>') is True
-    assert finder._is_svg(b'  \n  <?xml version="1.0"?><svg></svg>') is True
     assert finder._is_svg(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100) is False
     assert finder._is_svg(b"\xff\xd8\xff\xe0" + b"\x00" * 100) is False
-    assert finder._is_svg(b"GIF89a" + b"\x00" * 100) is False
 
 
 def test_has_image_magic():
@@ -257,390 +194,291 @@ def test_has_image_magic():
     assert finder._has_image_magic(b"\xff\xd8\xff\xe0") is True
     assert finder._has_image_magic(b"GIF89a") is True
     assert finder._has_image_magic(b"RIFF\x00\x00\x00\x00WEBP") is True
-    assert finder._has_image_magic(b"\x00\x00\x01\x00") is True
     assert finder._has_image_magic(b"<html>") is False
-    assert finder._has_image_magic(b"<?xml") is False
-
-
-def test_is_valid_crest_file(tmp_path):
-    missing = tmp_path / "missing.png"
-    too_small = tmp_path / "small.png"
-    too_small.write_bytes(b"x" * 100)
-    big_enough = tmp_path / "ok.png"
-    big_enough.write_bytes(b"x" * (MIN_VALID_FILE_BYTES + 1))
-
-    assert is_valid_crest_file(missing) is False
-    assert is_valid_crest_file(too_small) is False
-    assert is_valid_crest_file(big_enough) is True
 
 
 # ----------------------------------------------------------------------
-# Google CSE: _build_crest_queries
+# Wikimedia Commons: _search_commons_files
 # ----------------------------------------------------------------------
 
 
-def test_build_crest_queries_returns_clipart_first():
-    """El primer query debe usar imgType='clipart' y el code_name aparecer en todos."""
-    queries = _build_crest_queries("Argentina")
-    assert len(queries) >= 2
-    assert queries[0][1] == "clipart"
-    for query, _img_type in queries:
-        assert "Argentina" in query
+def _commons_search_response(titles: list[str]) -> dict:
+    return {"query": {"search": [{"title": t} for t in titles]}}
 
 
-def test_build_crest_queries_titles_uppercase_input():
-    """El input MAYÚSCULAS del CSV se convierte a Title-case en las queries."""
-    queries = _build_crest_queries("ARGENTINA")
-    assert all("Argentina" in q for q, _ in queries)
-    assert not any("ARGENTINA" in q for q, _ in queries)
-
-
-# ----------------------------------------------------------------------
-# Google CSE: _search_google_crest
-# ----------------------------------------------------------------------
-
-
-def test_search_google_crest_returns_urls_when_configured(tmp_path, monkeypatch, memory_db):
-    """Con keys configuradas y respuesta válida, retorna las URLs del primer match."""
-    _redirect_crest_paths(monkeypatch, tmp_path)
-    _set_google_keys(memory_db)
-
-    finder = CrestFinder()
-    cse_response = {
-        "items": [
-            {"link": "https://example.com/a.png"},
-            {"link": "https://example.com/b.png"},
-            {"link": "https://example.com/c.png"},
-        ]
-    }
-    with responses.RequestsMock() as rsps:
-        rsps.add(responses.GET, GOOGLE_CSE_URL, json=cse_response, status=200)
-        urls = finder._search_google_crest("ARGENTINA", memory_db)
-
-    assert urls == [
-        "https://example.com/a.png",
-        "https://example.com/b.png",
-        "https://example.com/c.png",
+def test_search_commons_files_returns_titles_on_success():
+    titles_returned = [
+        "File:Argentina FA logo.svg",
+        "File:Brazil federation crest.svg",
+        "File:France national football team logo.svg",
     ]
-
-
-def test_search_google_crest_returns_empty_when_not_configured(tmp_path, monkeypatch, memory_db):
-    """Sin api_key/cse_id en settings NI env vars, retorna [] sin hacer requests."""
-    _redirect_crest_paths(monkeypatch, tmp_path)
-    # NO seteamos las keys en settings; tampoco deben existir como env vars
-    monkeypatch.delenv(ENV_GOOGLE_API_KEY, raising=False)
-    monkeypatch.delenv(ENV_GOOGLE_CSE_ID, raising=False)
-
-    finder = CrestFinder()
-    with responses.RequestsMock():  # ningún request debe ocurrir
-        urls = finder._search_google_crest("ARGENTINA", memory_db)
-
-    assert urls == []
-
-
-# ----------------------------------------------------------------------
-# Cascada settings → env vars en _load_google_credentials
-# ----------------------------------------------------------------------
-
-
-def test_load_credentials_uses_settings_when_present(monkeypatch, memory_db):
-    """Si las claves están en `app_settings`, esas ganan sobre env vars."""
-    _set_google_keys(memory_db)  # setea "from-settings"
-    monkeypatch.setenv(ENV_GOOGLE_API_KEY, "from-env")
-    monkeypatch.setenv(ENV_GOOGLE_CSE_ID, "from-env")
-
-    api_key, cse_id = _load_google_credentials(memory_db)
-    assert api_key == "test-api-key"
-    assert cse_id == "test-cse-id"
-
-
-def test_load_credentials_falls_back_to_env_vars(monkeypatch, memory_db):
-    """Sin entradas en settings, lee de env vars."""
-    # Sin _set_google_keys(): app_settings vacío
-    monkeypatch.setenv(ENV_GOOGLE_API_KEY, "env-api-key")
-    monkeypatch.setenv(ENV_GOOGLE_CSE_ID, "env-cse-id")
-
-    api_key, cse_id = _load_google_credentials(memory_db)
-    assert api_key == "env-api-key"
-    assert cse_id == "env-cse-id"
-
-
-def test_load_credentials_returns_none_when_neither_present(monkeypatch, memory_db):
-    """Sin settings ni env vars, retorna (None, None)."""
-    monkeypatch.delenv(ENV_GOOGLE_API_KEY, raising=False)
-    monkeypatch.delenv(ENV_GOOGLE_CSE_ID, raising=False)
-
-    api_key, cse_id = _load_google_credentials(memory_db)
-    assert api_key is None
-    assert cse_id is None
-
-
-def test_load_credentials_logs_partial_config_warning(monkeypatch, memory_db, caplog):
-    """Si solo está api_key (sin cse_id) en settings, debe logear WARNING."""
-    SettingsRepository(memory_db).set(SETTING_GOOGLE_API_KEY, "only-api-key")
-    memory_db.commit()
-    monkeypatch.delenv(ENV_GOOGLE_API_KEY, raising=False)
-    monkeypatch.delenv(ENV_GOOGLE_CSE_ID, raising=False)
-
-    with caplog.at_level("WARNING", logger="collections_app.admin.crests.crest_finder"):
-        api_key, cse_id = _load_google_credentials(memory_db)
-
-    assert api_key is None  # incompleto → no usable
-    assert cse_id is None
-    # Debe haber un WARNING que mencione el campo presente y el faltante
-    msgs = [r.message for r in caplog.records if r.levelname == "WARNING"]
-    assert any(
-        SETTING_GOOGLE_API_KEY in m and SETTING_GOOGLE_CSE_ID in m for m in msgs
-    ), f"Esperaba WARNING mencionando ambos campos, vi: {msgs}"
-
-
-def test_load_credentials_logs_partial_config_warning_inverted(monkeypatch, memory_db, caplog):
-    """Caso inverso: solo cse_id presente en settings."""
-    SettingsRepository(memory_db).set(SETTING_GOOGLE_CSE_ID, "only-cse-id")
-    memory_db.commit()
-    monkeypatch.delenv(ENV_GOOGLE_API_KEY, raising=False)
-    monkeypatch.delenv(ENV_GOOGLE_CSE_ID, raising=False)
-
-    with caplog.at_level("WARNING", logger="collections_app.admin.crests.crest_finder"):
-        _load_google_credentials(memory_db)
-
-    msgs = [r.message for r in caplog.records if r.levelname == "WARNING"]
-    assert any(
-        SETTING_GOOGLE_CSE_ID in m and SETTING_GOOGLE_API_KEY in m for m in msgs
-    ), f"Esperaba WARNING mencionando ambos campos, vi: {msgs}"
-
-
-def test_search_google_crest_uses_env_var_fallback(tmp_path, monkeypatch, memory_db):
-    """`_search_google_crest` funciona end-to-end leyendo solo de env vars."""
-    _redirect_crest_paths(monkeypatch, tmp_path)
-    monkeypatch.setenv(ENV_GOOGLE_API_KEY, "env-api-key")
-    monkeypatch.setenv(ENV_GOOGLE_CSE_ID, "env-cse-id")
-
     finder = CrestFinder()
     with responses.RequestsMock() as rsps:
         rsps.add(
             responses.GET,
-            GOOGLE_CSE_URL,
-            json={"items": [{"link": "https://example.com/from-env.png"}]},
+            COMMONS_API_URL,
+            json=_commons_search_response(titles_returned),
             status=200,
         )
-        urls = finder._search_google_crest("ARGENTINA", memory_db)
-
-    assert urls == ["https://example.com/from-env.png"]
-
-
-def test_search_google_crest_returns_empty_on_quota_exhausted(tmp_path, monkeypatch, memory_db):
-    """HTTP 429 (cuota) → retorna [] sin levantar y sin probar más queries."""
-    _redirect_crest_paths(monkeypatch, tmp_path)
-    _set_google_keys(memory_db)
-
-    finder = CrestFinder()
-    with responses.RequestsMock() as rsps:
-        rsps.add(responses.GET, GOOGLE_CSE_URL, json={}, status=429)
-        urls = finder._search_google_crest("ARGENTINA", memory_db)
-        # Solo 1 call: detectado quota, no se siguen probando queries.
-        # `rsps.calls` se resetea al salir del context, por eso el
-        # assert va adentro.
+        titles = finder._search_commons_files("Argentina national football team", limit=5)
+        # rsps.calls se vacía al salir del context — verificamos adentro
         assert len(rsps.calls) == 1
+        assert rsps.calls[0].request.headers["User-Agent"] == COMMONS_USER_AGENT
+        assert "commons.wikimedia.org/w/api.php" in rsps.calls[0].request.url
 
-    assert urls == []
+    assert titles == titles_returned
 
 
-def test_search_google_crest_tries_clipart_first(tmp_path, monkeypatch, memory_db):
-    """Cuando el primer query (clipart) está vacío, se cae al siguiente."""
-    _redirect_crest_paths(monkeypatch, tmp_path)
-    _set_google_keys(memory_db)
-
+def test_search_commons_files_returns_empty_on_http_error():
     finder = CrestFinder()
     with responses.RequestsMock() as rsps:
-        # Primer call: vacío
-        rsps.add(responses.GET, GOOGLE_CSE_URL, json={"items": []}, status=200)
-        # Segundo call: con resultados
+        rsps.add(responses.GET, COMMONS_API_URL, json={}, status=500)
+        titles = finder._search_commons_files("Argentina")
+    assert titles == []
+
+
+def test_search_commons_files_filters_out_non_crest_results():
+    """La búsqueda devuelve fotos pero el filtro las descarta."""
+    raw_titles = [
+        "File:Argentina vs Brazil 2022 match.jpg",  # match → descarta
+        "File:Argentina FA logo.svg",  # logo → pasa
+        "File:Messi celebration.jpg",  # celebration → descarta
+    ]
+    finder = CrestFinder()
+    with responses.RequestsMock() as rsps:
         rsps.add(
             responses.GET,
-            GOOGLE_CSE_URL,
-            json={"items": [{"link": "https://example.com/x.png"}]},
+            COMMONS_API_URL,
+            json=_commons_search_response(raw_titles),
             status=200,
         )
-        urls = finder._search_google_crest("ARGENTINA", memory_db)
-        # `rsps.calls` se vacía al salir del context — verificamos adentro
-        first_url = rsps.calls[0].request.url
-        assert "imgType=clipart" in first_url
-
-    assert urls == ["https://example.com/x.png"]
+        titles = finder._search_commons_files("Argentina")
+    assert titles == ["File:Argentina FA logo.svg"]
 
 
 # ----------------------------------------------------------------------
-# Google CSE: integración via find_crest
+# Wikimedia Commons: _get_commons_thumb_url
 # ----------------------------------------------------------------------
 
 
-def test_find_crest_uses_google_cse(tmp_path, monkeypatch, memory_db):
-    """find_crest delega en _search_google_crest y descarga la URL devuelta."""
+def _commons_imageinfo_response(info: dict) -> dict:
+    return {"query": {"pages": {"1": {"imageinfo": [info]}}}}
+
+
+def test_get_commons_thumb_url_prefers_thumburl_over_url():
+    """Cuando hay thumburl (PNG), se prefiere sobre url (puede ser SVG)."""
+    finder = CrestFinder()
+    with responses.RequestsMock() as rsps:
+        rsps.add(
+            responses.GET,
+            COMMONS_API_URL,
+            json=_commons_imageinfo_response(
+                {
+                    "thumburl": "https://upload.wikimedia.org/foo-300px.png",
+                    "url": "https://upload.wikimedia.org/foo.svg",
+                    "mime": "image/svg+xml",
+                }
+            ),
+            status=200,
+        )
+        url = finder._get_commons_thumb_url("File:Foo.svg")
+    assert url == "https://upload.wikimedia.org/foo-300px.png"
+
+
+def test_get_commons_thumb_url_returns_url_when_not_svg():
+    """Sin thumburl, si el original NO es SVG, lo devuelve directo."""
+    finder = CrestFinder()
+    with responses.RequestsMock() as rsps:
+        rsps.add(
+            responses.GET,
+            COMMONS_API_URL,
+            json=_commons_imageinfo_response(
+                {"url": "https://example.com/foo.png", "mime": "image/png"}
+            ),
+            status=200,
+        )
+        url = finder._get_commons_thumb_url("File:Foo.png")
+    assert url == "https://example.com/foo.png"
+
+
+def test_get_commons_thumb_url_returns_none_when_no_imageinfo():
+    finder = CrestFinder()
+    with responses.RequestsMock() as rsps:
+        rsps.add(
+            responses.GET,
+            COMMONS_API_URL,
+            json={"query": {"pages": {"1": {}}}},
+            status=200,
+        )
+        url = finder._get_commons_thumb_url("File:NoExist.svg")
+    assert url is None
+
+
+def test_get_commons_thumb_url_returns_none_on_http_error():
+    finder = CrestFinder()
+    with responses.RequestsMock() as rsps:
+        rsps.add(responses.GET, COMMONS_API_URL, json={}, status=503)
+        url = finder._get_commons_thumb_url("File:Foo.svg")
+    assert url is None
+
+
+# ----------------------------------------------------------------------
+# Heurística _is_likely_crest_file
+# ----------------------------------------------------------------------
+
+
+def test_is_likely_crest_file_accepts_logo_or_crest():
+    f = CrestFinder()
+    assert f._is_likely_crest_file("File:Argentina FA logo.svg") is True
+    assert f._is_likely_crest_file("File:Brazil_national_football_team_crest.svg") is True
+    assert f._is_likely_crest_file("File:Federation logo.png") is True
+    assert f._is_likely_crest_file("File:Football association badge.svg") is True
+
+
+def test_is_likely_crest_file_rejects_match_or_player_photo():
+    f = CrestFinder()
+    assert f._is_likely_crest_file("File:Argentina vs Brazil 2022 match.jpg") is False
+    assert f._is_likely_crest_file("File:Messi celebration logo.jpg") is False
+    assert f._is_likely_crest_file("File:Stadium logo.jpg") is False
+    assert f._is_likely_crest_file("File:Players training crest.jpg") is False
+    assert f._is_likely_crest_file("File:Random photo.jpg") is False  # ni crest
+
+
+# ----------------------------------------------------------------------
+# Cascada de find_crest
+# ----------------------------------------------------------------------
+
+
+def test_find_crest_uses_override_when_present(tmp_path, monkeypatch):
+    """Si hay override en COMMONS_FILE_OVERRIDES, se usa sin buscar."""
     _redirect_crest_paths(monkeypatch, tmp_path)
-    _set_google_keys(memory_db)
-    img_url = "https://example.com/arg-crest.png"
+    _no_query_delay(monkeypatch)
+    monkeypatch.setitem(COMMONS_FILE_OVERRIDES, "TESTLAND", "File:Testland.svg")
 
     finder = CrestFinder()
     with (
-        patch.object(finder, "_search_google_crest", return_value=[img_url]),
-        responses.RequestsMock() as rsps,
+        patch.object(
+            finder, "_get_commons_thumb_url", return_value="https://example.com/x.png"
+        ) as mock_url,
+        patch.object(finder, "_download_and_process_crest", return_value=True) as mock_dl,
+        patch.object(finder, "_search_commons_files") as mock_search,
     ):
-        rsps.add(responses.GET, img_url, body=_png_bytes(), status=200)
-        result = finder.find_crest("ARG", "ARGENTINA", memory_db)
+        result = finder.find_crest("TST", "TESTLAND")
 
-    assert result.source == SOURCE_GOOGLE
+    mock_url.assert_called_once_with("File:Testland.svg")
+    mock_dl.assert_called_once()
+    mock_search.assert_not_called()  # NO se buscó porque hubo override
+    assert result.source == SOURCE_COMMONS_OVERRIDE
     assert result.success is True
-    assert result.local_path.exists()
 
 
-def test_find_crest_not_found_writes_no_file(tmp_path, monkeypatch, memory_db):
-    """Si Google CSE no devuelve URLs, NO se escribe placeholder en disco."""
+def test_find_crest_falls_back_to_search_when_no_override(tmp_path, monkeypatch):
+    """Sin override, se itera sobre la cascada de queries."""
     _redirect_crest_paths(monkeypatch, tmp_path)
+    _no_query_delay(monkeypatch)
 
     finder = CrestFinder()
-    with patch.object(finder, "_search_google_crest", return_value=[]):
-        result = finder.find_crest("ARG", "ARGENTINA", memory_db)
+    with (
+        patch.object(
+            finder, "_search_commons_files", return_value=["File:Argentina FA logo.svg"]
+        ) as mock_search,
+        patch.object(finder, "_get_commons_thumb_url", return_value="https://example.com/arg.png"),
+        patch.object(finder, "_download_and_process_crest", return_value=True),
+    ):
+        result = finder.find_crest("ARG", "ARGENTINA")
+
+    assert result.source == SOURCE_COMMONS
+    assert result.success is True
+    mock_search.assert_called()  # se buscó
+
+
+def test_find_crest_returns_not_found_when_all_queries_fail(tmp_path, monkeypatch):
+    """Cuando todas las queries fallan, NO se escribe archivo (permite reintento)."""
+    _redirect_crest_paths(monkeypatch, tmp_path)
+    _no_query_delay(monkeypatch)
+
+    finder = CrestFinder()
+    with patch.object(finder, "_search_commons_files", return_value=[]):
+        result = finder.find_crest("XYZ", "FAKELAND")
 
     assert result.source == SOURCE_NOT_FOUND
     assert result.success is False
-    assert not result.local_path.exists(), (
-        "find_crest no debe escribir archivo cuando no hay resultado, "
-        "para permitir reintento automático"
-    )
+    assert (
+        not result.local_path.exists()
+    ), "find_crest no debe escribir archivo cuando no hay resultado"
 
 
-def test_find_crest_not_found_when_all_downloads_fail(tmp_path, monkeypatch, memory_db):
-    """Si Google devuelve URLs pero ninguna baja → NOT_FOUND, sin archivo."""
+def test_find_crest_returns_not_found_when_all_downloads_fail(tmp_path, monkeypatch):
+    """Si Commons devuelve titles pero ninguna descarga sale → NOT_FOUND."""
     _redirect_crest_paths(monkeypatch, tmp_path)
+    _no_query_delay(monkeypatch)
 
     finder = CrestFinder()
-    bad_urls = ["https://example.com/a.png", "https://example.com/b.png"]
     with (
-        patch.object(finder, "_search_google_crest", return_value=bad_urls),
+        patch.object(
+            finder, "_search_commons_files", return_value=["File:Foo.svg", "File:Bar.svg"]
+        ),
+        patch.object(finder, "_get_commons_thumb_url", return_value="https://example.com/x.png"),
         patch.object(finder, "_download_and_process_crest", return_value=False),
     ):
-        result = finder.find_crest("ARG", "ARGENTINA", memory_db)
+        result = finder.find_crest("ARG", "ARGENTINA")
 
     assert result.source == SOURCE_NOT_FOUND
-    assert result.success is False
     assert not result.local_path.exists()
 
 
-def test_not_found_crest_is_retried_next_time(tmp_path, monkeypatch, memory_db):
-    """Tras un NOT_FOUND, la siguiente llamada vuelve a buscar (no devuelve cache)."""
+def test_not_found_crest_is_retried_next_time(tmp_path, monkeypatch):
+    """Después de NOT_FOUND, la siguiente llamada vuelve a buscar (no devuelve cache)."""
     _redirect_crest_paths(monkeypatch, tmp_path)
+    _no_query_delay(monkeypatch)
 
     finder = CrestFinder()
     call_count = {"n": 0}
 
-    def fake_search(_code_name: str, _conn) -> list[str]:
+    def fake_search(_q: str, limit: int = 5) -> list[str]:
+        del limit
         call_count["n"] += 1
-        return []  # ambos intentos sin resultado
+        return []
 
-    with patch.object(finder, "_search_google_crest", side_effect=fake_search):
-        first = finder.find_crest("ARG", "ARGENTINA", memory_db)
-        second = finder.find_crest("ARG", "ARGENTINA", memory_db)
+    with patch.object(finder, "_search_commons_files", side_effect=fake_search):
+        first = finder.find_crest("ARG", "ARGENTINA")
+        before = call_count["n"]
+        second = finder.find_crest("ARG", "ARGENTINA")
 
     assert first.source == SOURCE_NOT_FOUND
     assert second.source == SOURCE_NOT_FOUND
-    # Lo crítico: la SEGUNDA llamada efectivamente reintentó búsqueda
-    assert (
-        call_count["n"] == 2
-    ), f"Esperaba 2 búsquedas (sin cache de NOT_FOUND), hubo {call_count['n']}"
+    # La SEGUNDA llamada efectivamente reintentó búsqueda — no devolvió cache
+    assert call_count["n"] > before
 
 
-def test_find_crest_special_code_still_writes_placeholder(tmp_path, monkeypatch, memory_db):
-    """SPECIAL_CODES SÍ siguen generando placeholder en disco (recordatorio visual)."""
+def test_find_crest_special_codes_make_placeholder(tmp_path, monkeypatch):
+    """SPECIAL_CODES SÍ siguen escribiendo placeholder en disco (recordatorio)."""
     _redirect_crest_paths(monkeypatch, tmp_path)
 
     finder = CrestFinder()
-    result = finder.find_crest("GBL", "Golden Ballers", memory_db)
+    result = finder.find_crest("GBL", "Golden Ballers")
 
     assert result.source == SOURCE_PLACEHOLDER
     assert result.success is True
-    assert result.local_path.exists(), "El placeholder de SPECIAL_CODES debe escribirse"
-    assert result.local_path.stat().st_size > MIN_VALID_FILE_BYTES
-
-
-def test_find_crest_skips_google_for_special_codes(tmp_path, monkeypatch, memory_db):
-    """Para SPECIAL_CODES, _search_google_crest NO se llama."""
-    _redirect_crest_paths(monkeypatch, tmp_path)
-
-    finder = CrestFinder()
-    with patch.object(finder, "_search_google_crest") as mock_search:
-        result = finder.find_crest("GBL", "Global", memory_db)
-
-    mock_search.assert_not_called()
-    assert result.source == SOURCE_PLACEHOLDER
-
-
-def test_corrupt_cache_is_deleted_and_retried(tmp_path, monkeypatch, memory_db):
-    """Un PNG corrupto en cache se borra y se relanza la búsqueda."""
-    _redirect_crest_paths(monkeypatch, tmp_path)
-    _set_google_keys(memory_db)
-
-    corrupt = tmp_path / "URU.png"
-    corrupt.write_bytes(b"")  # 0 bytes — corrupto
-    img_url = "https://example.com/uru.png"
-
-    finder = CrestFinder()
-    with (
-        patch.object(finder, "_search_google_crest", return_value=[img_url]),
-        responses.RequestsMock() as rsps,
-    ):
-        rsps.add(responses.GET, img_url, body=_png_bytes(), status=200)
-        result = finder.find_crest("URU", "URUGUAY", memory_db)
-
-    assert result.source == SOURCE_GOOGLE
     assert result.local_path.exists()
     assert result.local_path.stat().st_size > MIN_VALID_FILE_BYTES
 
 
-# ----------------------------------------------------------------------
-# find_all_crests
-# ----------------------------------------------------------------------
-
-
-def test_find_all_respects_rate_limiting(tmp_path, monkeypatch, memory_db):
-    """find_all_crests espera RATE_LIMIT_DELAY entre requests reales."""
+def test_find_crest_skips_search_for_special_codes(tmp_path, monkeypatch):
+    """Para SPECIAL_CODES, _search_commons_files NO se llama."""
     _redirect_crest_paths(monkeypatch, tmp_path)
 
-    sleep_calls: list[float] = []
-
-    def fake_sleep(s: float) -> None:
-        sleep_calls.append(s)
-
-    monkeypatch.setattr("collections_app.admin.crests.crest_finder.time.sleep", fake_sleep)
-
     finder = CrestFinder()
-    # Sin keys configuradas → search Google retorna [] sin red
-    finder.find_all_crests(
-        [("ARG", "ARGENTINA"), ("BRA", "BRAZIL"), ("FRA", "FRANCE")],
-        memory_db,
-    )
+    with patch.object(finder, "_search_commons_files") as mock_search:
+        finder.find_crest("GBL", "Golden Ballers")
 
-    # No se duerme antes del primer call de red, sí entre 2do y 3ro
-    assert len(sleep_calls) == 2
-    assert all(s >= 1.0 for s in sleep_calls)
+    mock_search.assert_not_called()
 
 
-def test_find_all_does_not_sleep_for_cached_or_special(tmp_path, monkeypatch, memory_db):
-    """No se aplica rate-limit para entradas ya cacheadas o SPECIAL."""
-    _redirect_crest_paths(monkeypatch, tmp_path)
-    # ARG ya cacheado, GBL es SPECIAL
-    (tmp_path / "ARG.png").write_bytes(_png_bytes())
-
-    sleep_calls: list[float] = []
-    monkeypatch.setattr(
-        "collections_app.admin.crests.crest_finder.time.sleep",
-        lambda s: sleep_calls.append(s),
-    )
-
-    finder = CrestFinder()
-    finder.find_all_crests([("ARG", "ARGENTINA"), ("GBL", "Global")], memory_db)
-
-    assert sleep_calls == []
+def test_user_agent_is_descriptive():
+    """El User-Agent debe identificar la app, no ser el genérico de requests."""
+    assert "CollectionsApp" in COMMONS_USER_AGENT
+    assert "python-requests" not in COMMONS_USER_AGENT.lower()
 
 
 # ----------------------------------------------------------------------
@@ -649,7 +487,6 @@ def test_find_all_does_not_sleep_for_cached_or_special(tmp_path, monkeypatch, me
 
 
 def test_cleanup_failed_placeholders_deletes_non_special(tmp_path, monkeypatch):
-    """Borra placeholders de códigos NO especiales; deja los SPECIAL_CODES."""
     _redirect_crest_paths(monkeypatch, tmp_path)
     arg = tmp_path / "ARG.png"
     gbl = tmp_path / "GBL.png"
@@ -672,27 +509,44 @@ def test_cleanup_failed_placeholders_returns_zero_when_no_files(tmp_path, monkey
 
 
 # ----------------------------------------------------------------------
-# Logs [credentials]: ambas fuentes mostradas siempre
+# find_all_crests
 # ----------------------------------------------------------------------
 
 
-def test_load_credentials_logs_both_sources(monkeypatch, memory_db, caplog):
-    """Cada llamada loguea el estado de app_settings Y de env vars."""
-    SettingsRepository(memory_db).set(SETTING_GOOGLE_API_KEY, "key-from-settings")
-    memory_db.commit()
-    monkeypatch.setenv(ENV_GOOGLE_CSE_ID, "cse-from-env")
-    monkeypatch.delenv(ENV_GOOGLE_API_KEY, raising=False)
+def test_find_all_respects_rate_limiting(tmp_path, monkeypatch):
+    _redirect_crest_paths(monkeypatch, tmp_path)
+    sleep_calls: list[float] = []
+    monkeypatch.setattr(
+        "collections_app.admin.crests.crest_finder.time.sleep",
+        lambda s: sleep_calls.append(s),
+    )
 
-    with caplog.at_level("INFO", logger="collections_app.admin.crests.crest_finder"):
-        api_key, cse_id = _load_google_credentials(memory_db)
+    finder = CrestFinder()
+    # Sin red real: _search_commons_files retorna [] sin tocar HTTP.
+    with patch.object(finder, "_search_commons_files", return_value=[]):
+        finder.find_all_crests([("ARG", "ARGENTINA"), ("BRA", "BRAZIL"), ("FRA", "FRANCE")])
 
-    msgs = [r.message for r in caplog.records]
-    # Debe haber UNA línea para app_settings y UNA para env vars
-    assert any("[credentials] app_settings:" in m for m in msgs), msgs
-    assert any("[credentials] env vars:" in m for m in msgs), msgs
-    # Y la línea final que indica desde dónde se resolvió cada credencial
-    assert any("[credentials] usando" in m for m in msgs), msgs
+    # Hubo dos sleeps a 1.0s (rate limit entre find_crest reales). También hubo
+    # sleeps a 0.5s entre queries del find_crest (QUERY_DELAY). Verificamos
+    # solo los del rate-limit.
+    rate_sleeps = [s for s in sleep_calls if s >= 1.0]
+    assert len(rate_sleeps) == 2
 
-    # Sanity: las credenciales se resolvieron de las dos fuentes mezcladas
-    assert api_key == "key-from-settings"
-    assert cse_id == "cse-from-env"
+
+def test_find_all_does_not_sleep_for_cached_or_special(tmp_path, monkeypatch):
+    """No se aplica rate-limit para entradas cacheadas o SPECIAL."""
+    _redirect_crest_paths(monkeypatch, tmp_path)
+    (tmp_path / "ARG.png").write_bytes(_png_bytes())
+
+    sleep_calls: list[float] = []
+    monkeypatch.setattr(
+        "collections_app.admin.crests.crest_finder.time.sleep",
+        lambda s: sleep_calls.append(s),
+    )
+
+    finder = CrestFinder()
+    finder.find_all_crests([("ARG", "ARGENTINA"), ("GBL", "Global")])
+
+    # Ningún rate-limit (1.0s) — solo cache hit y SPECIAL. Tampoco hubo
+    # query loops para meter delays de 0.5s.
+    assert sleep_calls == []

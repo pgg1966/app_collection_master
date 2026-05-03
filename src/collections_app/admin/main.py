@@ -31,7 +31,7 @@ class AdminMainWindow(MainWindowBase):
         self._collections_view = CollectionsAbmView(self.conn)
         self._codes_view = CodesMasterDetailView(self.conn)
         self._cards_view = CardsAbmView(self.conn)
-        self._crests_view = CrestsView(self.conn, self.db_path)
+        self._crests_view = CrestsView(self.conn)
 
         self._tabs = QTabWidget()
         self._tabs.addTab(self._collections_view, self.tr("Colecciones"))
