@@ -28,7 +28,10 @@ from urllib.parse import unquote, urljoin
 import requests
 from bs4 import BeautifulSoup, Tag
 
-from collections_app.core.utils.paths import get_generated_cards_dir
+from collections_app.core.utils.paths import (
+    format_card_filename,
+    get_generated_cards_dir,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -337,7 +340,7 @@ class PaniniScraper:
 
     def _download_card(self, card: CardImage) -> str:
         """Descarga `card`. Retorna `'downloaded'` | `'skipped'` | `'failed'`."""
-        dest = self._output_dir / f"{card.card_number:04d}.jpg"
+        dest = self._output_dir / format_card_filename(card.card_number, "jpg")
 
         if dest.exists() and not self._force:
             self._info("Card %04d → ya existe, skip", card.card_number)
