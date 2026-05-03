@@ -1,194 +1,334 @@
-"""Tests del PdfAlbumGenerator."""
+"""Tests de los generadores de PDF (álbum + listas + metadata de intercambio)."""
 
-import pytest
+import json
+import os
+from pathlib import Path
 
-from collections_app.core.models import Card, CodeLine, InventoryItem
-from collections_app.core.repositories import (
-    CardsRepository,
-    CodesLinesRepository,
-    InventoryRepository,
+from PIL import Image
+from pypdf import PdfReader, PdfWriter
+
+from collections_app.core.models import Card, Collection
+from collections_app.core.services.pdf_generator import (
+    EXCHANGE_APP_NAME,
+    AlbumCard,
+    _build_exchange_metadata,
+    _chunks,
+    format_label,
+    generate_album_pdf,
+    generate_duplicates_pdf,
+    generate_missing_pdf,
+    generate_owned_pdf,
+    validate_exchange_pdf_metadata,
 )
-from collections_app.core.services import (
-    AlbumConfig,
-    PdfAlbumGenerator,
-)
+
+# ----------------------------------------------------------------------
+# Helpers
+# ----------------------------------------------------------------------
 
 
-@pytest.fixture
-def album_setup(memory_db, sample_collection):
-    """5 cards en 2 codes, con inventory parcial."""
-    hid = sample_collection.code_header_id
-    cid = sample_collection.collection_id
-    lines_repo = CodesLinesRepository(memory_db)
-    lines_repo.upsert(CodeLine(hid, "ARG", "ARGENTINA", code_order=1))
-    lines_repo.upsert(CodeLine(hid, "BRA", "BRAZIL", code_order=2))
-
-    cards_repo = CardsRepository(memory_db)
-    cards_repo.upsert(Card(cid, "ARG", 1, "Lionel Messi"))
-    cards_repo.upsert(Card(cid, "ARG", 2, "Emiliano Martinez"))
-    cards_repo.upsert(Card(cid, "ARG", 3, "Nahuel Molina"))
-    cards_repo.upsert(Card(cid, "BRA", 1, "Vinicius Jr"))
-    cards_repo.upsert(Card(cid, "BRA", 2, "Neymar"))
-
-    inv = InventoryRepository(memory_db)
-    inv.upsert(InventoryItem(cid, "ARG", 1, quantity=3))  # repetida
-    inv.upsert(InventoryItem(cid, "ARG", 2, quantity=1))  # tengo
-    inv.upsert(InventoryItem(cid, "BRA", 1, quantity=2))  # repetida
-    # ARG-3 y BRA-2 → falta
-    memory_db.commit()
-    return sample_collection
+def _collection(
+    name: str = "WC2026",
+    cid: int = 1,
+    requires_code: bool = True,
+    cols: int = 3,
+    rows: int = 4,
+    orientation: str = "portrait",
+) -> Collection:
+    return Collection(
+        collection_id=cid,
+        collection_name=name,
+        card_count=100,
+        requires_code=requires_code,
+        code_field_name="País" if requires_code else None,
+        code_header_id=1,
+        album_columns=cols,
+        album_rows=rows,
+        album_orientation=orientation,
+    )
 
 
-def test_generate_unique_album_creates_pdf_file(memory_db, album_setup, tmp_path):
-    out = tmp_path / "album.pdf"
-    gen = PdfAlbumGenerator(memory_db, album_setup)
-    gen.generate_unique_album(out)
-    assert out.exists()
+def _card(code: str, n: int, name: str = "Player") -> Card:
+    return Card(collection_id=1, code_id=code, card_number=n, card_name=name)
 
 
-def test_generate_unique_album_file_size_nonzero(memory_db, album_setup, tmp_path):
-    out = tmp_path / "album.pdf"
-    PdfAlbumGenerator(memory_db, album_setup).generate_unique_album(out)
-    assert out.stat().st_size > 0
-    # Es un PDF (firma %PDF-)
-    assert out.read_bytes()[:5] == b"%PDF-"
+def _ac(
+    code: str,
+    n: int,
+    qty: int = 0,
+    image_path: Path | None = None,
+    requires_code: bool = True,
+    code_name: str | None = None,
+    name: str = "Player",
+) -> AlbumCard:
+    return AlbumCard(
+        card=_card(code, n, name),
+        quantity=qty,
+        image_path=image_path,
+        requires_code=requires_code,
+        code_name=code_name or code,
+    )
 
 
-def test_generate_duplicates_album_with_duplicates(memory_db, album_setup, tmp_path):
-    out = tmp_path / "dups.pdf"
-    PdfAlbumGenerator(memory_db, album_setup).generate_duplicates_album(out)
-    assert out.exists()
-    assert out.read_bytes()[:5] == b"%PDF-"
+def _make_jpeg(path: Path, w: int = 100, h: int = 100) -> Path:
+    """Genera un JPEG simple para usar como image_path en tests."""
+    img = Image.frombytes("RGB", (w, h), os.urandom(w * h * 3))
+    img.save(path, format="JPEG")
+    return path
 
 
-def test_generate_duplicates_album_no_duplicates_creates_single_page(
-    memory_db, sample_collection, tmp_path
-):
-    """Si no hay repetidas, el PDF tiene mensaje de placeholder."""
-    # No insertamos cards ni inventory → sin repetidas
-    out = tmp_path / "empty_dups.pdf"
-    PdfAlbumGenerator(memory_db, sample_collection).generate_duplicates_album(out)
-    assert out.exists()
-    assert out.read_bytes()[:5] == b"%PDF-"
+# ----------------------------------------------------------------------
+# Helpers básicos: format_label / _chunks
+# ----------------------------------------------------------------------
 
 
-def test_slot_data_ordered_by_code_order_then_card_number(memory_db, album_setup):
-    gen = PdfAlbumGenerator(memory_db, album_setup)
-    slots = gen._build_slot_data()
-    # ARG (order=1) viene antes que BRA (order=2)
-    keys = [(s.card.code_id, s.card.card_number) for s in slots]
-    assert keys == [
-        ("ARG", 1),
-        ("ARG", 2),
-        ("ARG", 3),
-        ("BRA", 1),
-        ("BRA", 2),
+def test_format_label_requires_code():
+    assert format_label(5, "ARG", requires_code=True) == "ARG-5"
+
+
+def test_format_label_no_code():
+    assert format_label(42, "ANY", requires_code=False) == "42"
+
+
+def test_chunks_basic():
+    assert _chunks([], 3) == []
+    items = [_ac("X", n) for n in range(1, 6)]
+    chunks = _chunks(items, 2)
+    assert [len(c) for c in chunks] == [2, 2, 1]
+
+
+# ----------------------------------------------------------------------
+# Álbum visual
+# ----------------------------------------------------------------------
+
+
+def test_album_pdf_creates_nonempty_file(tmp_path):
+    col = _collection()
+    cards = [
+        _ac("ARG", 1, qty=2, image_path=_make_jpeg(tmp_path / "img1.jpg")),  # CASO A
+        _ac("ARG", 2, qty=1, code_name="ARGENTINA"),  # CASO B
+        _ac("ARG", 3, qty=0, code_name="ARGENTINA"),  # CASO C
     ]
-
-
-def test_slot_data_includes_crest_path_when_exists(memory_db, album_setup, tmp_path, monkeypatch):
-    """Si el escudo existe en disco, slot.crest_path apunta a él."""
-    fake_arg = tmp_path / "ARG.png"
-    fake_arg.write_bytes(b"\x89PNG\r\n\x1a\n")  # mínimo de magic bytes
-
-    def fake_path(code_id):
-        return tmp_path / f"{code_id}.png"
-
-    monkeypatch.setattr(
-        "collections_app.core.services.pdf_generator.get_crest_path",
-        fake_path,
-    )
-
-    slots = PdfAlbumGenerator(memory_db, album_setup)._build_slot_data()
-    by_key = {(s.card.code_id, s.card.card_number): s for s in slots}
-    assert by_key[("ARG", 1)].crest_path == fake_arg
-    assert by_key[("ARG", 2)].crest_path == fake_arg
-    # BRA no tiene escudo en disco → None
-    assert by_key[("BRA", 1)].crest_path is None
-
-
-def test_slot_data_crest_path_none_when_no_crest(memory_db, album_setup, tmp_path, monkeypatch):
-    """Sin escudos en disco, todas las paths son None."""
-    monkeypatch.setattr(
-        "collections_app.core.services.pdf_generator.get_crest_path",
-        lambda code_id: tmp_path / f"missing-{code_id}.png",
-    )
-    slots = PdfAlbumGenerator(memory_db, album_setup)._build_slot_data()
-    assert all(s.crest_path is None for s in slots)
-
-
-def test_export_missing_list_creates_txt(memory_db, album_setup, tmp_path):
-    out = tmp_path / "missing.txt"
-    PdfAlbumGenerator(memory_db, album_setup).export_missing_list(out)
-    assert out.exists()
-    content = out.read_text(encoding="utf-8")
-    assert "FALTANTES" in content
-    # ARG-3 y BRA-2 son las faltantes
-    assert "Nahuel Molina".upper() in content.upper()
-    assert "Neymar".upper() in content.upper()
-
-
-def test_export_missing_list_groups_by_code(memory_db, album_setup, tmp_path):
-    out = tmp_path / "missing.txt"
-    PdfAlbumGenerator(memory_db, album_setup).export_missing_list(out)
-    content = out.read_text(encoding="utf-8")
-    # Headers de grupos
-    assert "ARGENTINA (ARG)" in content
-    assert "BRAZIL (BRA)" in content
-
-
-def test_export_duplicates_list_shows_extra_count(memory_db, album_setup, tmp_path):
-    out = tmp_path / "dups.txt"
-    PdfAlbumGenerator(memory_db, album_setup).export_duplicates_list(out)
-    content = out.read_text(encoding="utf-8")
-    assert "REPETIDAS" in content
-    # ARG-1 con qty=3 → ×2 copias extra
-    assert "×2" in content
-    # BRA-1 con qty=2 → ×1
-    assert "×1" in content
-
-
-def test_album_config_show_owned_false_excludes_owned(memory_db, album_setup, tmp_path):
-    """show_owned=False → solo cards faltantes en el filter."""
-    config = AlbumConfig(show_owned=False, show_missing=True)
-    gen = PdfAlbumGenerator(memory_db, album_setup, config=config)
-    slots = gen._build_slot_data()
-    filtered = gen._filter_by_config(slots)
-    assert all(not s.is_owned for s in filtered)
-
-
-def test_album_config_show_missing_false_excludes_missing(memory_db, album_setup):
-    """show_missing=False → solo cards tenidas."""
-    config = AlbumConfig(show_owned=True, show_missing=False)
-    gen = PdfAlbumGenerator(memory_db, album_setup, config=config)
-    slots = gen._build_slot_data()
-    filtered = gen._filter_by_config(slots)
-    assert all(s.is_owned for s in filtered)
-
-
-def test_progress_callback_called(memory_db, album_setup, tmp_path):
-    """on_progress se invoca durante la generación."""
-    calls: list[tuple[int, int]] = []
     out = tmp_path / "album.pdf"
-    PdfAlbumGenerator(memory_db, album_setup).generate_unique_album(
-        out, on_progress=lambda c, t: calls.append((c, t))
+    result = generate_album_pdf(col, cards, out)
+    assert out.exists()
+    assert out.stat().st_size > 1000
+    assert result.pages == 1
+
+
+def test_album_pdf_new_category_new_page(tmp_path):
+    """12 cards de ARG (llenan 1 página) + 1 de BRA = 2 páginas."""
+    col = _collection(cols=3, rows=4)  # 12 cards/página
+    cards_arg = [_ac("ARG", n, qty=1) for n in range(1, 13)]
+    cards_bra = [_ac("BRA", 1, qty=1)]
+    out = tmp_path / "album.pdf"
+    result = generate_album_pdf(col, cards_arg + cards_bra, out)
+    assert result.pages == 2
+
+
+def test_album_pdf_12_same_category_one_page(tmp_path):
+    col = _collection(cols=3, rows=4)
+    cards = [_ac("ARG", n, qty=1) for n in range(1, 13)]
+    result = generate_album_pdf(col, cards, tmp_path / "album.pdf")
+    assert result.pages == 1
+
+
+def test_album_pdf_13_same_category_two_pages(tmp_path):
+    col = _collection(cols=3, rows=4)
+    cards = [_ac("ARG", n, qty=1) for n in range(1, 14)]
+    result = generate_album_pdf(col, cards, tmp_path / "album.pdf")
+    assert result.pages == 2
+
+
+def test_album_pdf_stats_count_each_case(tmp_path):
+    col = _collection()
+    img1 = _make_jpeg(tmp_path / "img1.jpg")
+    img2 = _make_jpeg(tmp_path / "img2.jpg")
+    cards = [
+        _ac("ARG", 1, qty=1, image_path=img1),  # A
+        _ac("ARG", 2, qty=2, image_path=img2),  # A
+        _ac("ARG", 3, qty=1),  # B
+        _ac("ARG", 4, qty=0),  # C
+        _ac("ARG", 5, qty=0),  # C
+    ]
+    result = generate_album_pdf(col, cards, tmp_path / "album.pdf")
+    assert result.cards_with_image == 2
+    assert result.cards_celeste_placeholder == 1
+    assert result.cards_missing == 2
+
+
+def test_album_pdf_landscape_uses_landscape_pagesize(tmp_path):
+    """Si la colección es landscape, el PDF también lo es (ancho > alto)."""
+    col = _collection(orientation="landscape")
+    cards = [_ac("ARG", 1, qty=1)]
+    out = tmp_path / "album.pdf"
+    generate_album_pdf(col, cards, out)
+    reader = PdfReader(str(out))
+    page = reader.pages[0]
+    assert float(page.mediabox.width) > float(page.mediabox.height)
+
+
+def test_album_pdf_portrait_uses_portrait_pagesize(tmp_path):
+    col = _collection(orientation="portrait")
+    cards = [_ac("ARG", 1, qty=1)]
+    out = tmp_path / "album.pdf"
+    generate_album_pdf(col, cards, out)
+    reader = PdfReader(str(out))
+    page = reader.pages[0]
+    assert float(page.mediabox.height) > float(page.mediabox.width)
+
+
+def test_album_pdf_empty_input_creates_one_page(tmp_path):
+    col = _collection()
+    result = generate_album_pdf(col, [], tmp_path / "album.pdf")
+    assert result.pages == 1
+
+
+# ----------------------------------------------------------------------
+# Faltantes
+# ----------------------------------------------------------------------
+
+
+def test_missing_pdf_creates_file(tmp_path):
+    col = _collection()
+    cards = [_ac("ARG", n, qty=0) for n in range(1, 6)]
+    out = tmp_path / "missing.pdf"
+    generate_missing_pdf(col, cards, out)
+    assert out.exists()
+    assert out.stat().st_size > 1000
+
+
+def test_missing_pdf_only_includes_quantity_zero(tmp_path):
+    """Solo las cards con qty==0 entran en faltantes."""
+    col = _collection()
+    cards = [
+        _ac("ARG", 1, qty=0),
+        _ac("ARG", 2, qty=1),
+        _ac("ARG", 3, qty=0),
+        _ac("BRA", 1, qty=2),
+        _ac("BRA", 2, qty=0),
+    ]
+    out = tmp_path / "missing.pdf"
+    generate_missing_pdf(col, cards, out)
+    # Inspeccionamos la metadata embebida para verificar conteo
+    meta = validate_exchange_pdf_metadata(out)
+    assert meta is not None
+    # 3 faltantes: ARG-1, ARG-3, BRA-2
+    assert len(meta["cards"]) == 3
+    assert all(card["quantity"] == 0 for card in meta["cards"])
+
+
+# ----------------------------------------------------------------------
+# Repetidas
+# ----------------------------------------------------------------------
+
+
+def test_duplicates_pdf_only_includes_quantity_gt_1(tmp_path):
+    col = _collection()
+    cards = [
+        _ac("ARG", 1, qty=0),
+        _ac("ARG", 2, qty=1),
+        _ac("ARG", 3, qty=2),
+        _ac("ARG", 4, qty=3),
+        _ac("ARG", 5, qty=1),
+    ]
+    out = tmp_path / "duplicates.pdf"
+    generate_duplicates_pdf(col, cards, out)
+    meta = validate_exchange_pdf_metadata(out)
+    assert meta is not None
+    assert len(meta["cards"]) == 2
+    assert {c["card_number"] for c in meta["cards"]} == {3, 4}
+
+
+# ----------------------------------------------------------------------
+# Owned
+# ----------------------------------------------------------------------
+
+
+def test_owned_pdf_only_includes_quantity_gte_1(tmp_path):
+    col = _collection()
+    cards = [
+        _ac("ARG", 1, qty=0),
+        _ac("ARG", 2, qty=1),
+        _ac("ARG", 3, qty=5),
+    ]
+    out = tmp_path / "owned.pdf"
+    generate_owned_pdf(col, cards, out)
+    meta = validate_exchange_pdf_metadata(out)
+    assert meta is not None
+    assert {c["card_number"] for c in meta["cards"]} == {2, 3}
+
+
+# ----------------------------------------------------------------------
+# Metadata de intercambio
+# ----------------------------------------------------------------------
+
+
+def test_exchange_metadata_roundtrip(tmp_path):
+    """Generar PDF de faltantes → validate retorna metadata coherente."""
+    col = _collection(name="WC2026", cid=42)
+    cards = [_ac("ARG", 1, qty=0), _ac("BRA", 5, qty=0)]
+    out = tmp_path / "missing.pdf"
+    generate_missing_pdf(col, cards, out)
+
+    meta = validate_exchange_pdf_metadata(out)
+    assert meta is not None
+    assert meta["app"] == EXCHANGE_APP_NAME
+    assert meta["subtype"] == "missing"
+    assert meta["collection_id"] == 42
+    assert meta["collection_name"] == "WC2026"
+    assert "checksum" in meta
+    assert len(meta["checksum"]) == 16
+    assert "generated_at" in meta
+
+
+def test_exchange_metadata_tampered_checksum_fails(tmp_path):
+    """Si modificamos los Keywords del PDF, validate retorna None."""
+    col = _collection()
+    cards = [_ac("ARG", 1, qty=0)]
+    out = tmp_path / "missing.pdf"
+    generate_missing_pdf(col, cards, out)
+
+    # Reescribir el PDF con Keywords manipulados
+    reader = PdfReader(str(out))
+    writer = PdfWriter(clone_from=reader)
+    bad_data = json.loads(reader.metadata["/Keywords"])
+    bad_data["cards"].append({"code_id": "FAKE", "card_number": 999, "quantity": 0})
+    writer.add_metadata({"/Keywords": json.dumps(bad_data)})
+    tampered = tmp_path / "tampered.pdf"
+    with open(tampered, "wb") as fp:
+        writer.write(fp)
+
+    assert validate_exchange_pdf_metadata(tampered) is None
+
+
+def test_exchange_metadata_unrelated_pdf_returns_none(tmp_path):
+    """Un PDF cualquiera (sin metadata de CollectionsApp) → None."""
+    plain = tmp_path / "plain.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(width=200, height=200)
+    with open(plain, "wb") as fp:
+        writer.write(fp)
+    assert validate_exchange_pdf_metadata(plain) is None
+
+
+def test_build_exchange_metadata_includes_required_keys():
+    raw = _build_exchange_metadata(
+        subtype="missing",
+        collection_id=1,
+        collection_name="X",
+        cards=[{"code_id": "ARG", "card_number": 5, "quantity": 0}],
     )
-    assert len(calls) > 0
-    assert calls[-1][0] == calls[-1][1]  # último progreso = total
-
-
-def test_export_duplicates_list_when_none(memory_db, sample_collection, tmp_path):
-    """Lista de repetidas sin duplicados: muestra mensaje."""
-    out = tmp_path / "empty.txt"
-    PdfAlbumGenerator(memory_db, sample_collection).export_duplicates_list(out)
-    assert "No tenés repetidas" in out.read_text(encoding="utf-8")
-
-
-def test_slot_data_quantity_property(memory_db, album_setup):
-    gen = PdfAlbumGenerator(memory_db, album_setup)
-    slots = gen._build_slot_data()
-    by_key = {(s.card.code_id, s.card.card_number): s for s in slots}
-    assert by_key[("ARG", 1)].quantity == 3
-    assert by_key[("ARG", 1)].is_owned is True
-    assert by_key[("ARG", 3)].quantity == 0
-    assert by_key[("ARG", 3)].is_owned is False
+    data = json.loads(raw)
+    assert data["app"] == EXCHANGE_APP_NAME
+    assert data["subtype"] == "missing"
+    assert data["cards"][0]["card_number"] == 5
+    assert "checksum" in data
+    # Generated_at no participa en el checksum: dos invocaciones tienen el
+    # mismo checksum incluso en distinto microsegundo.
+    raw2 = _build_exchange_metadata(
+        subtype="missing",
+        collection_id=1,
+        collection_name="X",
+        cards=[{"code_id": "ARG", "card_number": 5, "quantity": 0}],
+    )
+    assert json.loads(raw2)["checksum"] == data["checksum"]

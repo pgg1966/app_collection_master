@@ -93,7 +93,7 @@ class ClientMainWindow(MainWindowBase):
         tabs = QTabWidget()
         self._card_loader = CardLoaderView(self.conn, active)
         self._inventory_view = InventoryView(self.conn, active)
-        self._album_view = AlbumView(self.conn, active)
+        self._album_view = AlbumView(self.conn, self.db_path, active)
         self._stats_view = StatsView(self.conn, active)
         self._reports_view = ReportsView(self.conn, active)
 

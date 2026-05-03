@@ -1,500 +1,624 @@
-"""Generador de álbum PDF imprimible (únicas + repetidas) usando escudos.
+"""Generadores de PDF: álbum visual + listas (faltantes/repetidas/lo que tengo).
 
-Cada slot del álbum muestra:
-  - Fondo coloreado (celeste si la card está, blanco hueso si falta).
-  - El ESCUDO del code_id (un PNG por código en `get_crest_path()`),
-    centrado y con transparencia.
-  - Línea separadora.
-  - "#NUMERO  NOMBRE_JUGADOR" debajo.
-  - Badge rojo con "x{N}" en el modo "duplicates".
+API funcional, sin estado: cada `generate_*_pdf(...)` recibe los datos ya
+resueltos (vía `AlbumService.build_album_cards`) y escribe el PDF en
+`output_path`.
 
-Layout A4 vertical:
-  - Margen exterior 10mm.
-  - Header oscuro de 12mm con nombre del grupo + número de página.
-  - Grilla 4×3 cards por defecto (configurable).
-  - Footer 6mm con colección + fecha.
+Layout del álbum visual:
+- A4 (portrait o landscape según `Collection.album_orientation`).
+- Grilla configurable por colección (`album_columns × album_rows`),
+  default 3×4 portrait = 12 cards/hoja A4.
+- Cada `code_id` arranca en página nueva con header oscuro de categoría.
+- Celdas:
+  * CASO A — con imagen (foto descargada por scraper Panini): se dibuja.
+  * CASO B — sin imagen, en inventario: rectángulo celeste + texto.
+  * CASO C — sin imagen, no en inventario: rectángulo blanco + borde gris.
+- Badge ×N en esquina superior derecha si `quantity > 1`.
 
-Cada nuevo `code_id` empieza en una página nueva.
-
-reportlab usa puntos como unidad nativa (1pt = 1/72 inch). Las constantes
-en mm se convierten via `* mm`.
+PDFs de lista (faltantes / repetidas / owned):
+- Texto puro Helvetica 9pt, 2 columnas por página.
+- Header global (nombre colección, tipo, fecha) en primera página.
+- Header de categoría cuando cambia `code_id`.
+- Metadata de intercambio embebida en `Subject` + `Keywords` con
+  checksum SHA256 truncado para detectar manipulaciones.
 """
 
+import hashlib
+import json
 import logging
-import sqlite3
-from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from itertools import groupby
 from pathlib import Path
 
-from reportlab.lib.colors import HexColor, white
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.units import mm
+from reportlab.lib.colors import Color, HexColor, white
+from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
-from collections_app.core.models import Card, Collection, InventoryItem
-from collections_app.core.repositories import (
-    CardsRepository,
-    CodesLinesRepository,
-    InventoryRepository,
-)
-from collections_app.core.utils.datetime_helpers import format_for_display, utc_now
-from collections_app.core.utils.paths import get_crest_path
+from collections_app.core.models import Card, Collection
 
 logger = logging.getLogger(__name__)
 
-# Geometría (todo en mm; se convierte a puntos al pasarlo a reportlab)
-PAGE_W_MM = 210
-PAGE_H_MM = 297
-MARGIN_MM = 10
-GAP_MM = 4
-HEADER_H_MM = 12
-LABEL_H_MM = 9
-FOOTER_H_MM = 6
-SEPARATOR_PAD_MM = 1.5
-
-# Card aspect ratio (Adrenalyn): 9 alto × 7 ancho.
-CARD_RATIO_H_OVER_W = 9 / 7
-
-# Fracción del slot que ocupa el escudo (alto)
-CREST_SCALE = 0.55
+# Geometría base
+MARGIN_PT = 28.35  # 10mm
+HEADER_PT = 22.68  # 8mm
+CELL_PADDING_PT = 2.84  # 1mm
+LIST_LINE_HEIGHT_PT = 13.0
+LIST_COL_GAP_PT = 14.0
+LIST_HEADER_FONT_SIZE = 14
+LIST_BODY_FONT_SIZE = 9
+ALBUM_CELL_NUM_FONT_SIZE = 9
+ALBUM_CELL_NAME_FONT_SIZE = 8
+ALBUM_CELL_CODE_FONT_SIZE = 7
+ALBUM_HEADER_FONT_SIZE = 10
+ALBUM_PAGE_NUM_FONT_SIZE = 7
 
 # Colores
-COLOR_HEADER_BG = HexColor("#2c3e50")
+COLOR_CELESTE = Color(174 / 255, 214 / 255, 241 / 255)
+COLOR_WHITE = Color(1.0, 1.0, 1.0)
+COLOR_GRAY_BORDER = Color(0.67, 0.67, 0.67)
+COLOR_HEADER_BG = Color(0.2, 0.2, 0.2)
 COLOR_HEADER_FG = white
-COLOR_OWNED_BG = HexColor("#b8d4e8")  # celeste
-COLOR_MISSING_BG = HexColor("#f5f5f0")  # blanco hueso
-COLOR_BADGE = HexColor("#c8102e")
+COLOR_DARK_TEXT = Color(0.15, 0.15, 0.15)
+COLOR_BADGE_BG = COLOR_CELESTE
 COLOR_BADGE_FG = white
-COLOR_BORDER = HexColor("#404040")
-COLOR_LABEL_FG = HexColor("#1f1f1f")
-COLOR_FOOTER_FG = HexColor("#606060")
-COLOR_SEPARATOR = HexColor("#909090")
+COLOR_PAGE_NUM_FG = Color(0.5, 0.5, 0.5)
+COLOR_LIST_SEPARATOR = HexColor("#d0d0d0")
+COLOR_LIST_CATEGORY_FG = Color(0.1, 0.1, 0.1)
 
-MAX_NAME_CHARS = 22
+# Constantes de metadata de intercambio
+EXCHANGE_APP_NAME = "CollectionsApp"
+EXCHANGE_PROTOCOL_VERSION = "1.0"
+EXCHANGE_CHECKSUM_LEN = 16
 
-
-@dataclass
-class AlbumConfig:
-    """Configuración del álbum a generar."""
-
-    cols: int = 4
-    rows: int = 3
-    show_owned: bool = True
-    show_missing: bool = True
-    title: str = ""
+MAX_NAME_CHARS = 20
 
 
-@dataclass
-class CardSlotData:
-    """Datos compactos por card que se dibujan en el PDF."""
+# ----------------------------------------------------------------------
+# Modelos de input / output
+# ----------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class AlbumCard:
+    """Una card del álbum con su contexto enriquecido para renderear.
+
+    `image_path` es `None` si la imagen no está descargada todavía. En ese
+    caso se usa placeholder celeste (si `quantity > 0`) o blanco.
+    """
 
     card: Card
-    inventory_item: InventoryItem | None
-    code_name: str
-    code_order: int
-    crest_path: Path | None
-
-    @property
-    def is_owned(self) -> bool:
-        return self.inventory_item is not None and self.inventory_item.quantity > 0
-
-    @property
-    def quantity(self) -> int:
-        return self.inventory_item.quantity if self.inventory_item is not None else 0
+    quantity: int
+    image_path: Path | None
+    requires_code: bool
+    code_name: str  # nombre humano del código (ej. "ARGENTINA")
 
 
 @dataclass
-class SlotsByGroup:
-    """Slots agrupados por code_id, listos para paginar."""
+class PdfGeneratorResult:
+    """Resumen del PDF generado."""
 
-    groups: list[tuple[str, str, list[CardSlotData]]] = field(default_factory=list)
-    """Lista de (code_id, code_name, slots)."""
+    pages: int = 0
+    cards_with_image: int = 0
+    cards_celeste_placeholder: int = 0
+    cards_missing: int = 0
+    output_path: Path = field(default_factory=Path)
 
 
-class PdfAlbumGenerator:
-    """Genera PDFs imprimibles del álbum (únicas / repetidas) y listas TXT."""
+# ----------------------------------------------------------------------
+# Helpers de label / chunks
+# ----------------------------------------------------------------------
 
-    def __init__(
-        self,
-        conn: sqlite3.Connection,
-        collection: Collection,
-        config: AlbumConfig | None = None,
-    ) -> None:
-        self.conn = conn
-        self.collection = collection
-        self.config = config or AlbumConfig()
-        self._crest_cache: dict[str, ImageReader | None] = {}
 
-    # ------------------------------------------------------------------
-    # API pública
-    # ------------------------------------------------------------------
+def format_label(card_number: int, code_id: str, requires_code: bool) -> str:
+    """`requires_code=True` → 'ARG-5'; sino → '5'."""
+    if requires_code:
+        return f"{code_id}-{card_number}"
+    return str(card_number)
 
-    def generate_unique_album(
-        self,
-        output_path: Path,
-        on_progress: Callable[[int, int], None] | None = None,
-    ) -> Path:
-        """Genera el álbum principal (todas las cards filtradas por config)."""
-        slots = self._build_slot_data()
-        slots = self._filter_by_config(slots)
-        groups = self._group_by_code(slots)
-        self._render(output_path, groups, on_progress, mode="unique")
-        return output_path
 
-    def generate_duplicates_album(
-        self,
-        output_path: Path,
-        on_progress: Callable[[int, int], None] | None = None,
-    ) -> Path:
-        """Genera el álbum de repetidas (solo qty > 1) con badge xN."""
-        all_slots = self._build_slot_data()
-        dup_slots = [s for s in all_slots if s.quantity > 1]
-        groups = self._group_by_code(dup_slots)
-        self._render(
-            output_path,
-            groups,
-            on_progress,
-            mode="duplicates",
-            empty_message="No tenés repetidas en esta colección.",
-        )
-        return output_path
+def _chunks(items: list[AlbumCard], size: int) -> list[list[AlbumCard]]:
+    """Parte `items` en grupos de `size`. El último puede ser más chico."""
+    if size <= 0:
+        return []
+    return [items[i : i + size] for i in range(0, len(items), size)]
 
-    def export_missing_list(self, output_path: Path) -> Path:
-        """Exporta TXT de faltantes agrupado por código."""
-        slots = self._build_slot_data()
-        missing = [s for s in slots if not s.is_owned]
-        lines = self._format_list_header("FALTANTES", len(missing), len(slots))
-        for code_id, code_name, group_slots in self._group_by_code(missing).groups:
-            lines.append("")
-            lines.append(f"{code_name} ({code_id})")
-            for slot in group_slots:
-                name = self._truncate(slot.card.card_name, 30)
-                lines.append(f"  #{slot.card.card_number:<3} {name}")
-        output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        return output_path
 
-    def export_duplicates_list(self, output_path: Path) -> Path:
-        """Exporta TXT de repetidas con cantidad de copias extra."""
-        slots = self._build_slot_data()
-        dups = [s for s in slots if s.quantity > 1]
-        total_extra = sum(s.quantity - 1 for s in dups)
-        lines = self._format_list_header("REPETIDAS", total_extra, kind="copias extra")
-        if not dups:
-            lines.append("")
-            lines.append("No tenés repetidas en esta colección.")
-        else:
-            for code_id, code_name, group_slots in self._group_by_code(dups).groups:
-                lines.append("")
-                lines.append(f"{code_name} ({code_id})")
-                for slot in group_slots:
-                    name = self._truncate(slot.card.card_name, 30)
-                    extra = slot.quantity - 1
-                    pad_dots = max(1, 35 - len(name) - 5)
-                    lines.append(
-                        f"  #{slot.card.card_number:<3} {name} " f"{'.' * pad_dots} ×{extra}"
-                    )
-        output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        return output_path
+def _truncate(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 1] + "…"
 
-    # ------------------------------------------------------------------
-    # Carga de datos
-    # ------------------------------------------------------------------
 
-    def _build_slot_data(self) -> list[CardSlotData]:
-        """Carga catálogo + inventory + lookup de escudo y code_name."""
-        assert self.collection.collection_id is not None
-        cid: int = self.collection.collection_id
+# ----------------------------------------------------------------------
+# Metadata de intercambio
+# ----------------------------------------------------------------------
 
-        cards = CardsRepository(self.conn).list_by_collection(cid)
-        inv = {
-            (i.code_id, i.card_number): i
-            for i in InventoryRepository(self.conn).list_by_collection(cid)
-        }
-        lines = CodesLinesRepository(self.conn).list_by_header(self.collection.code_header_id)
-        code_meta = {line.code_id: (line.code_name, line.code_order) for line in lines}
 
-        slots: list[CardSlotData] = []
-        for card in cards:
-            code_name, code_order = code_meta.get(card.code_id, (card.code_id, 0))
-            crest_path = get_crest_path(card.code_id)
-            slot = CardSlotData(
-                card=card,
-                inventory_item=inv.get((card.code_id, card.card_number)),
-                code_name=code_name,
-                code_order=code_order,
-                crest_path=crest_path if crest_path.exists() else None,
-            )
-            slots.append(slot)
-        slots.sort(key=lambda s: (s.code_order, s.card.code_id, s.card.card_number))
-        return slots
+def _build_exchange_metadata(
+    subtype: str,
+    collection_id: int,
+    collection_name: str,
+    cards: list[dict[str, object]],
+) -> str:
+    """Construye el JSON de metadata embebida en PDFs de lista.
 
-    def _filter_by_config(self, slots: list[CardSlotData]) -> list[CardSlotData]:
-        result = list(slots)
-        if not self.config.show_missing:
-            result = [s for s in result if s.is_owned]
-        if not self.config.show_owned:
-            result = [s for s in result if not s.is_owned]
-        return result
+    El checksum es un SHA256 truncado a `EXCHANGE_CHECKSUM_LEN` chars,
+    calculado sobre los campos estables (excluyendo `generated_at` para
+    que el PDF sea reproducible bit-a-bit dado el mismo input). La idea
+    es que la futura función "Intercambio" pueda detectar PDFs manipulados.
+    """
+    payload: dict[str, object] = {
+        "app": EXCHANGE_APP_NAME,
+        "version": EXCHANGE_PROTOCOL_VERSION,
+        "type": "exchange",
+        "subtype": subtype,
+        "collection_id": collection_id,
+        "collection_name": collection_name,
+        "generated_at": datetime.now(UTC).isoformat(),
+        "cards": cards,
+    }
+    base = json.dumps(
+        {k: v for k, v in payload.items() if k != "generated_at"},
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+    payload["checksum"] = hashlib.sha256(base.encode("utf-8")).hexdigest()[:EXCHANGE_CHECKSUM_LEN]
+    return json.dumps(payload, ensure_ascii=False)
 
-    def _group_by_code(self, slots: list[CardSlotData]) -> SlotsByGroup:
-        result = SlotsByGroup()
-        ordered = sorted(slots, key=lambda s: (s.code_order, s.card.code_id))
-        for code_id, group in groupby(ordered, key=lambda s: s.card.code_id):
-            group_list = list(group)
-            code_name = group_list[0].code_name if group_list else code_id
-            result.groups.append((code_id, code_name, group_list))
-        return result
 
-    # ------------------------------------------------------------------
-    # Render
-    # ------------------------------------------------------------------
+def validate_exchange_pdf_metadata(pdf_path: Path) -> dict[str, object] | None:
+    """Lee la metadata de intercambio de un PDF generado por CollectionsApp.
 
-    def _render(
-        self,
-        output_path: Path,
-        groups: SlotsByGroup,
-        on_progress: Callable[[int, int], None] | None,
-        mode: str,
-        empty_message: str | None = None,
-    ) -> None:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        c = canvas.Canvas(str(output_path), pagesize=A4)
-        page_w_pt, page_h_pt = A4
+    Retorna el dict si el checksum es válido, `None` si:
+    - no es un PDF de CollectionsApp (no tiene la metadata o `app != ...`),
+    - el JSON está corrupto,
+    - el checksum no matchea (PDF manipulado).
+    """
+    try:
+        from pypdf import PdfReader
 
-        if not groups.groups:
-            self._draw_empty_page(
-                c, page_w_pt, page_h_pt, empty_message or "No hay cards para mostrar."
-            )
-            c.showPage()
-            c.save()
-            return
+        reader = PdfReader(str(pdf_path))
+        if reader.metadata is None:
+            return None
+        keywords = reader.metadata.get("/Keywords", "")
+        if not keywords:
+            return None
+        data = json.loads(keywords)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("validate_exchange_pdf_metadata: parsing falló: %s", exc)
+        return None
 
-        total_slots = sum(len(slots) for _, _, slots in groups.groups)
-        processed = 0
-        cols = self.config.cols
-        rows = self.config.rows
-        slots_per_page = cols * rows
+    if not isinstance(data, dict) or data.get("app") != EXCHANGE_APP_NAME:
+        return None
 
-        margin_pt = MARGIN_MM * mm
-        gap_pt = GAP_MM * mm
-        header_h_pt = HEADER_H_MM * mm
-        label_h_pt = LABEL_H_MM * mm
-        footer_h_pt = FOOTER_H_MM * mm
+    stored_checksum = data.get("checksum")
+    if not isinstance(stored_checksum, str):
+        return None
 
-        available_w = page_w_pt - 2 * margin_pt - (cols - 1) * gap_pt
-        card_w = available_w / cols
-        card_h = card_w * CARD_RATIO_H_OVER_W
+    base = json.dumps(
+        {k: v for k, v in data.items() if k not in ("checksum", "generated_at")},
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+    computed = hashlib.sha256(base.encode("utf-8")).hexdigest()[:EXCHANGE_CHECKSUM_LEN]
+    if computed != stored_checksum:
+        return None
+    return data
 
-        available_h = (
-            page_h_pt
-            - 2 * margin_pt
-            - header_h_pt
-            - footer_h_pt
-            - rows * label_h_pt
-            - (rows - 1) * gap_pt
-        )
-        max_card_h = available_h / rows
-        if card_h > max_card_h:
-            card_h = max_card_h
-            card_w = card_h / CARD_RATIO_H_OVER_W
 
-        page_num = 0
-        for _, code_name, group_slots in groups.groups:
-            slot_on_page = slots_per_page  # fuerza nueva página al inicio del grupo
-            for slot in group_slots:
-                if slot_on_page >= slots_per_page:
-                    if processed > 0:
-                        c.showPage()
-                    page_num += 1
-                    self._draw_group_header(
-                        c, code_name, page_num, page_w_pt, page_h_pt, header_h_pt
-                    )
-                    self._draw_footer(c, page_w_pt, footer_h_pt)
-                    slot_on_page = 0
+# ----------------------------------------------------------------------
+# Render de álbum visual
+# ----------------------------------------------------------------------
 
-                col = slot_on_page % cols
-                row = slot_on_page // cols
-                x = margin_pt + col * (card_w + gap_pt)
-                y_top = (
-                    page_h_pt
-                    - margin_pt
-                    - header_h_pt
-                    - (row + 1) * card_h
-                    - row * (label_h_pt + gap_pt)
-                )
 
-                badge = mode == "duplicates"
-                self._draw_card_slot(
-                    c,
-                    x,
-                    y_top,
-                    card_w,
-                    card_h,
-                    label_h_pt,
-                    slot,
-                    show_badge=badge,
-                    badge_count=max(0, slot.quantity - 1),
-                )
-                slot_on_page += 1
-                processed += 1
-                if on_progress is not None:
-                    on_progress(processed, total_slots)
+def generate_album_pdf(
+    collection: Collection,
+    album_cards: list[AlbumCard],
+    output_path: Path,
+) -> PdfGeneratorResult:
+    """Genera el PDF álbum visual (todas las cards, foto o placeholder).
+
+    Cada `code_id` empieza en página nueva con header oscuro. Layout
+    `album_columns × album_rows` desde `collection`.
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    pagesize = landscape(A4) if collection.album_orientation == "landscape" else A4
+    page_w, page_h = pagesize
+    cols = max(1, collection.album_columns)
+    rows = max(1, collection.album_rows)
+    cell_w, cell_h = _cell_geometry(page_w, page_h, cols, rows)
+
+    c = canvas.Canvas(str(output_path), pagesize=pagesize)
+    result = PdfGeneratorResult(output_path=output_path)
+
+    if not album_cards:
+        c.setFont("Helvetica", 14)
+        c.drawCentredString(page_w / 2, page_h / 2, "(sin cards para mostrar)")
         c.showPage()
         c.save()
-
-    def _draw_empty_page(
-        self, c: canvas.Canvas, page_w: float, page_h: float, message: str
-    ) -> None:
-        c.setFont("Helvetica", 14)
-        c.drawCentredString(page_w / 2, page_h / 2, message)
-
-    def _draw_group_header(
-        self,
-        c: canvas.Canvas,
-        group_name: str,
-        page_num: int,
-        page_w: float,
-        page_h: float,
-        header_h: float,
-    ) -> None:
-        margin_pt = MARGIN_MM * mm
-        x0 = margin_pt
-        y0 = page_h - margin_pt - header_h
-        bar_w = page_w - 2 * margin_pt
-        c.setFillColor(COLOR_HEADER_BG)
-        c.rect(x0, y0, bar_w, header_h, stroke=0, fill=1)
-        c.setFillColor(COLOR_HEADER_FG)
-        c.setFont("Helvetica-Bold", 12)
-        c.drawString(x0 + 4, y0 + header_h / 2 - 4, group_name)
-        c.setFont("Helvetica", 9)
-        c.drawRightString(x0 + bar_w - 4, y0 + header_h / 2 - 3, f"Pág. {page_num}")
-
-    def _draw_footer(self, c: canvas.Canvas, page_w: float, footer_h: float) -> None:
-        margin_pt = MARGIN_MM * mm
-        c.setFillColor(COLOR_FOOTER_FG)
-        c.setFont("Helvetica", 7)
-        text = self.collection.collection_name + "  ·  " + format_for_display(utc_now())
-        c.drawCentredString(page_w / 2, margin_pt + footer_h / 3, text)
-
-    def _draw_card_slot(  # noqa: PLR0913 — geometría por argumentos
-        self,
-        c: canvas.Canvas,
-        x: float,
-        y: float,
-        w: float,
-        h: float,
-        label_h: float,
-        slot: CardSlotData,
-        show_badge: bool,
-        badge_count: int,
-    ) -> None:
-        # Fondo según estado
-        bg_color = COLOR_OWNED_BG if slot.is_owned else COLOR_MISSING_BG
-        c.setFillColor(bg_color)
-        c.rect(x, y, w, h, stroke=0, fill=1)
-
-        # Escudo (PNG con alpha) centrado
-        crest = self._get_crest_image(slot.card.code_id)
-        if crest is not None:
-            crest_h = h * CREST_SCALE
-            crest_w = crest_h
-            cx = x + (w - crest_w) / 2
-            cy = y + (h - crest_h) / 2 + label_h / 4  # leve offset hacia arriba
-            try:
-                c.drawImage(
-                    crest,
-                    cx,
-                    cy,
-                    width=crest_w,
-                    height=crest_h,
-                    preserveAspectRatio=True,
-                    anchor="c",
-                    mask="auto",
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("No se pudo dibujar escudo de %s: %s", slot.card.code_id, exc)
-
-        # Línea separadora horizontal a 1/4 desde abajo
-        sep_y = y + h * 0.22
-        c.setStrokeColor(COLOR_SEPARATOR)
-        c.setLineWidth(0.5)
-        c.line(x + SEPARATOR_PAD_MM * mm, sep_y, x + w - SEPARATOR_PAD_MM * mm, sep_y)
-
-        # Texto: #NUM NOMBRE bajo el separador
-        c.setFillColor(COLOR_LABEL_FG)
-        c.setFont("Helvetica-Bold", 7.5)
-        label_text = (
-            f"#{slot.card.card_number} {self._truncate(slot.card.card_name, MAX_NAME_CHARS)}"
-        )
-        c.drawCentredString(x + w / 2, y + h * 0.10, label_text)
-
-        # Marco
-        c.setStrokeColor(COLOR_BORDER)
-        c.setLineWidth(0.5)
-        c.rect(x, y, w, h, stroke=1, fill=0)
-
-        # Label adicional debajo del slot (opcional, permite respiración)
-        # — Mantenemos el label_h pero vacío para consistencia geométrica
-        del label_h  # uso reservado para layout vertical, no dibujamos texto extra
-
-        # Badge en esquina superior derecha (modo duplicates)
-        if show_badge and badge_count > 0:
-            badge_r = min(w, h) * 0.10
-            cx_b = x + w - badge_r - 1
-            cy_b = y + h - badge_r - 1
-            c.setFillColor(COLOR_BADGE)
-            c.circle(cx_b, cy_b, badge_r, stroke=0, fill=1)
-            c.setFillColor(COLOR_BADGE_FG)
-            c.setFont("Helvetica-Bold", 7)
-            c.drawCentredString(cx_b, cy_b - 2, f"x{badge_count}")
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-
-    def _get_crest_image(self, code_id: str) -> ImageReader | None:
-        """Carga (con cache por instancia) el escudo para un code_id."""
-        if code_id in self._crest_cache:
-            return self._crest_cache[code_id]
-        path = get_crest_path(code_id)
-        result: ImageReader | None
-        if path.exists():
-            try:
-                result = ImageReader(str(path))
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("ImageReader falló para %s: %s", path, exc)
-                result = None
-        else:
-            result = None
-        self._crest_cache[code_id] = result
+        result.pages = 1
         return result
 
-    @staticmethod
-    def _truncate(text: str, max_chars: int) -> str:
-        text = text.upper()
-        if len(text) <= max_chars:
-            return text
-        return text[: max_chars - 1] + "…"
+    # Agrupar por code_id manteniendo el orden de entrada.
+    grouped = groupby(album_cards, key=lambda ac: ac.card.code_id)
+    page_num = 0
+    for _, items_iter in grouped:
+        items = list(items_iter)
+        code_name = items[0].code_name
+        for chunk in _chunks(items, cols * rows):
+            page_num += 1
+            _draw_album_header(c, code_name, page_w, page_h)
+            _draw_page_number(c, page_num, page_w)
+            for idx, ac in enumerate(chunk):
+                col_i = idx % cols
+                row_i = idx // cols
+                x, y = _cell_origin(col_i, row_i, cell_w, cell_h, page_h)
+                _draw_album_cell(c, ac, x, y, cell_w, cell_h, result)
+            c.showPage()
 
-    def _format_list_header(
-        self,
-        title: str,
-        count: int,
-        total: int | None = None,
-        kind: str = "faltantes",
-    ) -> list[str]:
-        sep = "═" * 35
-        ts = format_for_display(utc_now(), with_seconds=True)
-        if total is not None:
-            count_line = f"Total {kind}: {count} / {total}"
+    c.save()
+    result.pages = page_num
+    return result
+
+
+def _cell_geometry(page_w: float, page_h: float, cols: int, rows: int) -> tuple[float, float]:
+    """Ancho/alto de cada celda dado el espacio útil de la página."""
+    usable_w = page_w - 2 * MARGIN_PT
+    usable_h = page_h - 2 * MARGIN_PT - HEADER_PT
+    return usable_w / cols, usable_h / rows
+
+
+def _cell_origin(
+    col_i: int, row_i: int, cell_w: float, cell_h: float, page_h: float
+) -> tuple[float, float]:
+    """Esquina inferior-izquierda de una celda en coords reportlab."""
+    x = MARGIN_PT + col_i * cell_w
+    y = page_h - MARGIN_PT - HEADER_PT - (row_i + 1) * cell_h
+    return x, y
+
+
+def _draw_album_header(c: canvas.Canvas, text: str, page_w: float, page_h: float) -> None:
+    x = MARGIN_PT
+    y = page_h - MARGIN_PT - HEADER_PT
+    bar_w = page_w - 2 * MARGIN_PT
+    c.setFillColor(COLOR_HEADER_BG)
+    c.rect(x, y, bar_w, HEADER_PT, stroke=0, fill=1)
+    c.setFillColor(COLOR_HEADER_FG)
+    c.setFont("Helvetica-Bold", ALBUM_HEADER_FONT_SIZE)
+    c.drawCentredString(page_w / 2, y + HEADER_PT / 2 - 4, text.upper())
+
+
+def _draw_page_number(c: canvas.Canvas, page_num: int, page_w: float) -> None:
+    c.setFillColor(COLOR_PAGE_NUM_FG)
+    c.setFont("Helvetica", ALBUM_PAGE_NUM_FONT_SIZE)
+    c.drawCentredString(page_w / 2, MARGIN_PT / 2, str(page_num))
+
+
+def _draw_album_cell(
+    c: canvas.Canvas,
+    ac: AlbumCard,
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+    result: PdfGeneratorResult,
+) -> None:
+    """Dibuja una celda según el caso (A/B/C) y actualiza contadores."""
+    inner_x = x + CELL_PADDING_PT
+    inner_y = y + CELL_PADDING_PT
+    inner_w = w - 2 * CELL_PADDING_PT
+    inner_h = h - 2 * CELL_PADDING_PT
+
+    if ac.image_path is not None and ac.image_path.exists():
+        # CASO A: imagen real
+        try:
+            img = ImageReader(str(ac.image_path))
+            c.drawImage(
+                img,
+                inner_x,
+                inner_y,
+                width=inner_w,
+                height=inner_h,
+                preserveAspectRatio=True,
+                anchor="c",
+                mask="auto",
+            )
+            result.cards_with_image += 1
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Falló drawImage para card %s: %s", ac.card.card_number, exc)
+            _draw_placeholder_cell(c, ac, inner_x, inner_y, inner_w, inner_h)
+            if ac.quantity > 0:
+                result.cards_celeste_placeholder += 1
+            else:
+                result.cards_missing += 1
+    elif ac.quantity > 0:
+        # CASO B: tengo la card pero sin imagen
+        _draw_placeholder_cell(c, ac, inner_x, inner_y, inner_w, inner_h)
+        result.cards_celeste_placeholder += 1
+    else:
+        # CASO C: no la tengo
+        _draw_placeholder_cell(c, ac, inner_x, inner_y, inner_w, inner_h)
+        result.cards_missing += 1
+
+    if ac.quantity > 1:
+        _draw_quantity_badge(c, ac.quantity, x + w, y + h)
+
+
+def _draw_placeholder_cell(
+    c: canvas.Canvas, ac: AlbumCard, x: float, y: float, w: float, h: float
+) -> None:
+    """Rectángulo celeste (en inventario) o blanco con borde (no inventario)."""
+    if ac.quantity > 0:
+        c.setFillColor(COLOR_CELESTE)
+        c.rect(x, y, w, h, stroke=0, fill=1)
+    else:
+        c.setFillColor(COLOR_WHITE)
+        c.setStrokeColor(COLOR_GRAY_BORDER)
+        c.setLineWidth(1)
+        c.rect(x, y, w, h, stroke=1, fill=1)
+
+    # Texto centrado: número/código-número (bold), nombre, code_id
+    cx = x + w / 2
+    cy = y + h / 2
+    label = format_label(ac.card.card_number, ac.card.code_id, ac.requires_code)
+    name = _truncate(ac.card.card_name, MAX_NAME_CHARS)
+
+    c.setFillColor(COLOR_DARK_TEXT)
+    c.setFont("Helvetica-Bold", ALBUM_CELL_NUM_FONT_SIZE)
+    c.drawCentredString(cx, cy + 8, label)
+    c.setFont("Helvetica", ALBUM_CELL_NAME_FONT_SIZE)
+    c.drawCentredString(cx, cy - 2, name)
+    c.setFont("Helvetica", ALBUM_CELL_CODE_FONT_SIZE)
+    c.drawCentredString(cx, cy - 12, ac.card.code_id)
+
+
+def _draw_quantity_badge(
+    c: canvas.Canvas, quantity: int, top_right_x: float, top_right_y: float
+) -> None:
+    """Círculo celeste con número blanco en esquina superior derecha."""
+    radius = 7.0
+    cx = top_right_x - radius - 1
+    cy = top_right_y - radius - 1
+    c.setFillColor(COLOR_BADGE_BG)
+    c.circle(cx, cy, radius, stroke=0, fill=1)
+    c.setFillColor(COLOR_BADGE_FG)
+    c.setFont("Helvetica-Bold", 6)
+    c.drawCentredString(cx, cy - 2, f"×{quantity}")
+
+
+# ----------------------------------------------------------------------
+# Render de PDFs de lista (faltantes / repetidas / owned)
+# ----------------------------------------------------------------------
+
+
+def generate_missing_pdf(
+    collection: Collection,
+    album_cards: list[AlbumCard],
+    output_path: Path,
+) -> PdfGeneratorResult:
+    """PDF de cards que faltan (`quantity == 0`)."""
+    missing = [ac for ac in album_cards if ac.quantity == 0]
+    return _generate_list_pdf(
+        collection, missing, output_path, subtype="missing", title="Faltantes"
+    )
+
+
+def generate_duplicates_pdf(
+    collection: Collection,
+    album_cards: list[AlbumCard],
+    output_path: Path,
+) -> PdfGeneratorResult:
+    """PDF de cards repetidas (`quantity > 1`) con columna ×N."""
+    dups = [ac for ac in album_cards if ac.quantity > 1]
+    return _generate_list_pdf(
+        collection,
+        dups,
+        output_path,
+        subtype="duplicates",
+        title="Repetidas",
+        show_quantity=True,
+    )
+
+
+def generate_owned_pdf(
+    collection: Collection,
+    album_cards: list[AlbumCard],
+    output_path: Path,
+) -> PdfGeneratorResult:
+    """PDF de cards en posesión (`quantity >= 1`)."""
+    owned = [ac for ac in album_cards if ac.quantity >= 1]
+    return _generate_list_pdf(collection, owned, output_path, subtype="owned", title="Lo que tengo")
+
+
+def _generate_list_pdf(
+    collection: Collection,
+    items: list[AlbumCard],
+    output_path: Path,
+    subtype: str,
+    title: str,
+    show_quantity: bool = False,
+) -> PdfGeneratorResult:
+    """Helper: layout 2 columnas con header global + categorías + items."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    page_w, page_h = A4
+    c = canvas.Canvas(str(output_path), pagesize=A4)
+
+    # Metadata embebida (futura función intercambio)
+    assert collection.collection_id is not None
+    cards_meta: list[dict[str, object]] = [
+        {
+            "code_id": ac.card.code_id,
+            "card_number": ac.card.card_number,
+            "quantity": ac.quantity,
+        }
+        for ac in items
+    ]
+    metadata_json = _build_exchange_metadata(
+        subtype=subtype,
+        collection_id=collection.collection_id,
+        collection_name=collection.collection_name,
+        cards=cards_meta,
+    )
+    c.setSubject("CollectionsApp Exchange Data")
+    c.setKeywords(metadata_json)
+    c.setCreator(EXCHANGE_APP_NAME)
+
+    # Layout
+    col_w = (page_w - 2 * MARGIN_PT - LIST_COL_GAP_PT) / 2
+    column_xs = (MARGIN_PT, MARGIN_PT + col_w + LIST_COL_GAP_PT)
+
+    # Cursor: y arranca debajo del header global
+    y = page_h - MARGIN_PT
+    y = _draw_list_global_header(c, collection, title, items, page_w, y)
+    y_top_after_global = y  # primera columna arranca acá
+    col_idx = 0
+    page_num = 1
+    result = PdfGeneratorResult(output_path=output_path, pages=1)
+
+    if not items:
+        c.setFont("Helvetica", 11)
+        c.drawCentredString(page_w / 2, page_h / 2, f"(no hay {title.lower()})")
+        c.showPage()
+        c.save()
+        return result
+
+    def new_column() -> None:
+        nonlocal col_idx, y, page_num
+        col_idx += 1
+        if col_idx >= 2:
+            c.showPage()
+            page_num += 1
+            result.pages = page_num
+            col_idx = 0
+            y = page_h - MARGIN_PT
         else:
-            count_line = f"Total {kind}: {count}"
-        return [
-            sep,
-            f"{title} — {self.collection.collection_name}",
-            f"Generado: {ts}",
-            count_line,
-            sep,
-        ]
+            y = y_top_after_global
+
+    def ensure_room(needed: float) -> None:
+        nonlocal y
+        if y - needed < MARGIN_PT:
+            new_column()
+
+    # Iterar agrupado por code_id; al cambiar, escribir header de categoría.
+    last_code: str | None = None
+    for ac in items:
+        if ac.card.code_id != last_code:
+            ensure_room(LIST_LINE_HEIGHT_PT * 2)
+            _draw_category_header(c, ac.card.code_id, ac.code_name, column_xs[col_idx], y, col_w)
+            y -= LIST_LINE_HEIGHT_PT * 1.4
+            last_code = ac.card.code_id
+
+        ensure_room(LIST_LINE_HEIGHT_PT)
+        _draw_list_item(
+            c,
+            ac,
+            column_xs[col_idx],
+            y,
+            col_w,
+            show_quantity=show_quantity,
+        )
+        y -= LIST_LINE_HEIGHT_PT
+
+        # Contadores
+        if ac.quantity == 0:
+            result.cards_missing += 1
+        elif ac.image_path is not None and ac.image_path.exists():
+            result.cards_with_image += 1
+        else:
+            result.cards_celeste_placeholder += 1
+
+    # Total al pie
+    ensure_room(LIST_LINE_HEIGHT_PT * 3)
+    _draw_list_total(c, items, title, column_xs[col_idx], y, col_w, show_quantity)
+
+    c.showPage()
+    c.save()
+    return result
+
+
+def _draw_list_global_header(
+    c: canvas.Canvas,
+    collection: Collection,
+    title: str,
+    items: list[AlbumCard],
+    page_w: float,
+    y_top: float,
+) -> float:
+    del items  # firmado por simetría con futuras variantes
+    x_left = MARGIN_PT
+    x_right = page_w - MARGIN_PT
+    y = y_top - LIST_HEADER_FONT_SIZE
+    c.setFillColor(COLOR_DARK_TEXT)
+    c.setFont("Helvetica-Bold", LIST_HEADER_FONT_SIZE)
+    c.drawString(x_left, y, collection.collection_name)
+    y -= LIST_LINE_HEIGHT_PT
+    c.setFont("Helvetica", LIST_BODY_FONT_SIZE)
+    c.drawString(x_left, y, title)
+    y -= LIST_LINE_HEIGHT_PT * 0.85
+    c.setFont("Helvetica", 8)
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+    c.drawString(x_left, y, f"Generado: {ts}")
+    # separador horizontal
+    y -= 6
+    c.setStrokeColor(COLOR_LIST_SEPARATOR)
+    c.setLineWidth(0.5)
+    c.line(x_left, y, x_right, y)
+    y -= LIST_LINE_HEIGHT_PT
+    return y
+
+
+def _draw_category_header(
+    c: canvas.Canvas, code_id: str, code_name: str, x: float, y: float, col_w: float
+) -> None:
+    c.setFillColor(COLOR_LIST_CATEGORY_FG)
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(x, y, f"▶ {code_name.upper()} ({code_id})")
+    c.setStrokeColor(COLOR_LIST_SEPARATOR)
+    c.setLineWidth(0.4)
+    c.line(x, y - 2, x + col_w, y - 2)
+
+
+def _draw_list_item(
+    c: canvas.Canvas,
+    ac: AlbumCard,
+    x: float,
+    y: float,
+    col_w: float,
+    show_quantity: bool,
+) -> None:
+    label = format_label(ac.card.card_number, ac.card.code_id, ac.requires_code)
+    name = _truncate(ac.card.card_name, 32)
+    c.setFillColor(COLOR_DARK_TEXT)
+    c.setFont("Helvetica", LIST_BODY_FONT_SIZE)
+    # Columna izquierda: label en ancho fijo de ~40pt, alineado a la derecha.
+    label_x = x + 40
+    c.drawRightString(label_x, y, label)
+    c.drawString(label_x + 6, y, name)
+    if show_quantity:
+        c.drawRightString(x + col_w, y, f"×{ac.quantity}")
+
+
+def _draw_list_total(
+    c: canvas.Canvas,
+    items: list[AlbumCard],
+    title: str,
+    x: float,
+    y: float,
+    col_w: float,
+    show_quantity: bool,
+) -> None:
+    y -= LIST_LINE_HEIGHT_PT
+    c.setStrokeColor(COLOR_LIST_SEPARATOR)
+    c.setLineWidth(0.5)
+    c.line(x, y, x + col_w, y)
+    y -= LIST_LINE_HEIGHT_PT
+    c.setFillColor(COLOR_DARK_TEXT)
+    c.setFont("Helvetica-Bold", LIST_BODY_FONT_SIZE)
+    n = len(items)
+    if show_quantity:
+        units = sum(ac.quantity for ac in items)
+        c.drawString(x, y, f"Total {title.lower()}: {n}, total unidades: {units}")
+    else:
+        c.drawString(x, y, f"Total {title.lower()}: {n}")
