@@ -29,6 +29,13 @@ from collections_app.core.services.settings_service import (
     SETTING_KEY_ACTIVE_COLLECTION,
     SettingsService,
 )
+from collections_app.core.services.update_service import (
+    GitHubUpdateSource,
+    ServerUpdateSource,
+    UpdateInfo,
+    UpdateService,
+    UpdateSource,
+)
 
 __all__ = [
     "SETTING_KEY_ACTIVE_COLLECTION",
@@ -37,14 +44,19 @@ __all__ = [
     "AlbumService",
     "AmbiguousCardError",
     "CollectionsService",
+    "GitHubUpdateSource",
     "InventoryService",
     "LicenseService",
     "LicenseValidator",
     "LocalHashLicenseValidator",
     "PdfGeneratorResult",
     "ReportsService",
+    "ServerUpdateSource",
     "SettingsService",
     "TransactionWithCard",
+    "UpdateInfo",
+    "UpdateService",
+    "UpdateSource",
     "generate_album_pdf",
     "generate_duplicates_pdf",
     "generate_missing_pdf",
