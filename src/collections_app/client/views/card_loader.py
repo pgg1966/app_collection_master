@@ -30,6 +30,7 @@ from PySide6.QtGui import QIntValidator, QKeyEvent
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCompleter,
+    QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -46,7 +47,13 @@ from collections_app.core.repositories import (
     InventoryRepository,
 )
 from collections_app.core.services import AmbiguousCardError, InventoryService
-from collections_app.shared_ui.theme import READONLY_BG, Spacing, StatusColor
+from collections_app.shared_ui.theme import (
+    INPUT_BG_ALTA,
+    INPUT_BG_BAJA,
+    READONLY_BG,
+    Spacing,
+    StatusColor,
+)
 from collections_app.shared_ui.widgets.enter_navigator import EnterNavigator
 
 logger = logging.getLogger(__name__)
@@ -156,7 +163,7 @@ class CardLoaderView(QWidget):
 
         row = 0
         grid.addWidget(QLabel(self.tr("Operación") + ":"), row, 0)
-        grid.addLayout(self._build_operation_row(), row, 1)
+        grid.addWidget(self._build_operation_row(), row, 1)
         row += 1
 
         # Campo de código: QLineEdit con QCompleter (autocompletado por
@@ -229,19 +236,35 @@ class CardLoaderView(QWidget):
         outer.addWidget(self._status_label, alignment=Qt.AlignmentFlag.AlignHCenter)
         outer.addStretch()
 
-    def _build_operation_row(self) -> QHBoxLayout:
-        row = QHBoxLayout()
-        row.setContentsMargins(0, 0, 0, 0)
+        # Tinte inicial del frame de operación según el modo activo (Alta).
+        self._apply_input_mode_styling()
+
+    def _build_operation_row(self) -> QFrame:
+        """Frame contenedor de los radios Alta/Baja, coloreable por modo.
+
+        Pintamos el QFrame (no los QLineEdit) — setStyleSheet sobre
+        QLineEdits dispara polish-cycles que rompen los tests de foco
+        en pytest-qt. El frame no es focusable, su repolish no afecta
+        a nadie y el color sigue siendo bien visible (rodea Alta/Baja).
+        """
+        self._operation_frame = QFrame()
+        self._operation_frame.setObjectName("operationFrame")
+        layout = QHBoxLayout(self._operation_frame)
+        layout.setContentsMargins(Spacing.SM, Spacing.XS, Spacing.SM, Spacing.XS)
         self._alta_radio = QRadioButton(self.tr("&Alta"))
         self._baja_radio = QRadioButton(self.tr("&Baja"))
         self._alta_radio.setChecked(True)
         group = QButtonGroup(self)
         group.addButton(self._alta_radio)
         group.addButton(self._baja_radio)
-        row.addWidget(self._alta_radio)
-        row.addWidget(self._baja_radio)
-        row.addStretch()
-        return row
+        # Solo conectamos al toggled de Alta — al estar en el mismo
+        # QButtonGroup, el cambio en uno implica el del otro y nos
+        # ahorramos un disparo redundante.
+        self._alta_radio.toggled.connect(self._apply_input_mode_styling)
+        layout.addWidget(self._alta_radio)
+        layout.addWidget(self._baja_radio)
+        layout.addStretch()
+        return self._operation_frame
 
     def _build_number_qty_row(self) -> QHBoxLayout:
         row = QHBoxLayout()
@@ -416,6 +439,21 @@ class CardLoaderView(QWidget):
         """Borde rojo temporal en el campo de código (1s)."""
         self._code_edit.setStyleSheet("QLineEdit { border: 1px solid red; }")
         QTimer.singleShot(1000, lambda: self._code_edit.setStyleSheet(""))
+
+    # ------------------------------------------------------------------
+    # Tinte Alta/Baja en el frame de operación
+    # ------------------------------------------------------------------
+
+    def _mode_bg_color(self) -> str:
+        """Color pastel correspondiente al modo activo (alta/baja)."""
+        return INPUT_BG_ALTA if self._alta_radio.isChecked() else INPUT_BG_BAJA
+
+    def _apply_input_mode_styling(self) -> None:
+        """Pinta el frame de operación según el modo Alta/Baja activo."""
+        bg = self._mode_bg_color()
+        self._operation_frame.setStyleSheet(
+            f"#operationFrame {{ background-color: {bg}; border-radius: 4px; }}"
+        )
 
     # ------------------------------------------------------------------
     # Navegación y eventos

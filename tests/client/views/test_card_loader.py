@@ -299,8 +299,10 @@ def test_enter_exact_match_selects_code(qtbot, memory_db, collection_with_code):
     view = CardLoaderView(memory_db, collection_with_code)
     qtbot.addWidget(view)
     view.show()
+    qtbot.waitExposed(view)
     view._code_edit.setText("S1")
     view._on_code_return_pressed()
+    qtbot.wait(50)  # dejar que Qt procese los focus events
     assert view._selected_code_id == "S1"
     assert view._number_input.hasFocus()
 
@@ -368,7 +370,9 @@ def test_on_code_selected_extracts_code_id(qtbot, memory_db, collection_with_cod
     view = CardLoaderView(memory_db, collection_with_code)
     qtbot.addWidget(view)
     view.show()
+    qtbot.waitExposed(view)
     view._on_code_selected("S1 - Set 1")
+    qtbot.wait(50)  # dejar que Qt procese los focus events
     assert view._selected_code_id == "S1"
     assert view._code_edit.text() == "S1"
     assert view._number_input.hasFocus()
@@ -413,14 +417,17 @@ def test_arrow_down_opens_completer_popup(qtbot, memory_db, collection_with_code
     view = CardLoaderView(memory_db, collection_with_code)
     qtbot.addWidget(view)
     view.show()
+    qtbot.waitExposed(view)
     view._code_edit.setFocus()
-    qtbot.wait(20)
+    qtbot.wait(50)
 
     popup = view._completer.popup()
     assert popup is not None
     assert popup.isVisible() is False
     qtbot.keyClick(view._code_edit, Qt.Key.Key_Down)
-    qtbot.wait(50)
+    # waitUntil es más robusto que wait fijo: poll hasta que el popup
+    # se muestre o timeout (focus events son flaky en pytest-qt headless).
+    qtbot.waitUntil(lambda: popup.isVisible(), timeout=2000)
     assert popup.isVisible() is True
 
 
@@ -630,3 +637,37 @@ def test_typing_letter_on_selected_set_does_not_autoinsert_completion(
     qtbot.wait(100)
     assert view._code_edit.text() == "s", f"Esperado 's', got {view._code_edit.text()!r}"
     assert view._set_confirmed is False
+
+
+# ----------------------------------------------------------------------
+# Tinte de los inputs según el modo Alta/Baja
+# ----------------------------------------------------------------------
+
+
+def test_operation_frame_bg_reflects_alta_mode_by_default(qtbot, memory_db, collection_with_code):
+    """Al construir la view (Alta por default), el frame trae el verde."""
+    from collections_app.shared_ui.theme import INPUT_BG_ALTA
+
+    view = CardLoaderView(memory_db, collection_with_code)
+    qtbot.addWidget(view)
+    view.show()
+    assert INPUT_BG_ALTA.lower() in view._operation_frame.styleSheet().lower()
+
+
+def test_operation_frame_bg_changes_to_baja_when_radio_toggled(
+    qtbot, memory_db, collection_with_code
+):
+    """Al togglear Baja, el frame pasa al tinte rojo."""
+    from collections_app.shared_ui.theme import INPUT_BG_ALTA, INPUT_BG_BAJA
+
+    view = CardLoaderView(memory_db, collection_with_code)
+    qtbot.addWidget(view)
+    view.show()
+
+    view._baja_radio.setChecked(True)
+    assert INPUT_BG_BAJA.lower() in view._operation_frame.styleSheet().lower()
+    assert INPUT_BG_ALTA.lower() not in view._operation_frame.styleSheet().lower()
+    # Y volver a Alta restaura el verde
+    view._alta_radio.setChecked(True)
+    assert INPUT_BG_ALTA.lower() in view._operation_frame.styleSheet().lower()
+    assert INPUT_BG_BAJA.lower() not in view._operation_frame.styleSheet().lower()

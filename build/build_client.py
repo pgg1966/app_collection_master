@@ -54,13 +54,16 @@ def main(argv: list[str] | None = None) -> int:
         "--noconfirm",
     ]
     if args.debug:
-        # `--debug all` agrega prints de bootloader; combinado con
-        # `console=True` (que el spec respeta solo si modificás manualmente)
-        # ayuda a diagnosticar arranque fallido. La consola en sí se queda
-        # en False según el spec — para activar consola, editá el spec o
-        # corré `--debug imports`.
-        print("MODO DEBUG: --debug all (más logs de PyInstaller)")
-        cmd += ["--debug", "all"]
+        # `--log-level DEBUG` SÍ es compatible con un .spec (a diferencia
+        # de `--debug all` que solo aplica cuando PyInstaller genera el
+        # spec desde cero). Muestra el grafo de imports y warnings que
+        # ayudan a diagnosticar módulos faltantes.
+        # Para consola visible en runtime y prints de bootloader, hay que
+        # editar `build/collections-client.spec` (poner `console=True` y
+        # agregar `bootloader_ignore_signals` etc.) — flags CLI no llegan
+        # cuando el .spec ya define el EXE.
+        print("MODO DEBUG: --log-level DEBUG (más logs de PyInstaller)")
+        cmd += ["--log-level", "DEBUG"]
 
     cmd.append(str(SPEC))
 
