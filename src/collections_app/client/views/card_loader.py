@@ -16,7 +16,16 @@ Comportamiento según `Collection.requires_code`:
 import logging
 import sqlite3
 
-from PySide6.QtCore import QEvent, QObject, QStringListModel, Qt, QTimer, Signal
+from PySide6.QtCore import (
+    QEvent,
+    QModelIndex,
+    QObject,
+    QPersistentModelIndex,
+    QStringListModel,
+    Qt,
+    QTimer,
+    Signal,
+)
 from PySide6.QtGui import QIntValidator, QKeyEvent
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -41,6 +50,29 @@ from collections_app.shared_ui.theme import READONLY_BG, Spacing, StatusColor
 from collections_app.shared_ui.widgets.enter_navigator import EnterNavigator
 
 logger = logging.getLogger(__name__)
+
+
+class _CodeOnlyCompleter(QCompleter):
+    """QCompleter que muestra `"CODE - Name"` pero inserta solo `"CODE"`.
+
+    Override de `pathFromIndex`: Qt llama este método para obtener el texto
+    a insertar en el QLineEdit cuando el usuario activa una opción del
+    popup (Enter, click). Por default retorna el item completo del modelo
+    (`"FWC - OFFICIAL_TROPHY"`); este override devuelve solo la parte
+    previa al `" - "`.
+
+    Sin este override, activar un ítem del popup deja
+    `"FWC - OFFICIAL_TROPHY"` en el campo. El handler `_on_code_selected`
+    intenta limpiarlo después con `setText("FWC")`, pero el orden de los
+    signals + el manejo de focus del completer hace que ese clean-up se
+    pierda. Resolverlo en `pathFromIndex` evita el race entero.
+    """
+
+    def pathFromIndex(  # noqa: N802 — Qt naming
+        self, index: QModelIndex | QPersistentModelIndex
+    ) -> str:
+        full: str = super().pathFromIndex(index)
+        return full.split(" - ", 1)[0].strip()
 
 
 class CardLoaderView(QWidget):
@@ -138,7 +170,9 @@ class CardLoaderView(QWidget):
         self._code_edit = QLineEdit()
         self._code_edit.setPlaceholderText(self.tr("Código (ej: ARG)"))
         self._code_edit.setMaxLength(10)
-        self._completer = QCompleter([], self)
+        # Subclass propio: Qt inserta solo el code_id ("FWC"), no el item
+        # completo ("FWC - OFFICIAL_TROPHY"). Ver _CodeOnlyCompleter.
+        self._completer = _CodeOnlyCompleter([], self)
         self._completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         self._completer.setFilterMode(Qt.MatchFlag.MatchContains)
         self._completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)

@@ -567,3 +567,27 @@ def test_no_requires_code_after_load_focuses_number_directly(qtbot, memory_db, c
     qtbot.wait(50)
     assert view._number_input.hasFocus()
     assert view._number_input.text() == ""
+
+
+# ----------------------------------------------------------------------
+# Regresión: el completer inserta solo el code_id, no la etiqueta completa
+# ----------------------------------------------------------------------
+
+
+def test_completer_inserts_only_code_id_not_full_label(qtbot, memory_db, collection_with_code):
+    """Activar un ítem del popup deja solo 'S1' en el campo, no 'S1 - Set 1'."""
+    view = CardLoaderView(memory_db, collection_with_code)
+    qtbot.addWidget(view)
+    view.show()
+
+    view._completer.setCompletionPrefix("")
+    completion_model = view._completer.completionModel()
+    assert completion_model.rowCount() > 0
+    first_idx = completion_model.index(0, 0)
+    full_label = completion_model.data(first_idx)
+    assert " - " in full_label
+
+    inserted = view._completer.pathFromIndex(first_idx)
+    assert " - " not in inserted
+    assert inserted.upper() in view._valid_code_ids
+    assert inserted == full_label.split(" - ", 1)[0].strip()
