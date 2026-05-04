@@ -456,3 +456,114 @@ def test_arrow_down_uses_text_as_prefix_filter(qtbot, memory_db, sample_code_hea
     assert any("ARG" in m for m in matches)
     assert any("MAR" in m for m in matches)
     assert not any("BRA - " in m for m in matches)
+
+
+# ----------------------------------------------------------------------
+# Flujo post-carga: mantener SET seleccionado + Enter inmediato → número
+# ----------------------------------------------------------------------
+
+
+def _save_one_card(view, qtbot) -> None:
+    """Helper: completa un alta válida (S1, número 1, qty 1)."""
+    view._code_edit.setText("S1")
+    view._on_code_return_pressed()  # confirma S1, foco va al número
+    view._number_input.setText("1")
+    qtbot.keyClick(view._qty_input, Qt.Key.Key_Return)
+
+
+def test_after_load_focus_goes_to_code_field(qtbot, memory_db, collection_with_code):
+    """Post-carga (requires_code): foco vuelve al SET con texto seleccionado."""
+    view = CardLoaderView(memory_db, collection_with_code)
+    qtbot.addWidget(view)
+    view.show()
+    _save_one_card(view, qtbot)
+    qtbot.wait(50)
+    assert view._code_edit.hasFocus()
+    # selectedText() == text() significa "todo el contenido seleccionado"
+    assert view._code_edit.selectedText() == view._code_edit.text() == "S1"
+
+
+def test_after_load_set_confirmed_flag_is_true(qtbot, memory_db, collection_with_code):
+    """Post-carga setea `_set_confirmed=True` para el atajo de Enter."""
+    view = CardLoaderView(memory_db, collection_with_code)
+    qtbot.addWidget(view)
+    view.show()
+    _save_one_card(view, qtbot)
+    qtbot.wait(50)
+    assert view._set_confirmed is True
+
+
+def test_enter_on_set_without_change_goes_to_number(qtbot, memory_db, collection_with_code):
+    """Set confirmado + Enter sin tipear nada → foco al número, set intacto."""
+    view = CardLoaderView(memory_db, collection_with_code)
+    qtbot.addWidget(view)
+    view.show()
+    _save_one_card(view, qtbot)
+    qtbot.wait(50)
+    # Estado pre-Enter: set confirmado, "S1" seleccionado.
+    assert view._set_confirmed is True
+    # Enter sobre el SET (sin tipear nada extra)
+    view._on_code_return_pressed()
+    assert view._number_input.hasFocus()
+    assert view._selected_code_id == "S1"
+    # El flag se consume al saltar
+    assert view._set_confirmed is False
+
+
+def test_typing_in_set_clears_confirmed_flag(qtbot, memory_db, collection_with_code):
+    """Input real del usuario en el SET invalida `_set_confirmed`."""
+    view = CardLoaderView(memory_db, collection_with_code)
+    qtbot.addWidget(view)
+    view.show()
+    _save_one_card(view, qtbot)
+    qtbot.wait(50)
+    assert view._set_confirmed is True
+    # Tipear (qtbot.keyClicks dispara textEdited a diferencia de setText).
+    qtbot.keyClicks(view._code_edit, "X")
+    assert view._set_confirmed is False
+    # Tampoco quedó código seleccionado (X no matchea ningún code_id).
+    assert view._selected_code_id is None
+
+
+def test_enter_on_set_with_change_validates_new_code(qtbot, memory_db, collection_with_code):
+    """Si el usuario cambia el SET a otro válido, Enter selecciona el nuevo."""
+    view = CardLoaderView(memory_db, collection_with_code)
+    qtbot.addWidget(view)
+    view.show()
+    _save_one_card(view, qtbot)
+    qtbot.wait(50)
+    # Reemplazar S1 por S2 con input real (selectAll ya hizo qtbot)
+    view._code_edit.clear()
+    qtbot.keyClicks(view._code_edit, "S2")
+    view._on_code_return_pressed()
+    # Debió validar y seleccionar S2 (no haber tomado el atajo de set_confirmed).
+    assert view._selected_code_id == "S2"
+    assert view._number_input.hasFocus()
+
+
+def test_highlight_first_completion_sets_row_zero(qtbot, memory_db, collection_with_code):
+    """`_highlight_first_completion` resalta el primer ítem visible."""
+    view = CardLoaderView(memory_db, collection_with_code)
+    qtbot.addWidget(view)
+    view.show()
+    # Forzar al completer a tener completions disponibles.
+    view._completer.setCompletionPrefix("")  # sin filtro: todos los items
+    view._highlight_first_completion()
+    assert view._completer.currentRow() == 0
+
+
+# ----------------------------------------------------------------------
+# Regresión: el campo de código se LIMPIA en colecciones sin requires_code
+# ----------------------------------------------------------------------
+
+
+def test_no_requires_code_after_load_focuses_number_directly(qtbot, memory_db, collection_no_code):
+    """Sin requires_code: post-carga vuelve directo al número (sin SET)."""
+    view = CardLoaderView(memory_db, collection_no_code)
+    qtbot.addWidget(view)
+    view.show()
+    view._number_input.setText("5")  # MR-5 está en el catálogo, único
+    qtbot.keyClick(view._qty_input, Qt.Key.Key_Return)
+    qtbot.wait(50)
+    assert view._number_input.hasFocus()
+    assert view._number_input.text() == ""

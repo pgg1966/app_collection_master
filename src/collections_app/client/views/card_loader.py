@@ -76,6 +76,12 @@ class CardLoaderView(QWidget):
         # texto del LineEdit no sea un código conocido. Reemplaza el
         # `_get_selected_code` viejo basado en QComboBox.currentData.
         self._selected_code_id: str | None = None
+        # Flag post-carga: cuando el usuario confirma una card, el foco
+        # vuelve al SET con texto seleccionado y este flag queda True.
+        # Si presiona Enter sin modificar el texto, el _on_code_return_pressed
+        # salta directo al número manteniendo el código actual.
+        # Cualquier edición del usuario (textEdited) lo desactiva.
+        self._set_confirmed: bool = False
 
         self._build_ui()
         self._wire_navigator()
@@ -141,7 +147,14 @@ class CardLoaderView(QWidget):
         # sin la sintaxis `signal[str]` (no soportada en stubs de PySide6).
         self._completer.activated.connect(self._on_completer_activated)
         self._code_edit.setCompleter(self._completer)
+        # textChanged: cualquier cambio (incluyendo setText programático).
+        # Sirve para mantener `_selected_code_id` sincronizado.
         self._code_edit.textChanged.connect(self._on_code_text_changed)
+        # textEdited: SOLO input del usuario (no setText). Sirve para
+        # invalidar `_set_confirmed` (que se setea en post-carga vía
+        # selectAll, sin que cuente como edición) y para refrescar el
+        # highlight del primer ítem del popup tras cada tecla.
+        self._code_edit.textEdited.connect(self._on_code_text_edited)
         self._code_edit.returnPressed.connect(self._on_code_return_pressed)
         # eventFilter para que Down/Up abran el popup del completer cuando
         # está cerrado — por default QLineEdit ignora esas teclas y el
@@ -274,6 +287,28 @@ class CardLoaderView(QWidget):
         if self.collection.requires_code or self._has_ambiguity:
             self._validate_card()
 
+    def _on_code_text_edited(self, _text: str) -> None:
+        """Solo input del usuario: invalida `_set_confirmed` y refresca highlight.
+
+        `textEdited` (a diferencia de `textChanged`) NO se dispara con
+        `setText()` programático, así que el `selectAll()` de
+        `_after_successful_load` no rompe el flag.
+        """
+        self._set_confirmed = False
+        # El completer recién filtra el modelo después de que terminemos
+        # con este slot — el QTimer.singleShot(0) garantiza que el
+        # highlight se aplique sobre la lista ya filtrada.
+        QTimer.singleShot(0, self._highlight_first_completion)
+
+    def _highlight_first_completion(self) -> None:
+        """Resalta el primer ítem del popup del completer si hay matches."""
+        if self._completer.completionCount() <= 0:
+            return
+        self._completer.setCurrentRow(0)
+        popup = self._completer.popup()
+        if popup is not None:
+            popup.setCurrentIndex(self._completer.currentIndex())
+
     def _on_completer_activated(self, value: object) -> None:
         """Slot del completer.activated que descarta el overload QModelIndex."""
         if isinstance(value, str):
@@ -299,6 +334,9 @@ class CardLoaderView(QWidget):
     def _on_code_return_pressed(self) -> None:
         """Enter en el campo de código: resolver según matches.
 
+        - Si `_set_confirmed` y el texto coincide con `_selected_code_id`
+          (post-carga sin edición): salta directo a número manteniendo
+          el código actual.
         - 1 match exacto / único parcial → seleccionar y pasar foco a número.
         - >1 matches parciales → abrir popup del completer.
         - 0 matches → flash visual de borde rojo (1s).
@@ -306,6 +344,15 @@ class CardLoaderView(QWidget):
         text = self._code_edit.text().strip().upper()
         if not text:
             return
+        # Atajo post-carga: el SET viene "confirmado" del último save y
+        # el texto no se modificó → ir directo al número.
+        if self._set_confirmed and text == (self._selected_code_id or ""):
+            self._set_confirmed = False
+            self._number_input.setFocus()
+            self._number_input.selectAll()
+            return
+        # A partir de acá es un Enter normal de validación.
+        self._set_confirmed = False
         if text in self._valid_code_ids:
             self._on_code_selected(text)
             return
@@ -556,7 +603,7 @@ class CardLoaderView(QWidget):
             self.tr("OK · {op} · ahora tenés {n}").format(op=op_label, n=updated.quantity),
             StatusColor.SUCCESS,
         )
-        self._reset_form()
+        self._after_successful_load()
         self.card_changed.emit()
 
     def _dispatch_save(
@@ -579,11 +626,47 @@ class CardLoaderView(QWidget):
             return service.add_card_by_number(cid, number, qty)
         return service.remove_card_by_number(cid, number, qty)
 
+    def _after_successful_load(self) -> None:
+        """Post-carga: limpia número/qty/preview y posiciona foco según contexto.
+
+        Diferencia clave con `_reset_form`:
+        - **`requires_code=True`**: NO limpia el SET — lo deja con el texto
+          actual seleccionado (`selectAll`) y `_set_confirmed=True`. Esto
+          permite que un Enter inmediato en el SET (sin tipear nada) salte
+          al número manteniendo el código (flujo común: cargar varias
+          cards del mismo set seguidas).
+        - **`requires_code=False`**: igual que `_reset_form` — sale de
+          modo ambigüedad y vuelve foco al primer input activo.
+        """
+        self._number_input.setText("")
+        self._qty_input.setText("1")
+        self._country_input.setText("")
+        self._name_input.setText("")
+        self._unambiguous_card = None
+
+        if self.collection.requires_code:
+            # Mantener el SET actual seleccionado para edición rápida.
+            # Si el usuario presiona Enter sin tipear, `_on_code_return_pressed`
+            # detecta `_set_confirmed=True` y salta a número.
+            self._code_edit.setFocus()
+            self._code_edit.selectAll()
+            self._set_confirmed = True
+            return
+
+        # Sin código: salir de ambigüedad si correspondía y foco al número.
+        if self._has_ambiguity:
+            self._has_ambiguity = False
+            self._set_code_visible(False)
+            self._clear_completer()
+            self._wire_navigator()
+        self._first_active_input().setFocus()
+
     def _reset_form(self) -> None:
         self._number_input.setText("")
         self._qty_input.setText("1")
         self._country_input.setText("")
         self._name_input.setText("")
+        self._set_confirmed = False
         if self.collection.requires_code:
             # Limpiar el campo de código para la próxima alta/baja, manteniendo
             # las opciones del completer (siguen siendo todos los codes_lines).
