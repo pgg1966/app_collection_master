@@ -335,13 +335,26 @@ class CardLoaderView(QWidget):
         QTimer.singleShot(0, self._highlight_first_completion)
 
     def _highlight_first_completion(self) -> None:
-        """Resalta el primer ítem del popup del completer si hay matches."""
+        """Resalta el primer ítem del popup del completer si hay matches.
+
+        Bloquear signals del completer durante `popup.setCurrentIndex` es
+        crítico: sin eso, Qt interpreta el cambio de currentIndex como una
+        "selección" y auto-inserta el `pathFromIndex` del ítem en el
+        QLineEdit. Resultado visible: el usuario tipea "f", el popup
+        resalta "FWC", y el campo termina con "FWC" (no "f"). Bloqueando
+        el completer evitamos que ese slot interno corra.
+        """
         if self._completer.completionCount() <= 0:
             return
         self._completer.setCurrentRow(0)
         popup = self._completer.popup()
-        if popup is not None:
+        if popup is None:
+            return
+        self._completer.blockSignals(True)
+        try:
             popup.setCurrentIndex(self._completer.currentIndex())
+        finally:
+            self._completer.blockSignals(False)
 
     def _on_completer_activated(self, value: object) -> None:
         """Slot del completer.activated que descarta el overload QModelIndex."""

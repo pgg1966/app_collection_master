@@ -591,3 +591,42 @@ def test_completer_inserts_only_code_id_not_full_label(qtbot, memory_db, collect
     assert " - " not in inserted
     assert inserted.upper() in view._valid_code_ids
     assert inserted == full_label.split(" - ", 1)[0].strip()
+
+
+# ----------------------------------------------------------------------
+# Regresión: tipear sobre SET seleccionado no debe auto-insertar
+# el ítem resaltado (era 'FWC' tras tipear 'f' por culpa de
+# popup.setCurrentIndex disparando el slot interno del completer).
+# ----------------------------------------------------------------------
+
+
+def test_typing_letter_on_selected_set_does_not_autoinsert_completion(
+    qtbot, memory_db, collection_with_code
+):
+    """Post-carga con SET seleccionado: tipear una letra reemplaza el texto.
+
+    Antes del fix, `_highlight_first_completion` llamaba
+    `popup.setCurrentIndex(...)` sin bloquear signals del completer,
+    lo que disparaba el auto-insert: tipear 'f' dejaba 'FWC' (o el
+    primer match del popup) en el campo en vez de 'f'.
+    """
+    view = CardLoaderView(memory_db, collection_with_code)
+    qtbot.addWidget(view)
+    view.show()
+    qtbot.waitExposed(view)
+    # Cargar una card para llegar al estado post-carga (SET seleccionado).
+    view._code_edit.setText("S1")
+    view._on_code_return_pressed()
+    view._number_input.setText("1")
+    qtbot.keyClick(view._qty_input, Qt.Key.Key_Return)
+    qtbot.wait(100)
+    assert view._code_edit.text() == "S1"
+    assert view._code_edit.selectedText() == "S1"
+    assert view._set_confirmed is True
+
+    # Tipear 'S' debería reemplazar la selección (texto = 'S'), NO
+    # auto-completar a 'S1' o 'S2'.
+    qtbot.keyClick(view._code_edit, Qt.Key.Key_S)
+    qtbot.wait(100)
+    assert view._code_edit.text() == "s", f"Esperado 's', got {view._code_edit.text()!r}"
+    assert view._set_confirmed is False
