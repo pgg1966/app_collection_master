@@ -1,5 +1,6 @@
 """Entry point de la aplicación admin (configuración)."""
 
+import argparse
 import logging
 import sys
 from pathlib import Path
@@ -11,7 +12,11 @@ from collections_app.admin.views.codes_master_detail import CodesMasterDetailVie
 from collections_app.admin.views.collections_abm import CollectionsAbmView
 from collections_app.admin.views.crests_view import CrestsView
 from collections_app.core.utils.logging_setup import setup_logging
-from collections_app.core.utils.paths import get_database_path
+from collections_app.core.utils.paths import (
+    get_active_profile,
+    get_database_path,
+    set_active_profile,
+)
 from collections_app.shared_ui import (
     MainWindowBase,
     SettingsDialog,
@@ -20,12 +25,18 @@ from collections_app.shared_ui import (
 
 logger = logging.getLogger(__name__)
 
+_APP_NAME = "Collections — Admin"
+
 
 class AdminMainWindow(MainWindowBase):
     """Ventana principal del admin con tabs Colecciones / Códigos / Cards / Escudos."""
 
     def __init__(self, db_path: Path) -> None:
-        super().__init__(db_path, app_name="Collections — Admin")
+        super().__init__(db_path, app_name=_APP_NAME)
+        title = _APP_NAME
+        if get_active_profile() != "default":
+            title += f"  [{get_active_profile()}]"
+        self.setWindowTitle(title)
         self.setMinimumSize(1200, 800)
 
         self._collections_view = CollectionsAbmView(self.conn)
@@ -61,11 +72,22 @@ class AdminMainWindow(MainWindowBase):
 
 def main() -> int:
     """Entry point. Inicializa logging, abre la ventana principal."""
+    # Parsear --profile antes de cualquier inicialización que toque
+    # paths/DB. Ver collections_app.core.utils.paths.set_active_profile.
+    parser = argparse.ArgumentParser(add_help=False, description=_APP_NAME)
+    parser.add_argument(
+        "--profile",
+        default="default",
+        help="Perfil de datos (alfanumérico). Default: 'default'.",
+    )
+    args, remaining = parser.parse_known_args()
+    set_active_profile(args.profile)
+
     setup_logging(level=logging.DEBUG)
     db_path = get_database_path()
-    logger.info("Admin app — bootstrap OK (db=%s)", db_path)
+    logger.info("Admin app — bootstrap OK (profile=%s, db=%s)", get_active_profile(), db_path)
 
-    app = QApplication(sys.argv)
+    app = QApplication([sys.argv[0], *remaining])
     apply_app_style(app)
     window = AdminMainWindow(db_path)
     window.show()

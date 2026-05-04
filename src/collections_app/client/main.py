@@ -1,5 +1,6 @@
 """Entry point de la aplicación client (uso final)."""
 
+import argparse
 import logging
 import sys
 from pathlib import Path
@@ -32,7 +33,11 @@ from collections_app.core.services.update_service import (
     UpdateSource,
 )
 from collections_app.core.utils.logging_setup import setup_logging
-from collections_app.core.utils.paths import get_database_path
+from collections_app.core.utils.paths import (
+    get_active_profile,
+    get_database_path,
+    set_active_profile,
+)
 from collections_app.shared_ui import MainWindowBase, apply_app_style
 
 logger = logging.getLogger(__name__)
@@ -89,7 +94,10 @@ class ClientMainWindow(MainWindowBase):
 
     def __init__(self, db_path: Path) -> None:
         super().__init__(db_path, app_name=__app_name__)
-        self.setWindowTitle(f"{__app_name__} v{__version__}")
+        title = f"{__app_name__} v{__version__}"
+        if get_active_profile() != "default":
+            title += f"  [{get_active_profile()}]"
+        self.setWindowTitle(title)
         self.setMinimumSize(900, 700)
         self._card_loader: CardLoaderView | None = None
         self._update_worker: _UpdateCheckWorker | None = None
@@ -287,11 +295,29 @@ class ClientMainWindow(MainWindowBase):
 
 def main() -> int:
     """Entry point. Inicializa logging, abre la ventana principal."""
+    # Parsear --profile ANTES de cualquier import/inicialización que use
+    # paths.get_app_data_dir() — sino la DB queda apuntando al perfil
+    # default y el switch posterior es inconsistente.
+    parser = argparse.ArgumentParser(add_help=False, description=__app_name__)
+    parser.add_argument(
+        "--profile",
+        default="default",
+        help="Perfil de datos (alfanumérico). Default: 'default'.",
+    )
+    args, remaining = parser.parse_known_args()
+    set_active_profile(args.profile)
+
     setup_logging(level=logging.DEBUG)
     db_path = get_database_path()
-    logger.info("Client app v%s — bootstrap OK (db=%s)", __version__, db_path)
+    logger.info(
+        "Client app v%s — bootstrap OK (profile=%s, db=%s)",
+        __version__,
+        get_active_profile(),
+        db_path,
+    )
 
-    app = QApplication(sys.argv)
+    # `remaining` propaga args desconocidos a Qt (--style, --platform, etc.).
+    app = QApplication([sys.argv[0], *remaining])
     apply_app_style(app)
     window = ClientMainWindow(db_path)
     window.show()

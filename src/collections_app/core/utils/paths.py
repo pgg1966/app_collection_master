@@ -1,8 +1,40 @@
-"""Resolver paths estándar de la aplicación."""
+"""Resolver paths estándar de la aplicación.
+
+Soporta múltiples PERFILES de datos en la misma máquina. Cada perfil
+tiene su propia DB, escudos, imágenes y logs — útil para separar
+"personal" / "test" / "trabajo" sin tener que copiar archivos.
+
+El perfil se setea UNA VEZ al arranque vía `set_active_profile()`
+(típicamente desde el `main()` parseando `--profile`). El default
+("default") usa la carpeta base sin subdirectorio para mantener
+compatibilidad retro con instalaciones existentes.
+"""
 
 import os
 import sys
 from pathlib import Path
+
+# Perfil activo. Se setea desde main() al parsear --profile.
+# "default" → no agrega subdirectorio (compat con instalaciones viejas).
+_active_profile: str = "default"
+
+
+def set_active_profile(profile: str) -> None:
+    """Setea el perfil activo. Llamar al inicio del main() de la app.
+
+    Sanitiza: solo alfanumérico y guiones; el resto se reemplaza por `_`.
+    Si queda vacío tras strip, vuelve a "default".
+
+    Cualquier llamada a `get_app_data_dir()` posterior reflejará el cambio.
+    """
+    global _active_profile
+    safe = "".join(c if c.isalnum() or c == "-" else "_" for c in profile.strip()).strip("_")
+    _active_profile = safe or "default"
+
+
+def get_active_profile() -> str:
+    """Retorna el perfil activo (default si no se llamó set_active_profile)."""
+    return _active_profile
 
 
 def _get_bundle_dir() -> Path:
@@ -31,11 +63,20 @@ def _get_bundle_dir() -> Path:
 
 
 def get_app_data_dir() -> Path:
-    r"""Retorna el directorio donde guardar datos de la app.
+    r"""Retorna el directorio donde guardar datos del PERFIL ACTIVO.
 
-    Windows: %APPDATA%\Collections
-    macOS:   ~/Library/Application Support/Collections
-    Linux:   ~/.local/share/Collections
+    Layout:
+      default:  %APPDATA%\Collections\
+      personal: %APPDATA%\Collections\personal\
+      test:     %APPDATA%\Collections\test\
+
+    Windows: %APPDATA%\Collections[\<perfil>]
+    macOS:   ~/Library/Application Support/Collections[/<perfil>]
+    Linux:   ~/.local/share/Collections[/<perfil>]
+
+    Las funciones derivadas (`get_database_path`, `get_crests_dir`,
+    `get_generated_cards_dir`, `get_logs_dir`) heredan el perfil
+    automáticamente.
     """
     if sys.platform == "win32":
         base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
@@ -45,6 +86,8 @@ def get_app_data_dir() -> Path:
         base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
 
     app_dir = base / "Collections"
+    if _active_profile != "default":
+        app_dir = app_dir / _active_profile
     app_dir.mkdir(parents=True, exist_ok=True)
     return app_dir
 

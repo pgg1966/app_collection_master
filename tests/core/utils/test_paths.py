@@ -163,3 +163,72 @@ def test_app_data_dir_does_not_depend_on_meipass(monkeypatch, tmp_path):
     # No debe estar dentro de _MEIPASS
     assert tmp_path not in app_dir.parents
     assert app_dir != tmp_path
+
+
+# ----------------------------------------------------------------------
+# Perfiles de datos: set_active_profile / get_active_profile
+# ----------------------------------------------------------------------
+
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=False)
+def reset_profile_after_test():
+    """Restaura el perfil a 'default' después del test (estado global)."""
+    yield
+    paths.set_active_profile("default")
+
+
+def test_set_active_profile_sanitizes_input(reset_profile_after_test):
+    """Caracteres no [a-zA-Z0-9-] se reemplazan por _."""
+    paths.set_active_profile("Mi Perfil!")
+    assert paths.get_active_profile() == "Mi_Perfil"
+    paths.set_active_profile("with.dots/and:colons")
+    assert paths.get_active_profile() == "with_dots_and_colons"
+
+
+def test_set_active_profile_empty_falls_back_to_default(reset_profile_after_test):
+    paths.set_active_profile("")
+    assert paths.get_active_profile() == "default"
+    paths.set_active_profile("   ")
+    assert paths.get_active_profile() == "default"
+    # También si quedan solo separadores tras sanitizar.
+    paths.set_active_profile("!!!")
+    assert paths.get_active_profile() == "default"
+
+
+def test_set_active_profile_keeps_valid_chars(reset_profile_after_test):
+    paths.set_active_profile("test-profile-2")
+    assert paths.get_active_profile() == "test-profile-2"
+
+
+def test_default_profile_uses_base_dir(monkeypatch, tmp_path, reset_profile_after_test):
+    """default → APPDATA/Collections (sin subdirectorio extra)."""
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    paths.set_active_profile("default")
+    app_dir = paths.get_app_data_dir()
+    assert app_dir == tmp_path / "Collections"
+
+
+def test_named_profile_uses_subdirectory(monkeypatch, tmp_path, reset_profile_after_test):
+    """test → APPDATA/Collections/test."""
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    paths.set_active_profile("test")
+    app_dir = paths.get_app_data_dir()
+    assert app_dir == tmp_path / "Collections" / "test"
+
+
+def test_get_database_path_includes_profile(monkeypatch, tmp_path, reset_profile_after_test):
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    paths.set_active_profile("personal")
+    db = paths.get_database_path()
+    assert db == tmp_path / "Collections" / "personal" / "collections.db"
+
+
+def test_profile_isolates_generated_cards_dir(monkeypatch, tmp_path, reset_profile_after_test):
+    """Las imágenes derivan de get_app_data_dir → también heredan el perfil."""
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    paths.set_active_profile("test")
+    cards_dir = paths.get_generated_cards_dir()
+    assert cards_dir == tmp_path / "Collections" / "test" / "generated_cards"

@@ -15,6 +15,7 @@ Comportamiento según `Collection.requires_code`:
 
 import logging
 import sqlite3
+from collections.abc import Callable
 
 from PySide6.QtCore import (
     QEvent,
@@ -57,6 +58,54 @@ from collections_app.shared_ui.theme import (
 from collections_app.shared_ui.widgets.enter_navigator import EnterNavigator
 
 logger = logging.getLogger(__name__)
+
+
+class _EmptyFieldFilter(QObject):
+    """Bloquea Tab/Backtab/Enter cuando el QLineEdit watched está vacío.
+
+    Pensado para el campo de Código (cuando requires_code=True) y el de
+    Número: el usuario no debería poder saltar al siguiente campo ni
+    disparar el save sin haber tipeado nada. El filter:
+
+    - Si la tecla es Tab, Backtab, Return o Enter Y el texto stripeado
+      está vacío: llama `on_empty(field_name)` y CONSUME el evento
+      (return True) — el foco no avanza, el handler suele mostrar
+      un flash de borde rojo en el campo.
+    - Si el texto NO está vacío: deja pasar el evento (return False)
+      para que el resto de la cadena (EnterNavigator, returnPressed)
+      lo maneje normalmente.
+    """
+
+    def __init__(
+        self,
+        field_name: str,
+        get_text: Callable[[], str],
+        on_empty: Callable[[str], None],
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._field_name = field_name
+        self._get_text = get_text
+        self._on_empty = on_empty
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
+        if event.type() != QEvent.Type.KeyPress:
+            return super().eventFilter(watched, event)
+        if not isinstance(event, QKeyEvent):
+            return super().eventFilter(watched, event)
+        if event.key() not in (
+            Qt.Key.Key_Tab,
+            Qt.Key.Key_Backtab,
+            Qt.Key.Key_Return,
+            Qt.Key.Key_Enter,
+        ):
+            return super().eventFilter(watched, event)
+        if self._get_text().strip():
+            # Hay texto → dejar pasar al navigator / returnPressed.
+            return super().eventFilter(watched, event)
+        # Campo vacío: feedback visual + consumir el evento (no avanzar).
+        self._on_empty(self._field_name)
+        return True
 
 
 class _CodeOnlyCompleter(QCompleter):
@@ -257,10 +306,11 @@ class CardLoaderView(QWidget):
         group = QButtonGroup(self)
         group.addButton(self._alta_radio)
         group.addButton(self._baja_radio)
-        # Solo conectamos al toggled de Alta — al estar en el mismo
-        # QButtonGroup, el cambio en uno implica el del otro y nos
-        # ahorramos un disparo redundante.
-        self._alta_radio.toggled.connect(self._apply_input_mode_styling)
+        # Conectamos ambos radios. `toggled` se dispara dos veces al
+        # cambiar (False para el que se desmarca, True para el que se
+        # marca). El handler usa un guard para actuar SOLO en True.
+        self._alta_radio.toggled.connect(self._on_operation_changed)
+        self._baja_radio.toggled.connect(self._on_operation_changed)
         layout.addWidget(self._alta_radio)
         layout.addWidget(self._baja_radio)
         layout.addStretch()
@@ -459,6 +509,24 @@ class CardLoaderView(QWidget):
         """Color pastel correspondiente al modo activo (alta/baja)."""
         return INPUT_BG_ALTA if self._alta_radio.isChecked() else INPUT_BG_BAJA
 
+    def _on_operation_changed(self, checked: bool) -> None:
+        """Slot del toggled de los radios Alta/Baja.
+
+        Hace dos cosas: actualiza colores y mueve el foco al primer
+        campo de entrada. El guard `if not checked` evita ejecutar dos
+        veces (toggled emite False para el radio que se desmarca y True
+        para el que se marca — solo nos interesa la transición a True).
+        """
+        if not checked:
+            return
+        self._apply_input_mode_styling()
+        # Foco al primer campo activo + selectAll para que la próxima
+        # tecla reemplace lo que haya (UX de carga rápida).
+        target = self._first_active_input()
+        target.setFocus()
+        if isinstance(target, QLineEdit):
+            target.selectAll()
+
     def _apply_input_mode_styling(self) -> None:
         """Pinta el frame de operación + los campos editables.
 
@@ -510,6 +578,30 @@ class CardLoaderView(QWidget):
         self._navigator.set_chain(chain)
         self._navigator.on_last_enter = self._save_card
         self._navigator.install()
+        # Empty-field guards: instalar DESPUÉS del navigator para que en la
+        # cadena LIFO de eventFilters se ejecuten ANTES (consume Tab/Enter
+        # cuando el campo está vacío y bloquea el avance al siguiente).
+        self._install_empty_field_filters()
+
+    def _install_empty_field_filters(self) -> None:
+        """Bloquea Tab/Backtab/Enter en code_edit y number_input cuando vacíos."""
+        # Removemos cualquier filtro previo para evitar duplicados al
+        # reinstalarse el navigator. Mantenemos refs vivas en self para
+        # evitar que el GC los libere mientras Qt los tiene apuntados.
+        for attr in ("_code_empty_filter", "_number_empty_filter"):
+            old = getattr(self, attr, None)
+            if old is not None:
+                # `removeEventFilter` es seguro aunque no esté instalado.
+                target = self._code_edit if attr == "_code_empty_filter" else self._number_input
+                target.removeEventFilter(old)
+        self._code_empty_filter = _EmptyFieldFilter(
+            "code", self._code_edit.text, self._show_field_error, self
+        )
+        self._number_empty_filter = _EmptyFieldFilter(
+            "number", self._number_input.text, self._show_field_error, self
+        )
+        self._code_edit.installEventFilter(self._code_empty_filter)
+        self._number_input.installEventFilter(self._number_empty_filter)
 
     def _first_active_input(self) -> QWidget:
         if self.collection.requires_code:

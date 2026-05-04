@@ -755,3 +755,180 @@ def test_code_field_gets_color_when_visible(qtbot, memory_db, collection_with_co
     view._baja_radio.setChecked(True)
     assert view._code_edit.isVisible() is True
     assert INPUT_BG_BAJA.lower() in view._code_edit.styleSheet().lower()
+
+
+# ----------------------------------------------------------------------
+# Fix 2: bloquear Tab/Enter cuando el campo está vacío
+# ----------------------------------------------------------------------
+
+
+def test_empty_number_field_blocks_return(qtbot, memory_db, collection_no_code):
+    """Number vacío + Enter: NO se busca card, foco permanece en number."""
+    view = CardLoaderView(memory_db, collection_no_code)
+    qtbot.addWidget(view)
+    view.show()
+    qtbot.waitExposed(view)
+    view._number_input.setFocus()
+    view._number_input.clear()
+    qtbot.wait(50)
+
+    qtbot.keyClick(view._number_input, Qt.Key.Key_Return)
+    qtbot.wait(50)
+    # No se buscó card → no se autocompletó nombre/país.
+    assert view._name_input.text() == ""
+    assert view._country_input.text() == ""
+    # Foco permanece en number_input.
+    assert view._number_input.hasFocus()
+
+
+def test_empty_number_field_blocks_tab(qtbot, memory_db, collection_no_code):
+    """Number vacío + Tab: el foco NO sale del número."""
+    view = CardLoaderView(memory_db, collection_no_code)
+    qtbot.addWidget(view)
+    view.show()
+    qtbot.waitExposed(view)
+    view._number_input.setFocus()
+    view._number_input.clear()
+    qtbot.wait(50)
+
+    qtbot.keyClick(view._number_input, Qt.Key.Key_Tab)
+    qtbot.wait(50)
+    # Tab fue consumido → foco sigue en number_input.
+    assert view._number_input.hasFocus()
+
+
+def test_empty_code_field_blocks_return(qtbot, memory_db, collection_with_code):
+    """Code vacío + Enter (requires_code=True): no avanza, foco permanece."""
+    view = CardLoaderView(memory_db, collection_with_code)
+    qtbot.addWidget(view)
+    view.show()
+    qtbot.waitExposed(view)
+    view._code_edit.setFocus()
+    view._code_edit.clear()
+    view._selected_code_id = None  # asegurar estado limpio
+    qtbot.wait(50)
+
+    qtbot.keyClick(view._code_edit, Qt.Key.Key_Return)
+    qtbot.wait(50)
+    assert view._code_edit.hasFocus()
+    assert view._selected_code_id is None  # nada se validó
+
+
+def test_nonempty_number_field_allows_navigation(qtbot, memory_db, collection_no_code):
+    """Number con contenido + Enter: SÍ avanza al siguiente campo."""
+    view = CardLoaderView(memory_db, collection_no_code)
+    qtbot.addWidget(view)
+    view.show()
+    qtbot.waitExposed(view)
+    view._number_input.setText("5")  # MR-5 existe en el catálogo
+    view._number_input.setFocus()
+    qtbot.wait(50)
+
+    qtbot.keyClick(view._number_input, Qt.Key.Key_Return)
+    qtbot.wait(50)
+    # Avance correcto: el navigator pasa de number a qty.
+    assert view._qty_input.hasFocus()
+    # Y la card fue encontrada (validación lateral por textChanged).
+    assert "PAZ" in view._name_input.text()
+
+
+def test_empty_field_shows_red_border_then_reverts(qtbot, memory_db, collection_no_code):
+    """Vacío + Enter: borde rojo durante 1s, luego vuelve al color del modo."""
+    from collections_app.shared_ui.theme import INPUT_BG_ALTA
+
+    view = CardLoaderView(memory_db, collection_no_code)
+    qtbot.addWidget(view)
+    view.show()
+    qtbot.waitExposed(view)
+    view._alta_radio.setChecked(True)
+    view._number_input.setFocus()
+    view._number_input.clear()
+    qtbot.wait(50)
+
+    qtbot.keyClick(view._number_input, Qt.Key.Key_Return)
+    style_during = view._number_input.styleSheet().lower()
+    assert "red" in style_during
+    qtbot.wait(1200)
+    style_after = view._number_input.styleSheet().lower()
+    assert "red" not in style_after
+    assert INPUT_BG_ALTA.lower() in style_after
+
+
+# ----------------------------------------------------------------------
+# Fix 3: foco automático al togglear el radio Alta/Baja
+# ----------------------------------------------------------------------
+
+
+def test_radio_alta_focuses_code_field_when_requires_code(qtbot, memory_db, collection_with_code):
+    """requires_code=True + click Alta → foco en SET."""
+    view = CardLoaderView(memory_db, collection_with_code)
+    qtbot.addWidget(view)
+    view.show()
+    qtbot.waitExposed(view)
+    # Sacar el foco primero para verificar que el toggle lo trae de vuelta.
+    view._qty_input.setFocus()
+    qtbot.wait(50)
+    # Forzar transición False→True: ir a Baja, luego a Alta.
+    view._baja_radio.setChecked(True)
+    view._qty_input.setFocus()
+    qtbot.wait(50)
+    view._alta_radio.setChecked(True)
+    qtbot.wait(50)
+    assert view._code_edit.hasFocus()
+
+
+def test_radio_alta_focuses_number_field_when_no_code(qtbot, memory_db, collection_no_code):
+    """requires_code=False + click Alta → foco en NÚMERO."""
+    view = CardLoaderView(memory_db, collection_no_code)
+    qtbot.addWidget(view)
+    view.show()
+    qtbot.waitExposed(view)
+    view._qty_input.setFocus()
+    qtbot.wait(50)
+    view._baja_radio.setChecked(True)
+    view._qty_input.setFocus()
+    qtbot.wait(50)
+    view._alta_radio.setChecked(True)
+    qtbot.wait(50)
+    assert view._number_input.hasFocus()
+
+
+def test_radio_baja_focuses_code_field_when_requires_code(qtbot, memory_db, collection_with_code):
+    """requires_code=True + click Baja → foco en SET."""
+    view = CardLoaderView(memory_db, collection_with_code)
+    qtbot.addWidget(view)
+    view.show()
+    qtbot.waitExposed(view)
+    view._qty_input.setFocus()
+    qtbot.wait(50)
+    view._baja_radio.setChecked(True)
+    qtbot.wait(50)
+    assert view._code_edit.hasFocus()
+
+
+def test_radio_baja_focuses_number_when_no_code(qtbot, memory_db, collection_no_code):
+    """requires_code=False + click Baja → foco en NÚMERO."""
+    view = CardLoaderView(memory_db, collection_no_code)
+    qtbot.addWidget(view)
+    view.show()
+    qtbot.waitExposed(view)
+    view._qty_input.setFocus()
+    qtbot.wait(50)
+    view._baja_radio.setChecked(True)
+    qtbot.wait(50)
+    assert view._number_input.hasFocus()
+
+
+def test_toggled_false_does_not_change_focus(qtbot, memory_db, collection_with_code):
+    """Llamar el slot directamente con checked=False es no-op (no cambia foco)."""
+    view = CardLoaderView(memory_db, collection_with_code)
+    qtbot.addWidget(view)
+    view.show()
+    qtbot.waitExposed(view)
+    view._qty_input.setFocus()
+    qtbot.wait(50)
+    # Invocar el slot con checked=False explícitamente.
+    view._on_operation_changed(False)
+    qtbot.wait(50)
+    # El foco NO se movió a code_edit ni number_input — sigue en qty.
+    assert view._qty_input.hasFocus()
