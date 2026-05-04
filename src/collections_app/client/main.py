@@ -20,6 +20,7 @@ from collections_app.__version__ import __app_name__, __version__
 from collections_app.client.dialogs.client_settings_dialog import ClientSettingsDialog
 from collections_app.client.views.album_view import AlbumView
 from collections_app.client.views.card_loader import CardLoaderView
+from collections_app.client.views.compare_view import CompareView
 from collections_app.client.views.inventory_view import InventoryView
 from collections_app.client.views.reports_view import ReportsView
 from collections_app.client.views.stats_view import StatsView
@@ -158,12 +159,14 @@ class ClientMainWindow(MainWindowBase):
         self._card_loader = CardLoaderView(self.conn, active)
         self._inventory_view = InventoryView(self.conn, active)
         self._album_view = AlbumView(self.conn, self.db_path, active)
+        self._compare_view = CompareView(self.conn, self.db_path, active)
         self._stats_view = StatsView(self.conn, active)
         self._reports_view = ReportsView(self.conn, active)
 
         tabs.addTab(self._card_loader, self.tr("Cargar Cards"))
         tabs.addTab(self._inventory_view, self.tr("Inventario"))
         tabs.addTab(self._album_view, self.tr("Álbum"))
+        tabs.addTab(self._compare_view, self.tr("Comparar"))
         tabs.addTab(self._stats_view, self.tr("Estadísticas"))
         tabs.addTab(self._reports_view, self.tr("Reportes"))
         self.setCentralWidget(tabs)

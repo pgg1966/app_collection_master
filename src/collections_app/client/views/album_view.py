@@ -294,9 +294,10 @@ class AlbumView(QWidget):
             self._status_label.setText(
                 self.tr("✓ PDF guardado en: {p}").format(p=str(result.output_path))
             )
-            QMessageBox.information(
-                self,
-                title,
+            msg = QMessageBox(self)
+            msg.setWindowTitle(title)
+            msg.setIcon(QMessageBox.Icon.Information)
+            msg.setText(
                 self.tr(
                     "PDF generado.\n\nPáginas: {p}\nCon foto: {f}\n"
                     "Placeholder celeste: {c}\nFaltantes: {m}"
@@ -305,8 +306,13 @@ class AlbumView(QWidget):
                     f=result.cards_with_image,
                     c=result.cards_celeste_placeholder,
                     m=result.cards_missing,
-                ),
+                )
             )
+            msg.addButton(self.tr("OK"), QMessageBox.ButtonRole.AcceptRole)
+            btn_view = msg.addButton(self.tr("Visualizar"), QMessageBox.ButtonRole.ActionRole)
+            msg.exec()
+            if msg.clickedButton() is btn_view:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(result.output_path)))
 
         def on_failed(msg: str) -> None:
             self._set_buttons_enabled(True)

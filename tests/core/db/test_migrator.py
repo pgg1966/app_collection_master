@@ -127,6 +127,15 @@ def test_migration_002_assigns_alphabetical_order_to_existing():
         "  card_name TEXT NOT NULL,"
         "  PRIMARY KEY (collection_id, code_id, card_number),"
         "  FOREIGN KEY (collection_id) REFERENCES collections(collection_id) ON DELETE CASCADE);"
+        # Migración 005 hace ALTER TABLE inventory; necesitamos la tabla
+        # presente en el schema base aunque este test solo testee 002.
+        "CREATE TABLE inventory ("
+        "  collection_id INTEGER NOT NULL,"
+        "  code_id TEXT NOT NULL,"
+        "  card_number INTEGER NOT NULL,"
+        "  quantity INTEGER NOT NULL DEFAULT 0,"
+        "  image_path TEXT,"
+        "  PRIMARY KEY (collection_id, code_id, card_number));"
         "INSERT INTO schema_version (version) VALUES (1);"
         "INSERT INTO codes_headers (code_header_name) VALUES ('FIFA');"
         "INSERT INTO codes_lines (code_header_id, code_id, code_name) VALUES "

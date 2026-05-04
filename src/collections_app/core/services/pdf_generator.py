@@ -36,7 +36,7 @@ from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
-from collections_app.core.models import Card, Collection
+from collections_app.core.models import Card, Collection, ExchangeCard
 
 logger = logging.getLogger(__name__)
 
@@ -632,3 +632,165 @@ def _draw_list_total(
         c.drawString(x, y, f"Total {title.lower()}: {n}, total unidades: {units}")
     else:
         c.drawString(x, y, f"Total {title.lower()}: {n}")
+
+
+# ----------------------------------------------------------------------
+# PDF de comparación entre dos álbumes
+# ----------------------------------------------------------------------
+
+
+def generate_comparison_pdf(
+    collection: Collection,
+    code_names: dict[str, str],
+    i_need: list[ExchangeCard],
+    i_can_offer: list[ExchangeCard],
+    output_path: Path,
+) -> PdfGeneratorResult:
+    """PDF de comparación con dos secciones: ME HACEN FALTA / PUEDO OFRECER.
+
+    Layout: 2 columnas, cada sección arranca en columna nueva (la primera
+    de cada sección puede estar en la misma página que la anterior si
+    sobra espacio). Headers de categoría agrupan por code_id dentro de
+    cada sección.
+
+    Reutilizamos el mismo formato visual que los PDFs de faltantes /
+    repetidas para mantener consistencia.
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    page_w, page_h = A4
+    c = canvas.Canvas(str(output_path), pagesize=A4)
+
+    # Metadata embebida (mismo formato que faltantes/repetidas pero con
+    # subtype distinto para que un futuro lector pueda filtrar).
+    assert collection.collection_id is not None
+    cards_meta: list[dict[str, object]] = [
+        *(
+            {"section": "i_need", "code_id": c.code_id, "card_number": c.card_number}
+            for c in i_need
+        ),
+        *(
+            {
+                "section": "i_can_offer",
+                "code_id": c.code_id,
+                "card_number": c.card_number,
+                "quantity": c.quantity,
+            }
+            for c in i_can_offer
+        ),
+    ]
+    metadata_json = _build_exchange_metadata(
+        subtype="comparison",
+        collection_id=collection.collection_id,
+        collection_name=collection.collection_name,
+        cards=cards_meta,
+    )
+    c.setSubject("CollectionsApp Exchange Data")
+    c.setKeywords(metadata_json)
+    c.setCreator(EXCHANGE_APP_NAME)
+
+    # Layout
+    col_w = (page_w - 2 * MARGIN_PT - LIST_COL_GAP_PT) / 2
+    column_xs = (MARGIN_PT, MARGIN_PT + col_w + LIST_COL_GAP_PT)
+    y = page_h - MARGIN_PT
+    y = _draw_list_global_header(c, collection, "Comparación de álbumes", [], page_w, y)
+    y_top_after_global = y
+    col_idx = 0
+    page_num = 1
+    result = PdfGeneratorResult(output_path=output_path, pages=1)
+
+    def new_column() -> None:
+        nonlocal col_idx, y, page_num
+        col_idx += 1
+        if col_idx >= 2:
+            c.showPage()
+            page_num += 1
+            result.pages = page_num
+            col_idx = 0
+            y = page_h - MARGIN_PT
+        else:
+            y = y_top_after_global
+
+    def ensure_room(needed: float) -> None:
+        if y - needed < MARGIN_PT:
+            new_column()
+
+    def draw_section_header(title: str, count: int) -> None:
+        nonlocal y
+        ensure_room(LIST_LINE_HEIGHT_PT * 2.5)
+        x = column_xs[col_idx]
+        c.setFillColor(COLOR_DARK_TEXT)
+        c.setFont("Helvetica-Bold", 12)
+        c.drawString(x, y, f"▶ {title.upper()} ({count})")
+        c.setStrokeColor(COLOR_DARK_TEXT)
+        c.setLineWidth(0.6)
+        c.line(x, y - 3, x + col_w, y - 3)
+        y -= LIST_LINE_HEIGHT_PT * 1.6
+
+    def draw_section(title: str, items: list[ExchangeCard], show_quantity: bool) -> None:
+        nonlocal y
+        draw_section_header(title, len(items))
+        if not items:
+            ensure_room(LIST_LINE_HEIGHT_PT)
+            c.setFillColor(COLOR_DARK_TEXT)
+            c.setFont("Helvetica-Oblique", LIST_BODY_FONT_SIZE)
+            c.drawString(column_xs[col_idx], y, "(ninguna)")
+            y -= LIST_LINE_HEIGHT_PT
+            return
+        last_code: str | None = None
+        for card in items:
+            if card.code_id != last_code:
+                ensure_room(LIST_LINE_HEIGHT_PT * 2)
+                _draw_category_header(
+                    c,
+                    card.code_id,
+                    code_names.get(card.code_id, card.code_id),
+                    column_xs[col_idx],
+                    y,
+                    col_w,
+                )
+                y -= LIST_LINE_HEIGHT_PT * 1.4
+                last_code = card.code_id
+            ensure_room(LIST_LINE_HEIGHT_PT)
+            _draw_exchange_item(
+                c,
+                card,
+                collection.requires_code,
+                column_xs[col_idx],
+                y,
+                col_w,
+                show_quantity=show_quantity,
+            )
+            y -= LIST_LINE_HEIGHT_PT
+
+    # Sección 1: me hacen falta
+    draw_section("Me hacen falta", i_need, show_quantity=False)
+    # Forzar columna nueva para separar visualmente las secciones.
+    new_column()
+    draw_section("Puedo ofrecer", i_can_offer, show_quantity=True)
+
+    c.showPage()
+    c.save()
+    result.cards_missing = len(i_need)
+    result.cards_celeste_placeholder = len(i_can_offer)
+    return result
+
+
+def _draw_exchange_item(
+    c: canvas.Canvas,
+    card: ExchangeCard,
+    requires_code: bool,
+    x: float,
+    y: float,
+    col_w: float,
+    show_quantity: bool,
+) -> None:
+    """Versión de _draw_list_item que toma ExchangeCard (sin AlbumCard)."""
+    label = format_label(card.card_number, card.code_id, requires_code)
+    name = _truncate(card.card_name, 32)
+    c.setFillColor(COLOR_DARK_TEXT)
+    c.setFont("Helvetica", LIST_BODY_FONT_SIZE)
+    label_x = x + 40
+    c.drawRightString(label_x, y, label)
+    c.drawString(label_x + 6, y, name)
+    if show_quantity and card.quantity > 1:
+        c.drawRightString(x + col_w, y, f"×{card.quantity}")

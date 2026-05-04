@@ -16,6 +16,7 @@ from collections_app.core.services.pdf_generator import (
     AlbumCard,
     PdfGeneratorResult,
     generate_album_pdf,
+    generate_comparison_pdf,
     generate_duplicates_pdf,
     generate_missing_pdf,
     generate_owned_pdf,
@@ -29,6 +30,12 @@ from collections_app.core.services.settings_service import (
     SETTING_KEY_ACTIVE_COLLECTION,
     SettingsService,
 )
+from collections_app.core.services.exchange_service import (
+    EXCHANGE_APP_ID,
+    EXCHANGE_EXTENSION,
+    EXCHANGE_FORMAT_VERSION,
+    ExchangeService,
+)
 from collections_app.core.services.update_service import (
     GitHubUpdateSource,
     ServerUpdateSource,
@@ -38,12 +45,16 @@ from collections_app.core.services.update_service import (
 )
 
 __all__ = [
+    "EXCHANGE_APP_ID",
+    "EXCHANGE_EXTENSION",
+    "EXCHANGE_FORMAT_VERSION",
     "SETTING_KEY_ACTIVE_COLLECTION",
     "SETTING_KEY_LICENSE_PREFIX",
     "AlbumCard",
     "AlbumService",
     "AmbiguousCardError",
     "CollectionsService",
+    "ExchangeService",
     "GitHubUpdateSource",
     "InventoryService",
     "LicenseService",
@@ -58,6 +69,7 @@ __all__ = [
     "UpdateService",
     "UpdateSource",
     "generate_album_pdf",
+    "generate_comparison_pdf",
     "generate_duplicates_pdf",
     "generate_missing_pdf",
     "generate_owned_pdf",
