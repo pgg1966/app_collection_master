@@ -437,11 +437,22 @@ class CardLoaderView(QWidget):
 
     def _flash_invalid_code(self) -> None:
         """Borde rojo temporal en el campo de código (1s)."""
-        self._code_edit.setStyleSheet("QLineEdit { border: 1px solid red; }")
-        QTimer.singleShot(1000, lambda: self._code_edit.setStyleSheet(""))
+        self._show_field_error("code")
+
+    def _show_field_error(self, field: str) -> None:
+        """Aplica borde rojo al campo indicado y revierte tras 1s.
+
+        Al revertir, reaplica el tinte del modo Alta/Baja para no perder
+        el color de fondo. Usamos la sobrecarga `singleShot(msec, context,
+        slot)` con `self` como context: si el widget se destruye antes
+        de que el timer dispare (típico en tests cortos), Qt cancela el
+        callback y no intenta tocar el C++ object liberado.
+        """
+        self._apply_field_styles(error_field=field)
+        QTimer.singleShot(1000, self, lambda: self._apply_field_styles(error_field=None))
 
     # ------------------------------------------------------------------
-    # Tinte Alta/Baja en el frame de operación
+    # Tinte Alta/Baja: frame de operación + campos editables
     # ------------------------------------------------------------------
 
     def _mode_bg_color(self) -> str:
@@ -449,11 +460,38 @@ class CardLoaderView(QWidget):
         return INPUT_BG_ALTA if self._alta_radio.isChecked() else INPUT_BG_BAJA
 
     def _apply_input_mode_styling(self) -> None:
-        """Pinta el frame de operación según el modo Alta/Baja activo."""
+        """Pinta el frame de operación + los campos editables.
+
+        El frame es recordatorio constante (rodea Alta/Baja). Los campos
+        coloreados dan feedback visual donde el usuario está tipeando.
+        Llamado al construir y al togglear el radio.
+        """
         bg = self._mode_bg_color()
         self._operation_frame.setStyleSheet(
             f"#operationFrame {{ background-color: {bg}; border-radius: 4px; }}"
         )
+        self._apply_field_styles(error_field=None)
+
+    def _apply_field_styles(self, error_field: str | None = None) -> None:
+        """Aplica el tinte del modo a los QLineEdits editables.
+
+        `error_field` ∈ {"code", "number", "qty", None}: si está seteado,
+        ese campo recibe borde rojo (el resto mantiene el tinte normal).
+        Al expirar el flash de error se llama de nuevo con None para
+        restaurar el color de fondo del modo activo.
+        """
+        bg = self._mode_bg_color()
+        normal_style = f"QLineEdit {{ background-color: {bg}; }}"
+        error_style = f"QLineEdit {{ background-color: {bg}; border: 1px solid red; }}"
+        fields: dict[str, QLineEdit | None] = {
+            "code": self._code_edit,
+            "number": self._number_input,
+            "qty": self._qty_input,
+        }
+        for name, widget in fields.items():
+            if widget is None:
+                continue
+            widget.setStyleSheet(error_style if name == error_field else normal_style)
 
     # ------------------------------------------------------------------
     # Navegación y eventos

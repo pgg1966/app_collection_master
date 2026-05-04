@@ -274,13 +274,27 @@ class CompareView(QWidget):
     # ------------------------------------------------------------------
 
     def _on_generate_file(self) -> None:
+        # Default: ~/Downloads (fallback a ~ si no existe — cuentas nuevas
+        # de Windows o sistemas Linux mínimos pueden no tenerla).
+        default_dir = Path.home() / "Downloads"
+        if not default_dir.exists():
+            default_dir = Path.home()
+
         date = datetime.now().strftime("%Y-%m-%d")
-        slug = self.collection.collection_name.replace(" ", "_")
-        default_name = f"MiAlbum_{slug}_{date}{EXCHANGE_EXTENSION}"
+        # Sanitizar el nombre de la colección para que sea filename-safe:
+        # mantener alfanuméricos, espacios, guiones y _; reemplazar el resto.
+        safe_name = (
+            "".join(
+                ch if ch.isalnum() or ch in " _-" else "_" for ch in self.collection.collection_name
+            )
+            .strip()
+            .replace(" ", "_")
+        )
+        default_name = f"MiAlbum_{safe_name}_{date}{EXCHANGE_EXTENSION}"
         path_str, _ = QFileDialog.getSaveFileName(
             self,
             self.tr("Guardar archivo de comparación"),
-            default_name,
+            str(default_dir / default_name),
             self.tr("CollectionsApp Exchange (*{ext})").format(ext=EXCHANGE_EXTENSION),
         )
         if not path_str:

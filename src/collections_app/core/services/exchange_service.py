@@ -93,12 +93,16 @@ class ExchangeService:
                     )
                 )
             elif inv.available_quantity > 1:
+                # Lo que el usuario realmente puede ofrecer = disponible - 1
+                # (siempre conservamos UNA copia para que el álbum del
+                # usuario no quede incompleto después del intercambio).
+                oferable = inv.available_quantity - 1
                 duplicates.append(
                     ExchangeCard(
                         code_id=code_id,
                         card_number=number,
                         card_name=card.card_name,
-                        quantity=inv.available_quantity,
+                        quantity=oferable,
                     )
                 )
 

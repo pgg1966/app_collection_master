@@ -39,9 +39,10 @@ READONLY_BG = "#F0F0F0"
 
 # Tintes pastel para los inputs según el modo Alta/Baja en CardLoader.
 # Sirven como recordatorio visual constante (el usuario carga muchas
-# cards seguidas y el radio button solo es una pista chica).
-INPUT_BG_ALTA = "#DFF5DA"  # verde pastel — modo Alta activo
-INPUT_BG_BAJA = "#F9DCDC"  # rojo pastel — modo Baja activo
+# cards seguidas y el radio button solo es una pista chica). Texto
+# negro mantiene legibilidad total sobre ambos.
+INPUT_BG_ALTA = "#D5F5E3"  # verde menta suave — modo Alta activo
+INPUT_BG_BAJA = "#FADBD8"  # rosa salmón suave — modo Baja activo
 
 
 def apply_app_style(app: QApplication) -> None:

@@ -671,3 +671,87 @@ def test_operation_frame_bg_changes_to_baja_when_radio_toggled(
     view._alta_radio.setChecked(True)
     assert INPUT_BG_ALTA.lower() in view._operation_frame.styleSheet().lower()
     assert INPUT_BG_BAJA.lower() not in view._operation_frame.styleSheet().lower()
+
+
+# ----------------------------------------------------------------------
+# Tinte Alta/Baja también pinta los campos editables (no solo el frame)
+# ----------------------------------------------------------------------
+
+
+def test_alta_applies_green_background_to_fields(qtbot, memory_db, collection_with_code):
+    """Modo Alta: número/qty/código tienen fondo verde."""
+    from collections_app.shared_ui.theme import INPUT_BG_ALTA
+
+    view = CardLoaderView(memory_db, collection_with_code)
+    qtbot.addWidget(view)
+    view.show()
+    qtbot.waitExposed(view)
+    view._alta_radio.setChecked(True)
+    assert INPUT_BG_ALTA.lower() in view._number_input.styleSheet().lower()
+    assert INPUT_BG_ALTA.lower() in view._qty_input.styleSheet().lower()
+    assert INPUT_BG_ALTA.lower() in view._code_edit.styleSheet().lower()
+
+
+def test_baja_applies_pink_background_to_fields(qtbot, memory_db, collection_with_code):
+    """Modo Baja: número/qty/código tienen fondo rosa."""
+    from collections_app.shared_ui.theme import INPUT_BG_BAJA
+
+    view = CardLoaderView(memory_db, collection_with_code)
+    qtbot.addWidget(view)
+    view.show()
+    qtbot.waitExposed(view)
+    view._baja_radio.setChecked(True)
+    assert INPUT_BG_BAJA.lower() in view._number_input.styleSheet().lower()
+    assert INPUT_BG_BAJA.lower() in view._qty_input.styleSheet().lower()
+    assert INPUT_BG_BAJA.lower() in view._code_edit.styleSheet().lower()
+
+
+def test_field_color_changes_when_radio_toggles(qtbot, memory_db, collection_with_code):
+    """Toggle Alta→Baja→Alta cambia el color del fondo de los campos."""
+    from collections_app.shared_ui.theme import INPUT_BG_ALTA, INPUT_BG_BAJA
+
+    view = CardLoaderView(memory_db, collection_with_code)
+    qtbot.addWidget(view)
+    view.show()
+    # Estado inicial Alta
+    assert INPUT_BG_ALTA.lower() in view._number_input.styleSheet().lower()
+    # Cambiar a Baja
+    view._baja_radio.setChecked(True)
+    assert INPUT_BG_BAJA.lower() in view._number_input.styleSheet().lower()
+    assert INPUT_BG_ALTA.lower() not in view._number_input.styleSheet().lower()
+    # Volver a Alta
+    view._alta_radio.setChecked(True)
+    assert INPUT_BG_ALTA.lower() in view._number_input.styleSheet().lower()
+
+
+def test_error_shows_red_border_keeping_bg_color(qtbot, memory_db, collection_with_code):
+    """Tras error: borde rojo + bg del modo. Tras revert: solo bg."""
+    from collections_app.shared_ui.theme import INPUT_BG_ALTA
+
+    view = CardLoaderView(memory_db, collection_with_code)
+    qtbot.addWidget(view)
+    view.show()
+    qtbot.waitExposed(view)
+    # Modo Alta + disparar error en el código.
+    view._alta_radio.setChecked(True)
+    view._show_field_error("code")
+    style_during = view._code_edit.styleSheet().lower()
+    assert "red" in style_during
+    assert INPUT_BG_ALTA.lower() in style_during  # bg conservado durante el error
+    # Esperar a que expire el QTimer de 1000ms.
+    qtbot.wait(1200)
+    style_after = view._code_edit.styleSheet().lower()
+    assert "red" not in style_after
+    assert INPUT_BG_ALTA.lower() in style_after  # vuelve al verde, no a vacío
+
+
+def test_code_field_gets_color_when_visible(qtbot, memory_db, collection_with_code):
+    """Con requires_code=True el campo de código también se tinta."""
+    from collections_app.shared_ui.theme import INPUT_BG_BAJA
+
+    view = CardLoaderView(memory_db, collection_with_code)
+    qtbot.addWidget(view)
+    view.show()
+    view._baja_radio.setChecked(True)
+    assert view._code_edit.isVisible() is True
+    assert INPUT_BG_BAJA.lower() in view._code_edit.styleSheet().lower()

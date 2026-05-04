@@ -228,6 +228,80 @@ def test_unlock_all_resets_locked(populated_db):
 
 
 # ----------------------------------------------------------------------
+# Generación: cantidad ofrecida = available_quantity - 1 (conservar 1)
+# ----------------------------------------------------------------------
+
+
+def test_duplicates_quantity_is_available_minus_one(populated_db, tmp_path):
+    """qty=3, locked=0 → available=3 → ofrece 2 (conserva 1)."""
+    conn, col = populated_db
+    cid = col.collection_id
+    out = tmp_path / "user1.colexchange"
+    # En el fixture BRA-2 tiene qty=3 y locked=0.
+    ef = ExchangeService(conn).generate_exchange_file(cid, out)
+
+    bra2 = next((c for c in ef.duplicates if c.code_id == "BRA" and c.card_number == 2), None)
+    assert bra2 is not None
+    assert bra2.quantity == 2  # 3 - 1
+
+
+def test_duplicates_quantity_2_offers_1(populated_db, tmp_path):
+    """qty=2, locked=0 → available=2 → ofrece 1."""
+    conn, col = populated_db
+    cid = col.collection_id
+    out = tmp_path / "user1.colexchange"
+    # En el fixture ARG-2 tiene qty=2.
+    ef = ExchangeService(conn).generate_exchange_file(cid, out)
+
+    arg2 = next((c for c in ef.duplicates if c.code_id == "ARG" and c.card_number == 2), None)
+    assert arg2 is not None
+    assert arg2.quantity == 1
+
+
+def test_duplicates_quantity_1_not_included(populated_db, tmp_path):
+    """qty=1 → available=1 → NO aparece (no puede ofrecer nada)."""
+    conn, col = populated_db
+    cid = col.collection_id
+    # ARG-1 tiene qty=1 en el fixture.
+    out = tmp_path / "user1.colexchange"
+    ef = ExchangeService(conn).generate_exchange_file(cid, out)
+
+    codes = {(c.code_id, c.card_number) for c in ef.duplicates}
+    assert ("ARG", 1) not in codes
+
+
+def test_duplicates_with_locked_reduces_oferable(populated_db, tmp_path):
+    """qty=3, locked=1 → available=2 → ofrece 1 (2 - 1)."""
+    conn, col = populated_db
+    cid = col.collection_id
+    # BRA-2 qty=3; bloqueamos 1.
+    InventoryRepository(conn).lock(cid, "BRA", 2)
+    conn.commit()
+
+    out = tmp_path / "user1.colexchange"
+    ef = ExchangeService(conn).generate_exchange_file(cid, out)
+
+    bra2 = next((c for c in ef.duplicates if c.code_id == "BRA" and c.card_number == 2), None)
+    assert bra2 is not None
+    assert bra2.quantity == 1
+
+
+def test_duplicates_with_locked_equal_quantity_not_included(populated_db, tmp_path):
+    """qty=2, locked=1 → available=1 → NO aparece en duplicates."""
+    conn, col = populated_db
+    cid = col.collection_id
+    # ARG-2 qty=2; bloqueamos 1 → available=1.
+    InventoryRepository(conn).lock(cid, "ARG", 2)
+    conn.commit()
+
+    out = tmp_path / "user1.colexchange"
+    ef = ExchangeService(conn).generate_exchange_file(cid, out)
+
+    codes = {(c.code_id, c.card_number) for c in ef.duplicates}
+    assert ("ARG", 2) not in codes
+
+
+# ----------------------------------------------------------------------
 # Generación: las cartas bloqueadas no aparecen en duplicates
 # ----------------------------------------------------------------------
 
