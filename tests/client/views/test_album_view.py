@@ -52,8 +52,9 @@ def view(qtbot, memory_db, album_setup):
 
 
 def test_album_view_loads_without_error(qtbot, view):
-    """Construye los 4 botones (album / missing / duplicates / owned)."""
-    assert len(view._buttons) == 4
+    """Construye los 5 botones (album / missing / duplicates_full /
+    duplicates_summary / owned)."""
+    assert len(view._buttons) == 5
 
 
 def test_image_count_shows_zero_when_no_crests(
@@ -82,7 +83,7 @@ def test_image_count_shows_loaded_crests(qtbot, memory_db, album_setup, tmp_path
 
 
 # ----------------------------------------------------------------------
-# Botones de generación
+# Botones de generación: dispatch al worker con el kind correcto
 # ----------------------------------------------------------------------
 
 
@@ -110,46 +111,43 @@ def _stub_worker(captured: dict):
     [
         (0, "album", "Album"),
         (1, "missing", "Faltantes"),
-        (2, "duplicates", "Repetidas"),
-        (3, "owned", "Tengo"),
+        (2, "duplicates_full", "Repetidas_Completo"),
+        (3, "duplicates_summary", "Repetidas_Resumido"),
+        (4, "owned", "Tengo"),
     ],
 )
 def test_each_button_dispatches_correct_kind_to_worker(
-    qtbot, view, monkeypatch, tmp_path, button_idx, expected_kind, expected_prefix
+    qtbot, view, monkeypatch, button_idx, expected_kind, expected_prefix
 ):
-    """Cada uno de los 4 botones lanza el worker con el `kind` correcto."""
-    out = tmp_path / "out.pdf"
-    monkeypatch.setattr(
-        view_mod.QFileDialog,
-        "getSaveFileName",
-        lambda *a, **kw: (str(out), "PDF (*.pdf)"),
-    )
+    """Cada uno de los 5 botones lanza el worker con el `kind` correcto.
+
+    Bajo el flujo nuevo, el botón NO abre QFileDialog — genera a un
+    archivo temporal y luego abre el preview. Solo verificamos que el
+    worker arranca con los args correctos.
+    """
     captured: dict = {}
     monkeypatch.setattr(view_mod, "_PdfWorker", _stub_worker(captured))
 
     view._buttons[button_idx].click()
 
     assert captured["kind"] == expected_kind
-    assert captured["output_path"] == out
     assert captured["collection_id"] == view.collection.collection_id
-    # El default filename incluye el prefijo correcto
-    default_name = view._default_filename(expected_kind)
-    assert default_name.startswith(expected_prefix + "_")
+    # output_path es un archivo temporal (.pdf) — verificamos forma.
+    out = captured["output_path"]
+    assert isinstance(out, Path)
+    assert out.suffix == ".pdf"
+    # El nombre sugerido (que pasaría al preview) tiene el prefijo correcto.
+    suggested = view._suggested_filename(expected_kind)
+    assert suggested.startswith(expected_prefix + "_")
 
 
-def test_cancel_save_dialog_does_not_disable_buttons(qtbot, view, monkeypatch):
-    """Si el usuario cancela el QFileDialog, los botones quedan habilitados."""
-    monkeypatch.setattr(
-        view_mod.QFileDialog,
-        "getSaveFileName",
-        lambda *a, **kw: ("", ""),  # cancelado
-    )
+def test_buttons_disabled_during_generation(qtbot, view, monkeypatch):
+    """Mientras el worker corre, los botones quedan deshabilitados."""
     captured: dict = {}
     monkeypatch.setattr(view_mod, "_PdfWorker", _stub_worker(captured))
-
     view._buttons[0].click()
-    assert all(b.isEnabled() for b in view._buttons)
-    assert captured == {}  # worker no se construyó
+    # Después del click, todos los botones quedan deshabilitados hasta on_ok.
+    assert all(not b.isEnabled() for b in view._buttons)
 
 
 # ----------------------------------------------------------------------

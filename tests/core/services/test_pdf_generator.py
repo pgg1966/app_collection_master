@@ -11,6 +11,7 @@ from collections_app.core.models import Card, Collection
 from collections_app.core.services.pdf_generator import (
     EXCHANGE_APP_NAME,
     AlbumCard,
+    DuplicatesReportMode,
     _build_exchange_metadata,
     _chunks,
     format_label,
@@ -253,6 +254,127 @@ def test_duplicates_pdf_only_includes_quantity_gt_1(tmp_path):
     assert meta is not None
     assert len(meta["cards"]) == 2
     assert {c["card_number"] for c in meta["cards"]} == {3, 4}
+
+
+# ----------------------------------------------------------------------
+# Repetidas — modos FULL / SUMMARY
+# ----------------------------------------------------------------------
+
+
+def test_duplicates_mode_enum_values():
+    assert DuplicatesReportMode.FULL == "full"
+    assert DuplicatesReportMode.SUMMARY == "summary"
+
+
+def test_duplicates_full_creates_file(tmp_path):
+    """Modo FULL: archivo existe y > 1000 bytes."""
+    col = _collection()
+    cards = [
+        _ac("ARG", 24, qty=2, code_name="ARGENTINA"),
+        _ac("ARG", 7, qty=3, code_name="ARGENTINA"),
+        _ac("BRA", 10, qty=2, code_name="BRAZIL"),
+    ]
+    out = tmp_path / "full.pdf"
+    result = generate_duplicates_pdf(col, cards, out, mode=DuplicatesReportMode.FULL)
+    assert out.exists()
+    assert out.stat().st_size > 1000
+    assert result.pages >= 1
+
+
+def test_duplicates_summary_creates_file(tmp_path):
+    """Modo SUMMARY: archivo existe y > 1000 bytes."""
+    col = _collection()
+    cards = [
+        _ac("ARG", 24, qty=2, code_name="ARGENTINA"),
+        _ac("ARG", 7, qty=3, code_name="ARGENTINA"),
+        _ac("BRA", 10, qty=2, code_name="BRAZIL"),
+    ]
+    out = tmp_path / "summary.pdf"
+    result = generate_duplicates_pdf(col, cards, out, mode=DuplicatesReportMode.SUMMARY)
+    assert out.exists()
+    assert out.stat().st_size > 1000
+    assert result.pages >= 1
+
+
+def test_duplicates_full_groups_by_category(tmp_path):
+    """Cards de ARG y BRA mezcladas: no lanza excepción y al menos 1 página."""
+    col = _collection()
+    cards = [
+        _ac("ARG", 1, qty=2, code_name="ARGENTINA"),
+        _ac("BRA", 1, qty=2, code_name="BRAZIL"),
+        _ac("ARG", 2, qty=3, code_name="ARGENTINA"),
+        _ac("BRA", 2, qty=2, code_name="BRAZIL"),
+    ]
+    out = tmp_path / "full.pdf"
+    result = generate_duplicates_pdf(col, cards, out, mode=DuplicatesReportMode.FULL)
+    assert result.pages >= 1
+
+
+def test_duplicates_summary_smaller_than_full(tmp_path):
+    """Mismo input: el SUMMARY ocupa menos bytes que el FULL (sin nombres)."""
+    col = _collection()
+    cards = [_ac("ARG", n, qty=2, code_name="ARGENTINA") for n in range(1, 30)] + [
+        _ac("BRA", n, qty=2, code_name="BRAZIL") for n in range(1, 30)
+    ]
+    full_out = tmp_path / "full.pdf"
+    summary_out = tmp_path / "summary.pdf"
+    generate_duplicates_pdf(col, cards, full_out, mode=DuplicatesReportMode.FULL)
+    generate_duplicates_pdf(col, cards, summary_out, mode=DuplicatesReportMode.SUMMARY)
+    assert summary_out.stat().st_size < full_out.stat().st_size
+
+
+def test_duplicates_full_handles_long_names(tmp_path):
+    """Con nombres muy largos no lanza excepción y mantiene metadata válida."""
+    col = _collection()
+    long_name = "A" * 80  # mucho más largo que MAX_NAME_CHARS
+    cards = [
+        _ac("ARG", 1, qty=2, code_name="ARGENTINA"),
+    ]
+    cards[0] = AlbumCard(
+        card=Card(collection_id=1, code_id="ARG", card_number=1, card_name=long_name),
+        quantity=2,
+        image_path=None,
+        requires_code=True,
+        code_name="ARGENTINA",
+    )
+    out = tmp_path / "full.pdf"
+    result = generate_duplicates_pdf(col, cards, out, mode=DuplicatesReportMode.FULL)
+    assert result.pages >= 1
+    meta = validate_exchange_pdf_metadata(out)
+    assert meta is not None
+
+
+def test_duplicates_full_metadata_subtype_is_duplicates(tmp_path):
+    """Aunque el layout cambie, el subtype embebido sigue siendo 'duplicates'."""
+    col = _collection()
+    cards = [_ac("ARG", 1, qty=2, code_name="ARGENTINA")]
+    out = tmp_path / "full.pdf"
+    generate_duplicates_pdf(col, cards, out, mode=DuplicatesReportMode.FULL)
+    meta = validate_exchange_pdf_metadata(out)
+    assert meta is not None
+    assert meta["subtype"] == "duplicates"
+
+
+def test_duplicates_summary_metadata_subtype_is_duplicates(tmp_path):
+    col = _collection()
+    cards = [_ac("ARG", 1, qty=2, code_name="ARGENTINA")]
+    out = tmp_path / "summary.pdf"
+    generate_duplicates_pdf(col, cards, out, mode=DuplicatesReportMode.SUMMARY)
+    meta = validate_exchange_pdf_metadata(out)
+    assert meta is not None
+    assert meta["subtype"] == "duplicates"
+
+
+def test_duplicates_default_mode_is_full(tmp_path):
+    """Sin pasar mode, usa FULL por compat con la API anterior."""
+    col = _collection()
+    cards = [_ac("ARG", 1, qty=2, code_name="ARGENTINA")]
+    out = tmp_path / "default.pdf"
+    # No pasamos mode → debe usar FULL
+    generate_duplicates_pdf(col, cards, out)
+    meta = validate_exchange_pdf_metadata(out)
+    assert meta is not None
+    assert meta["subtype"] == "duplicates"
 
 
 # ----------------------------------------------------------------------

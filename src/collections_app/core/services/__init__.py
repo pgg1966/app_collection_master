@@ -14,6 +14,7 @@ from collections_app.core.services.license_service import (
 )
 from collections_app.core.services.pdf_generator import (
     AlbumCard,
+    DuplicatesReportMode,
     PdfGeneratorResult,
     generate_album_pdf,
     generate_comparison_pdf,
@@ -58,6 +59,7 @@ __all__ = [
     "AlbumService",
     "AmbiguousCardError",
     "CollectionsService",
+    "DuplicatesReportMode",
     "ExchangeService",
     "GitHubUpdateSource",
     "InventoryService",

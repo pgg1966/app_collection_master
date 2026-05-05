@@ -18,8 +18,7 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QThread, QUrl, Signal
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
@@ -447,27 +446,38 @@ class CompareView(QWidget):
     # ------------------------------------------------------------------
 
     def _on_generate_pdf(self) -> None:
+        """Genera el PDF en `%TEMP%` y abre el preview para guardar.
+
+        El usuario decide destino desde el preview (mismo flujo que en
+        AlbumView). El temp se borra siempre (cancel o tras copiar).
+        """
         if self._comparison is None:
             return
-        date = datetime.now().strftime("%Y-%m-%d")
-        slug = self.collection.collection_name.replace(" ", "_")
-        default_name = f"Comparacion_{slug}_{date}.pdf"
-        path_str, _ = QFileDialog.getSaveFileName(
-            self,
-            self.tr("Guardar PDF de comparación"),
-            default_name,
-            self.tr("PDF (*.pdf)"),
-        )
-        if not path_str:
-            return
-        out = Path(path_str)
-        self._pdf_button.setEnabled(False)
+        import os
+        import tempfile
 
+        from collections_app.client.dialogs.pdf_preview_dialog import PdfPreviewDialog
+
+        date = datetime.now().strftime("%Y-%m-%d")
+        slug = (
+            "".join(
+                ch if ch.isalnum() or ch in " _-" else "_" for ch in self.collection.collection_name
+            )
+            .strip()
+            .replace(" ", "_")
+        )
+        suggested = f"Comparacion_{slug}_{date}.pdf"
+
+        fd, tmp_str = tempfile.mkstemp(suffix=".pdf", prefix="collections_")
+        os.close(fd)
+        tmp_path = Path(tmp_str)
+
+        self._pdf_button.setEnabled(False)
         worker = _ComparisonPdfWorker(
             db_path=self._db_path,
             collection=self.collection,
             result=self._comparison,
-            output_path=out,
+            output_path=tmp_path,
             parent=self,
         )
         self._pdf_worker = worker
@@ -475,10 +485,14 @@ class CompareView(QWidget):
         def on_ok(result: object) -> None:
             self._pdf_button.setEnabled(True)
             assert isinstance(result, PdfGeneratorResult)
-            _show_pdf_done_dialog(self, self.tr("PDF de comparación"), result.output_path)
+            dialog = PdfPreviewDialog(
+                temp_pdf_path=tmp_path, suggested_filename=suggested, parent=self
+            )
+            dialog.exec()
 
         def on_failed(msg: str) -> None:
             self._pdf_button.setEnabled(True)
+            tmp_path.unlink(missing_ok=True)
             QMessageBox.critical(self, self.tr("Error"), msg)
 
         worker.finished_ok.connect(on_ok)
@@ -508,21 +522,3 @@ class CompareView(QWidget):
             self._i_need_list.clear()
             self._i_offer_list.clear()
             self._update_action_buttons()
-
-
-# ----------------------------------------------------------------------
-# Helper compartido: dialog "PDF generado" + botón Visualizar
-# ----------------------------------------------------------------------
-
-
-def _show_pdf_done_dialog(parent: QWidget, title: str, pdf_path: Path) -> None:
-    """QMessageBox con botones [OK] [Visualizar]. Abre el PDF si elige Visualizar."""
-    msg = QMessageBox(parent)
-    msg.setWindowTitle(title)
-    msg.setIcon(QMessageBox.Icon.Information)
-    msg.setText(parent.tr("PDF guardado en:\n{p}").format(p=str(pdf_path)))
-    msg.addButton(parent.tr("OK"), QMessageBox.ButtonRole.AcceptRole)
-    btn_view = msg.addButton(parent.tr("Visualizar"), QMessageBox.ButtonRole.ActionRole)
-    msg.exec()
-    if msg.clickedButton() is btn_view:
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(pdf_path)))

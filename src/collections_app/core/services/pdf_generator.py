@@ -28,6 +28,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from enum import StrEnum
 from itertools import groupby
 from pathlib import Path
 
@@ -415,21 +416,271 @@ def generate_missing_pdf(
     )
 
 
+class DuplicatesReportMode(StrEnum):
+    """Modo de generación del PDF de repetidas.
+
+    - FULL: una sección por categoría con título + flujo continuo
+      "número nombre / número nombre" con saltos de línea por ancho.
+      Pensado para imprimir y mostrar a otro coleccionista.
+    - SUMMARY: una línea por categoría, solo números separados por " / ".
+      Compacto — ideal para anotar rápido qué te sobra.
+    """
+
+    FULL = "full"
+    SUMMARY = "summary"
+
+
 def generate_duplicates_pdf(
     collection: Collection,
     album_cards: list[AlbumCard],
     output_path: Path,
+    mode: DuplicatesReportMode = DuplicatesReportMode.FULL,
 ) -> PdfGeneratorResult:
-    """PDF de cards repetidas (`quantity > 1`) con columna ×N."""
+    """PDF de cards repetidas (`quantity > 1`).
+
+    Despacha al renderer correspondiente según `mode`. Ambos modos
+    embeben la misma metadata de intercambio (subtype="duplicates")
+    para que sean intercambiables desde el punto de vista del lector.
+    """
     dups = [ac for ac in album_cards if ac.quantity > 1]
-    return _generate_list_pdf(
-        collection,
-        dups,
-        output_path,
+    if mode == DuplicatesReportMode.SUMMARY:
+        return _generate_duplicates_summary(collection, dups, output_path)
+    return _generate_duplicates_full(collection, dups, output_path)
+
+
+# ----------------------------------------------------------------------
+# Render: Repetidas — modo FULL (categoría + flujo de items)
+# ----------------------------------------------------------------------
+
+
+def _generate_duplicates_full(
+    collection: Collection,
+    duplicates: list[AlbumCard],
+    output_path: Path,
+) -> PdfGeneratorResult:
+    """Modo completo: título por categoría + flujo continuo de items.
+
+    Layout 2 columnas. Cada categoría arranca con su header y debajo
+    un flujo "ARG-24 Messi ×2 / ARG-7 Di María ×3 / ..." con saltos
+    de línea cuando el siguiente item no entra. El separador `" / "`
+    NUNCA queda al final de línea (el wrap ocurre antes).
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    page_w, page_h = A4
+    c = canvas.Canvas(str(output_path), pagesize=A4)
+    _set_duplicates_metadata(c, collection, duplicates, "Repetidas (Completo)")
+
+    col_w = (page_w - 2 * MARGIN_PT - LIST_COL_GAP_PT) / 2
+    column_xs = (MARGIN_PT, MARGIN_PT + col_w + LIST_COL_GAP_PT)
+
+    y = page_h - MARGIN_PT
+    y = _draw_list_global_header(c, collection, "Repetidas — Completo", duplicates, page_w, y)
+    y_top_after_global = y
+    col_idx = 0
+    page_num = 1
+    result = PdfGeneratorResult(output_path=output_path, pages=1)
+
+    if not duplicates:
+        c.setFont("Helvetica", 11)
+        c.drawCentredString(page_w / 2, page_h / 2, "(no hay repetidas)")
+        c.showPage()
+        c.save()
+        return result
+
+    def new_column() -> None:
+        nonlocal col_idx, y, page_num
+        col_idx += 1
+        if col_idx >= 2:
+            c.showPage()
+            page_num += 1
+            result.pages = page_num
+            col_idx = 0
+            y = page_h - MARGIN_PT
+        else:
+            y = y_top_after_global
+
+    def ensure_room(lines: int = 1) -> None:
+        if y - lines * LIST_LINE_HEIGHT_PT < MARGIN_PT:
+            new_column()
+
+    grouped = groupby(duplicates, key=lambda ac: ac.card.code_id)
+    for code_id, items_iter in grouped:
+        items = list(items_iter)
+        code_name = items[0].code_name
+
+        # Header de categoría
+        ensure_room(2)
+        _draw_category_header(c, code_id, code_name, column_xs[col_idx], y, col_w)
+        y -= LIST_LINE_HEIGHT_PT * 1.4
+
+        # Flujo de items
+        c.setFont("Helvetica", LIST_BODY_FONT_SIZE)
+        c.setFillColor(COLOR_DARK_TEXT)
+        line_x = column_xs[col_idx]
+        max_x = column_xs[col_idx] + col_w
+        first_in_line = True
+
+        for ac in items:
+            item_text = _format_duplicate_item(ac, collection.requires_code)
+            separator = "" if first_in_line else " / "
+            full = separator + item_text
+            text_w = c.stringWidth(full, "Helvetica", LIST_BODY_FONT_SIZE)
+
+            if not first_in_line and line_x + text_w > max_x:
+                # No entra: saltar a línea siguiente sin el separador.
+                y -= LIST_LINE_HEIGHT_PT
+                ensure_room(1)
+                line_x = column_xs[col_idx]
+                full = item_text
+                text_w = c.stringWidth(full, "Helvetica", LIST_BODY_FONT_SIZE)
+                first_in_line = True
+
+            c.drawString(line_x, y, full)
+            line_x += text_w
+            first_in_line = False
+
+        # Espacio entre categorías
+        y -= int(LIST_LINE_HEIGHT_PT * 1.6)
+
+    c.showPage()
+    c.save()
+    result.cards_celeste_placeholder = len(duplicates)
+    return result
+
+
+def _format_duplicate_item(ac: AlbumCard, requires_code: bool) -> str:
+    """Formato de cada item en el modo completo."""
+    label = format_label(ac.card.card_number, ac.card.code_id, requires_code)
+    text = f"{label} {_truncate(ac.card.card_name, MAX_NAME_CHARS)}"
+    if ac.quantity > 1:
+        text += f" ×{ac.quantity}"
+    return text
+
+
+# ----------------------------------------------------------------------
+# Render: Repetidas — modo SUMMARY (línea por categoría, solo números)
+# ----------------------------------------------------------------------
+
+
+def _generate_duplicates_summary(
+    collection: Collection,
+    duplicates: list[AlbumCard],
+    output_path: Path,
+) -> PdfGeneratorResult:
+    """Modo resumido: una línea por categoría con solo los números.
+
+    Si la lista de números no entra en una línea, continúa en la
+    siguiente con sangría a la altura de los números (no del prefijo)
+    para que visualmente se vea que es la misma categoría.
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    page_w, page_h = A4
+    c = canvas.Canvas(str(output_path), pagesize=A4)
+    _set_duplicates_metadata(c, collection, duplicates, "Repetidas (Resumido)")
+
+    col_w = (page_w - 2 * MARGIN_PT - LIST_COL_GAP_PT) / 2
+    column_xs = (MARGIN_PT, MARGIN_PT + col_w + LIST_COL_GAP_PT)
+
+    y = page_h - MARGIN_PT
+    y = _draw_list_global_header(c, collection, "Repetidas — Resumido", duplicates, page_w, y)
+    y_top_after_global = y
+    col_idx = 0
+    page_num = 1
+    result = PdfGeneratorResult(output_path=output_path, pages=1)
+
+    if not duplicates:
+        c.setFont("Helvetica", 11)
+        c.drawCentredString(page_w / 2, page_h / 2, "(no hay repetidas)")
+        c.showPage()
+        c.save()
+        return result
+
+    def new_column() -> None:
+        nonlocal col_idx, y, page_num
+        col_idx += 1
+        if col_idx >= 2:
+            c.showPage()
+            page_num += 1
+            result.pages = page_num
+            col_idx = 0
+            y = page_h - MARGIN_PT
+        else:
+            y = y_top_after_global
+
+    def ensure_room() -> None:
+        if y - LIST_LINE_HEIGHT_PT < MARGIN_PT:
+            new_column()
+
+    grouped = groupby(duplicates, key=lambda ac: ac.card.code_id)
+    for code_id, items_iter in grouped:
+        items = list(items_iter)
+        ensure_room()
+
+        prefix = f"{code_id}:  " if collection.requires_code else ""
+        c.setFont("Helvetica-Bold", LIST_BODY_FONT_SIZE)
+        c.setFillColor(COLOR_DARK_TEXT)
+        c.drawString(column_xs[col_idx], y, prefix)
+        prefix_w = c.stringWidth(prefix, "Helvetica-Bold", LIST_BODY_FONT_SIZE)
+        indent_x = column_xs[col_idx] + prefix_w
+        max_x = column_xs[col_idx] + col_w
+
+        c.setFont("Helvetica", LIST_BODY_FONT_SIZE)
+        line_x = indent_x
+        first = True
+        for ac in items:
+            text = str(ac.card.card_number) if first else f" / {ac.card.card_number}"
+            w = c.stringWidth(text, "Helvetica", LIST_BODY_FONT_SIZE)
+            if not first and line_x + w > max_x:
+                # Continuar en línea siguiente, alineado al indent_x.
+                y -= LIST_LINE_HEIGHT_PT
+                ensure_room()
+                line_x = indent_x
+                text = str(ac.card.card_number)
+                w = c.stringWidth(text, "Helvetica", LIST_BODY_FONT_SIZE)
+                first = True
+            c.drawString(line_x, y, text)
+            line_x += w
+            first = False
+
+        y -= LIST_LINE_HEIGHT_PT
+
+    c.showPage()
+    c.save()
+    result.cards_celeste_placeholder = len(duplicates)
+    return result
+
+
+def _set_duplicates_metadata(
+    c: canvas.Canvas,
+    collection: Collection,
+    duplicates: list[AlbumCard],
+    title: str,
+) -> None:
+    """Setea Title/Subject/Keywords con el mismo formato que los otros PDFs.
+
+    Mantiene la metadata de intercambio (subtype='duplicates') para que
+    los PDFs sigan siendo válidos para el lector de
+    `validate_exchange_pdf_metadata`, independiente del modo visual.
+    """
+    assert collection.collection_id is not None
+    cards_meta: list[dict[str, object]] = [
+        {
+            "code_id": ac.card.code_id,
+            "card_number": ac.card.card_number,
+            "quantity": ac.quantity,
+        }
+        for ac in duplicates
+    ]
+    metadata_json = _build_exchange_metadata(
         subtype="duplicates",
-        title="Repetidas",
-        show_quantity=True,
+        collection_id=collection.collection_id,
+        collection_name=collection.collection_name,
+        cards=cards_meta,
     )
+    c.setTitle(f"{collection.collection_name} — {title}")
+    c.setSubject("CollectionsApp Exchange Data")
+    c.setKeywords(metadata_json)
+    c.setCreator(EXCHANGE_APP_NAME)
 
 
 def generate_owned_pdf(

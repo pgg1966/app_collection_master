@@ -1,14 +1,13 @@
-"""Tab Álbum: genera 4 PDFs (álbum visual + listas faltantes/repetidas/owned)."""
+"""Tab Álbum: genera PDFs (álbum + listas faltantes/repetidas/owned) con preview."""
 
 import logging
 import sqlite3
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QThread, QUrl, Signal
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import (
-    QFileDialog,
     QFrame,
     QLabel,
     QMessageBox,
@@ -17,13 +16,19 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from collections_app.client.dialogs.pdf_preview_dialog import PdfPreviewDialog
 from collections_app.core.db.connection import create_connection
 from collections_app.core.models import Collection
 from collections_app.core.repositories import (
     CodesLinesRepository,
     CollectionsRepository,
 )
-from collections_app.core.services import AlbumService, InventoryService, PdfGeneratorResult
+from collections_app.core.services import (
+    AlbumService,
+    DuplicatesReportMode,
+    InventoryService,
+    PdfGeneratorResult,
+)
 from collections_app.core.utils.paths import get_crest_path
 from collections_app.shared_ui.theme import Spacing
 
@@ -31,10 +36,12 @@ logger = logging.getLogger(__name__)
 
 
 class _PdfWorker(QThread):
-    """Genera un PDF en thread separado.
+    """Genera un PDF en un archivo TEMPORAL (luego el preview decide destino).
 
-    Abre su propia conexión a la DB (NO se pueden compartir `sqlite3.Connection`
-    entre threads). El kind define cuál de los 4 generadores invoca.
+    Abre su propia conexión a la DB (NO se pueden compartir
+    `sqlite3.Connection` entre threads). El kind dispatcha al método
+    correspondiente del AlbumService — incluye dos variantes para
+    "repetidas" (FULL / SUMMARY).
     """
 
     finished_ok = Signal(object)  # PdfGeneratorResult
@@ -45,7 +52,7 @@ class _PdfWorker(QThread):
         db_path: Path,
         collection_id: int,
         output_path: Path,
-        kind: str,  # "album" | "missing" | "duplicates" | "owned"
+        kind: str,  # "album"|"missing"|"duplicates_full"|"duplicates_summary"|"owned"
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -67,8 +74,14 @@ class _PdfWorker(QThread):
                         result = service.generate_album_pdf(col, self._output_path)
                     case "missing":
                         result = service.generate_missing_pdf(col, self._output_path)
-                    case "duplicates":
-                        result = service.generate_duplicates_pdf(col, self._output_path)
+                    case "duplicates_full":
+                        result = service.generate_duplicates_pdf(
+                            col, self._output_path, mode=DuplicatesReportMode.FULL
+                        )
+                    case "duplicates_summary":
+                        result = service.generate_duplicates_pdf(
+                            col, self._output_path, mode=DuplicatesReportMode.SUMMARY
+                        )
                     case "owned":
                         result = service.generate_owned_pdf(col, self._output_path)
                     case _:
@@ -86,6 +99,25 @@ class _PdfWorker(QThread):
 class AlbumView(QWidget):
     """Tab del cliente: genera PDFs del álbum y listas asociadas."""
 
+    # (kind interno, label visible, descripción, prefijo del filename)
+    _PDF_KINDS: tuple[tuple[str, str, str, str], ...] = (
+        ("album", "📄 Álbum visual completo", "Todas las cards — con foto o placeholder.", "Album"),
+        ("missing", "📋 PDF de faltantes", "Lista de cards que te faltan.", "Faltantes"),
+        (
+            "duplicates_full",
+            "📋 Repetidas — Completo",
+            "Categoría + flujo continuo de número/nombre. Ideal para imprimir.",
+            "Repetidas_Completo",
+        ),
+        (
+            "duplicates_summary",
+            "📋 Repetidas — Resumido",
+            "Una línea por categoría, solo números. Compacto.",
+            "Repetidas_Resumido",
+        ),
+        ("owned", "📋 PDF de lo que tengo", "Lista completa de tu colección actual.", "Tengo"),
+    )
+
     def __init__(
         self,
         conn: sqlite3.Connection,
@@ -98,6 +130,7 @@ class AlbumView(QWidget):
         self._db_path = db_path
         self.collection = collection
         self._worker: _PdfWorker | None = None
+        self._buttons: list[QPushButton] = []
         self._build_ui()
         self._refresh_image_count()
 
@@ -141,43 +174,12 @@ class AlbumView(QWidget):
             )
         )
 
-        # Botón 1: álbum visual
-        outer.addLayout(
-            self._make_button_row(
-                self.tr("📄 Álbum visual completo"),
-                self.tr("Todas las cards — con foto o placeholder."),
-                kind="album",
-            )
-        )
-        # Botón 2: faltantes
-        outer.addLayout(
-            self._make_button_row(
-                self.tr("📋 PDF de faltantes"),
-                self.tr("Lista de cards que te faltan."),
-                kind="missing",
-            )
-        )
-        # Botón 3: repetidas
-        outer.addLayout(
-            self._make_button_row(
-                self.tr("📋 PDF de repetidas"),
-                self.tr("Lista de cards que tenés más de una vez."),
-                kind="duplicates",
-            )
-        )
-        # Botón 4: owned
-        outer.addLayout(
-            self._make_button_row(
-                self.tr("📋 PDF de lo que tengo"),
-                self.tr("Lista completa de tu colección actual."),
-                kind="owned",
-            )
-        )
+        for kind, label, subtitle, _prefix in self._PDF_KINDS:
+            outer.addLayout(self._make_button_row(self.tr(label), self.tr(subtitle), kind))
 
         # Estado
         self._status_label = QLabel("")
         self._status_label.setWordWrap(True)
-        self._status_label.setTextInteractionFlags(self._status_label.textInteractionFlags())
         outer.addWidget(self._status_label)
         return frame
 
@@ -188,9 +190,6 @@ class AlbumView(QWidget):
         button.clicked.connect(lambda: self._generate(kind))
         row.addWidget(button)
         row.addWidget(QLabel(subtitle))
-        # Guardar referencia para deshabilitar/habilitar
-        if not hasattr(self, "_buttons"):
-            self._buttons: list[QPushButton] = []
         self._buttons.append(button)
         return row
 
@@ -246,31 +245,41 @@ class AlbumView(QWidget):
         )
 
     # ------------------------------------------------------------------
-    # Generación
+    # Generación con preview
     # ------------------------------------------------------------------
 
-    _PREFIX_BY_KIND: dict[str, str] = {
-        "album": "Album",
-        "missing": "Faltantes",
-        "duplicates": "Repetidas",
-        "owned": "Tengo",
-    }
+    def _kind_meta(self, kind: str) -> tuple[str, str]:
+        """Retorna (label, prefix) para el kind dado."""
+        for k, label, _sub, prefix in self._PDF_KINDS:
+            if k == kind:
+                return label, prefix
+        return kind, kind
 
-    def _default_filename(self, kind: str) -> str:
+    def _suggested_filename(self, kind: str) -> str:
+        _, prefix = self._kind_meta(kind)
         date = datetime.now().strftime("%Y-%m-%d")
-        slug = self.collection.collection_name.replace(" ", "_")
-        return f"{self._PREFIX_BY_KIND[kind]}_{slug}_{date}.pdf"
+        slug = (
+            "".join(
+                ch if ch.isalnum() or ch in " _-" else "_" for ch in self.collection.collection_name
+            )
+            .strip()
+            .replace(" ", "_")
+        )
+        return f"{prefix}_{slug}_{date}.pdf"
 
     def _generate(self, kind: str) -> None:
-        path_str, _ = QFileDialog.getSaveFileName(
-            self,
-            self.tr("Guardar PDF"),
-            self._default_filename(kind),
-            self.tr("PDF (*.pdf)"),
-        )
-        if not path_str:
-            return  # usuario canceló
-        out = Path(path_str)
+        """Genera el PDF en `%TEMP%` y muestra el preview.
+
+        El preview es donde el usuario decide guardar (con QFileDialog)
+        o cancelar. No tocamos disco fuera del temp hasta que confirme.
+        """
+        # mkstemp para tener un path único sin abrir el handle
+        fd, tmp_str = tempfile.mkstemp(suffix=".pdf", prefix="collections_")
+        import os
+
+        os.close(fd)
+        tmp_path = Path(tmp_str)
+
         self._set_buttons_enabled(False)
         self._status_label.setText(self.tr("Generando…"))
 
@@ -278,46 +287,35 @@ class AlbumView(QWidget):
         worker = _PdfWorker(
             db_path=self._db_path,
             collection_id=self.collection.collection_id,
-            output_path=out,
+            output_path=tmp_path,
             kind=kind,
             parent=self,
         )
         self._worker = worker
 
-        title = self._PREFIX_BY_KIND[kind]
+        label, _ = self._kind_meta(kind)
+        suggested = self._suggested_filename(kind)
 
         def on_ok(result: object) -> None:
             assert isinstance(result, PdfGeneratorResult)
             self._set_buttons_enabled(True)
+            self._status_label.setText("")
             ts = datetime.now().strftime("%Y-%m-%d %H:%M")
             self._last_run_label.setText(self.tr("Última generación: {ts}").format(ts=ts))
-            self._status_label.setText(
-                self.tr("✓ PDF guardado en: {p}").format(p=str(result.output_path))
+            # Mostrar preview — el dialog se hace cargo de borrar el temp.
+            dialog = PdfPreviewDialog(
+                temp_pdf_path=tmp_path, suggested_filename=suggested, parent=self
             )
-            msg = QMessageBox(self)
-            msg.setWindowTitle(title)
-            msg.setIcon(QMessageBox.Icon.Information)
-            msg.setText(
-                self.tr(
-                    "PDF generado.\n\nPáginas: {p}\nCon foto: {f}\n"
-                    "Placeholder celeste: {c}\nFaltantes: {m}"
-                ).format(
-                    p=result.pages,
-                    f=result.cards_with_image,
-                    c=result.cards_celeste_placeholder,
-                    m=result.cards_missing,
-                )
-            )
-            msg.addButton(self.tr("OK"), QMessageBox.ButtonRole.AcceptRole)
-            btn_view = msg.addButton(self.tr("Visualizar"), QMessageBox.ButtonRole.ActionRole)
-            msg.exec()
-            if msg.clickedButton() is btn_view:
-                QDesktopServices.openUrl(QUrl.fromLocalFile(str(result.output_path)))
+            dialog.exec()
+            saved = dialog.saved_path()
+            if saved is not None:
+                self._status_label.setText(self.tr("✓ PDF guardado en: {p}").format(p=str(saved)))
 
         def on_failed(msg: str) -> None:
             self._set_buttons_enabled(True)
             self._status_label.setText("")
-            QMessageBox.critical(self, title, msg)
+            tmp_path.unlink(missing_ok=True)
+            QMessageBox.critical(self, label, msg)
 
         worker.finished_ok.connect(on_ok)
         worker.failed.connect(on_failed)
@@ -326,13 +324,3 @@ class AlbumView(QWidget):
     def _set_buttons_enabled(self, enabled: bool) -> None:
         for b in self._buttons:
             b.setEnabled(enabled)
-
-
-# ----------------------------------------------------------------------
-# Helper backwards-compatible para tests / scripts
-# ----------------------------------------------------------------------
-
-
-def open_pdf_externally(path: Path) -> None:
-    """Helper: abre un PDF con la app default del sistema."""
-    QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
