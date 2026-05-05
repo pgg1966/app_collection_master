@@ -48,9 +48,7 @@ def test_run_migrations_with_empty_schema_dir_returns_zero(tmp_path) -> None:
     # 001 que la incluyera).
     tables = {
         row["name"]
-        for row in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        ).fetchall()
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
     }
     assert "schema_version" not in tables
 

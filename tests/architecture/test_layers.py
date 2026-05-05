@@ -131,9 +131,8 @@ def _imports_of(tree: ast.Module) -> list[tuple[str, int]]:
         if isinstance(node, ast.Import):
             for alias in node.names:
                 out.append((alias.name, node.lineno))
-        elif isinstance(node, ast.ImportFrom):
-            if node.level == 0 and node.module is not None:
-                out.append((node.module, node.lineno))
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module is not None:
+            out.append((node.module, node.lineno))
     return out
 
 
@@ -188,9 +187,7 @@ def test_imports_respect_layer_direction(py_path: Path, layer: str) -> None:
                 f"(prefijo prohibido: {prefix!r})"
             )
 
-    assert not violations, (
-        "Imports cross-layer detectados:\n" + "\n".join(violations)
-    )
+    assert not violations, "Imports cross-layer detectados:\n" + "\n".join(violations)
 
 
 def test_all_expected_layers_have_files() -> None:
@@ -202,6 +199,5 @@ def test_all_expected_layers_have_files() -> None:
     layers_seen = {layer for _, layer in _LAYER_FILES}
     missing = EXPECTED_LAYERS - layers_seen
     assert not missing, (
-        f"Capas sin archivos detectadas: {missing}. "
-        f"Esto rompe el harness de tests de capas."
+        f"Capas sin archivos detectadas: {missing}. " f"Esto rompe el harness de tests de capas."
     )

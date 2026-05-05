@@ -42,6 +42,9 @@ target-version = ["py311"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# legacy/ es código v0.1 archivado como referencia; no se lintea ni
+# reformatea. Ver legacy/v0_1/README.md.
+extend-exclude = ["legacy"]
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "B", "UP", "ANN", "S", "C4", "SIM"]
 ignore = ["S101"]
