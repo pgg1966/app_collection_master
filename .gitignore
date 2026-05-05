@@ -45,3 +45,7 @@ docs/reference/
 /check.py
 /check_project.py
 /diagnostico.txt
+
+# Personal planning artifacts (generated locally for conversation context)
+docs/project_structure.md
+docs/data_dictionary.md
