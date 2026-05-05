@@ -102,6 +102,13 @@ Mejoras que aumentan calidad pero no son urgentes.
 - Agregar `last_updated`, `pending_for_album_completion`, etc.
 - Solo si UI lo pide.
 
+### Mejoras al script de arquitectura
+- Extender `tests/architecture/test_repo_return_contracts.py` (sec 2.3) a la capa `services/`. Hoy solo audita repos; falta el equivalente para que un service nuevo no devuelva tuplas/dicts/Any sin que nadie lo note.
+- Probablemente quiera permitir además del set de tipos de los repos: `str` y `dict` solo en services específicos (settings) o nunca; decidir.
+- Mismo enfoque AST con allowlist por capa.
+
+**Cuándo hacerlo:** cuando un service introduzca un retorno raro y queramos atrapar la regresión, o como ronda general de arquitectura post-Prompt 5.
+
 ---
 
 ## Tier 3 — Decisiones estratégicas
