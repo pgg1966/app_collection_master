@@ -15,5 +15,5 @@ __app_name__ = "CollectionsApp"
 
 # Repo de GitHub usado por GitHubUpdateSource. Reemplazar por el repo real
 # cuando se publique el primer release.
-__github_repo__ = "tuusuario/collections"
+__github_repo__ = "pgg1966/app_collection_master"
 __update_url__ = f"https://api.github.com/repos/{__github_repo__}/releases/latest"
