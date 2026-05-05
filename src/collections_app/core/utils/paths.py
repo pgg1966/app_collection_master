@@ -1,14 +1,21 @@
-"""Resolución de paths del paquete.
+"""Resolución de paths del paquete y del directorio de datos del usuario.
 
-En v0.2.0 sólo se expone `get_schema_dir()`, que apunta al directorio
-con los SQLs de migración. Los paths de datos del usuario (DB, logs,
-imágenes generadas) se reintroducirán cuando los necesite la app
-(Prompt 2/3+), evitando arrastrar código de v0.1 que aún no tiene
-consumidor en v0.2.
+- `get_schema_dir()`: assets read-only embebidos en el paquete (los SQLs
+  de migración). Funciona en desarrollo y dentro del bundle de PyInstaller.
+- `get_app_data_dir()` / `get_default_db_path()`: paths mutables del
+  usuario, en el directorio convencional del SO.
+
+Layout cross-platform:
+- Windows : `%APPDATA%\\Collections\\`
+- macOS   : `~/Library/Application Support/Collections/`
+- Linux   : `$XDG_DATA_HOME/Collections/` (default `~/.local/share/Collections/`)
+
+`get_app_data_dir()` crea el directorio si no existe.
 """
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -28,3 +35,26 @@ def _get_bundle_dir() -> Path:
 def get_schema_dir() -> Path:
     """Path al directorio con los SQLs de migración (`core/db/schema/`)."""
     return _get_bundle_dir() / "core" / "db" / "schema"
+
+
+def get_app_data_dir() -> Path:
+    """Directorio donde la app persiste datos del usuario (DB, etc.).
+
+    Crea el directorio si no existe. v0.2 no tiene perfiles de usuario,
+    así que es el path "default" — equivalente a `%APPDATA%\\Collections\\`
+    en Windows.
+    """
+    if sys.platform == "win32":
+        base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+    else:
+        base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+    app_dir = base / "Collections"
+    app_dir.mkdir(parents=True, exist_ok=True)
+    return app_dir
+
+
+def get_default_db_path() -> Path:
+    """Path al archivo SQLite de la app, dentro del data dir del usuario."""
+    return get_app_data_dir() / "collections.db"
