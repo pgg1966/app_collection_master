@@ -50,6 +50,9 @@ select = ["E", "F", "W", "I", "N", "B", "UP", "ANN", "S", "C4", "SIM"]
 ignore = ["S101"]
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["ANN", "S"]
+# CardLoaderView se preserva textualmente desde v0.1 (CLAUDE.md sec 7.1).
+# ANN101 (deprecada en ruff moderno) no se aplica a su forma legacy.
+"src/collections_app/views/inventory/card_loader.py" = ["ANN101"]
 
 [tool.mypy]
 python_version = "3.11"
