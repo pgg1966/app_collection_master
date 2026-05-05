@@ -30,3 +30,4 @@ black src/ tests/         # formatear
 ruff check src/ tests/    # lint
 mypy src/                 # validar tipos
 ```
+# app_collection_master
