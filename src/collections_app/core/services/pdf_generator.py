@@ -404,85 +404,132 @@ def _draw_quantity_badge(
 # ----------------------------------------------------------------------
 
 
-def generate_missing_pdf(
-    collection: Collection,
-    album_cards: list[AlbumCard],
-    output_path: Path,
-) -> PdfGeneratorResult:
-    """PDF de cards que faltan (`quantity == 0`)."""
-    missing = [ac for ac in album_cards if ac.quantity == 0]
-    return _generate_list_pdf(
-        collection, missing, output_path, subtype="missing", title="Faltantes"
-    )
+class ListReportMode(StrEnum):
+    """Modo visual de los reportes de lista (faltantes / repetidas).
 
-
-class DuplicatesReportMode(StrEnum):
-    """Modo de generación del PDF de repetidas.
-
-    - FULL: una sección por categoría con título + flujo continuo
+    - FULL: un título por categoría + flujo continuo
       "número nombre / número nombre" con saltos de línea por ancho.
-      Pensado para imprimir y mostrar a otro coleccionista.
+      Para repetidas agrega "×N" al final del item. Pensado para
+      imprimir y compartir.
     - SUMMARY: una línea por categoría, solo números separados por " / ".
-      Compacto — ideal para anotar rápido qué te sobra.
+      Para repetidas pega la cantidad inline ("24×3 / 7×2"). Compacto.
     """
 
     FULL = "full"
     SUMMARY = "summary"
 
 
+# Backward-compat: el commit anterior expuso `DuplicatesReportMode`.
+# Mantenemos el alias para no romper imports en otros módulos / tests.
+DuplicatesReportMode = ListReportMode
+
+
+def generate_missing_pdf(
+    collection: Collection,
+    album_cards: list[AlbumCard],
+    output_path: Path,
+    mode: ListReportMode = ListReportMode.FULL,
+) -> PdfGeneratorResult:
+    """PDF de cards que faltan (`quantity == 0`).
+
+    `mode` controla el layout (FULL / SUMMARY). Ambos modos embeben
+    metadata `subtype="missing"`. show_quantity está hardcoded en
+    False — los faltantes nunca tienen cantidad para mostrar.
+    """
+    missing = [ac for ac in album_cards if ac.quantity == 0]
+    if mode == ListReportMode.SUMMARY:
+        return _generate_list_summary(
+            collection,
+            missing,
+            output_path,
+            subtype="missing",
+            title="Faltantes",
+            show_quantity=False,
+        )
+    return _generate_list_full(
+        collection,
+        missing,
+        output_path,
+        subtype="missing",
+        title="Faltantes",
+        show_quantity=False,
+    )
+
+
 def generate_duplicates_pdf(
     collection: Collection,
     album_cards: list[AlbumCard],
     output_path: Path,
-    mode: DuplicatesReportMode = DuplicatesReportMode.FULL,
+    mode: ListReportMode = ListReportMode.FULL,
 ) -> PdfGeneratorResult:
     """PDF de cards repetidas (`quantity > 1`).
 
     Despacha al renderer correspondiente según `mode`. Ambos modos
-    embeben la misma metadata de intercambio (subtype="duplicates")
-    para que sean intercambiables desde el punto de vista del lector.
+    embeben metadata `subtype="duplicates"`. show_quantity=True para
+    que aparezca "×N" en cada item / inline junto al número.
     """
     dups = [ac for ac in album_cards if ac.quantity > 1]
-    if mode == DuplicatesReportMode.SUMMARY:
-        return _generate_duplicates_summary(collection, dups, output_path)
-    return _generate_duplicates_full(collection, dups, output_path)
+    if mode == ListReportMode.SUMMARY:
+        return _generate_list_summary(
+            collection,
+            dups,
+            output_path,
+            subtype="duplicates",
+            title="Repetidas",
+            show_quantity=True,
+        )
+    return _generate_list_full(
+        collection,
+        dups,
+        output_path,
+        subtype="duplicates",
+        title="Repetidas",
+        show_quantity=True,
+    )
 
 
 # ----------------------------------------------------------------------
-# Render: Repetidas — modo FULL (categoría + flujo de items)
+# Render compartido: lista FULL (categoría + flujo de items)
+# Usado por faltantes y repetidas (parametrizado por show_quantity).
 # ----------------------------------------------------------------------
 
 
-def _generate_duplicates_full(
+def _generate_list_full(
     collection: Collection,
-    duplicates: list[AlbumCard],
+    cards: list[AlbumCard],
     output_path: Path,
+    subtype: str,
+    title: str,
+    show_quantity: bool,
 ) -> PdfGeneratorResult:
     """Modo completo: título por categoría + flujo continuo de items.
 
     Layout 2 columnas. Cada categoría arranca con su header y debajo
-    un flujo "ARG-24 Messi ×2 / ARG-7 Di María ×3 / ..." con saltos
-    de línea cuando el siguiente item no entra. El separador `" / "`
-    NUNCA queda al final de línea (el wrap ocurre antes).
+    un flujo "ARG-24 Messi ×2 / ARG-7 Di María / ..." con saltos de
+    línea cuando el siguiente item no entra. El separador " / " NUNCA
+    queda al final de línea (el wrap ocurre antes).
+
+    `show_quantity=True` (repetidas) agrega " ×N" al final de cada
+    item. `show_quantity=False` (faltantes) los omite.
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
     page_w, page_h = A4
     c = canvas.Canvas(str(output_path), pagesize=A4)
-    _set_duplicates_metadata(c, collection, duplicates, "Repetidas (Completo)")
+    _set_list_metadata(c, collection, cards, subtype, f"{title} (Completo)")
 
     col_w = (page_w - 2 * MARGIN_PT - LIST_COL_GAP_PT) / 2
     column_xs = (MARGIN_PT, MARGIN_PT + col_w + LIST_COL_GAP_PT)
 
     y = page_h - MARGIN_PT
-    y = _draw_list_global_header(c, collection, "Repetidas — Completo", duplicates, page_w, y)
+    y = _draw_list_global_header(c, collection, f"{title} — Completo", cards, page_w, y)
     y_top_after_global = y
     col_idx = 0
     page_num = 1
     result = PdfGeneratorResult(output_path=output_path, pages=1)
 
-    if not duplicates:
+    if not cards:
         c.setFont("Helvetica", 11)
-        c.drawCentredString(page_w / 2, page_h / 2, "(no hay repetidas)")
+        c.drawCentredString(page_w / 2, page_h / 2, f"(no hay {title.lower()})")
         c.showPage()
         c.save()
         return result
@@ -503,7 +550,7 @@ def _generate_duplicates_full(
         if y - lines * LIST_LINE_HEIGHT_PT < MARGIN_PT:
             new_column()
 
-    grouped = groupby(duplicates, key=lambda ac: ac.card.code_id)
+    grouped = groupby(cards, key=lambda ac: ac.card.code_id)
     for code_id, items_iter in grouped:
         items = list(items_iter)
         code_name = items[0].code_name
@@ -521,7 +568,7 @@ def _generate_duplicates_full(
         first_in_line = True
 
         for ac in items:
-            item_text = _format_duplicate_item(ac, collection.requires_code)
+            item_text = _format_full_item(ac, collection.requires_code, show_quantity)
             separator = "" if first_in_line else " / "
             full = separator + item_text
             text_w = c.stringWidth(full, "Helvetica", LIST_BODY_FONT_SIZE)
@@ -544,53 +591,65 @@ def _generate_duplicates_full(
 
     c.showPage()
     c.save()
-    result.cards_celeste_placeholder = len(duplicates)
+    result.cards_celeste_placeholder = len(cards)
     return result
 
 
-def _format_duplicate_item(ac: AlbumCard, requires_code: bool) -> str:
-    """Formato de cada item en el modo completo."""
+def _format_full_item(ac: AlbumCard, requires_code: bool, show_quantity: bool) -> str:
+    """Formato de cada item en modo FULL.
+
+    show_quantity=True y quantity>1 → "ARG-24 Messi ×3"
+    show_quantity=True y quantity<=1 → "ARG-24 Messi" (sin ×N)
+    show_quantity=False → "ARG-24 Messi"
+    """
     label = format_label(ac.card.card_number, ac.card.code_id, requires_code)
     text = f"{label} {_truncate(ac.card.card_name, MAX_NAME_CHARS)}"
-    if ac.quantity > 1:
+    if show_quantity and ac.quantity > 1:
         text += f" ×{ac.quantity}"
     return text
 
 
 # ----------------------------------------------------------------------
-# Render: Repetidas — modo SUMMARY (línea por categoría, solo números)
+# Render compartido: lista SUMMARY (línea por categoría, solo números)
 # ----------------------------------------------------------------------
 
 
-def _generate_duplicates_summary(
+def _generate_list_summary(
     collection: Collection,
-    duplicates: list[AlbumCard],
+    cards: list[AlbumCard],
     output_path: Path,
+    subtype: str,
+    title: str,
+    show_quantity: bool,
 ) -> PdfGeneratorResult:
     """Modo resumido: una línea por categoría con solo los números.
 
-    Si la lista de números no entra en una línea, continúa en la
-    siguiente con sangría a la altura de los números (no del prefijo)
-    para que visualmente se vea que es la misma categoría.
+    `show_quantity=True` (repetidas) pega la cantidad inline:
+        "ARG:  24×3 / 7×2 / 11×2"
+    `show_quantity=False` (faltantes) solo los números:
+        "ARG:  24 / 7 / 11 / 18"
+
+    Si la línea no entra, continúa en la siguiente con sangría a la
+    altura del primer número (alineado bajo el código, no del prefijo).
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
     page_w, page_h = A4
     c = canvas.Canvas(str(output_path), pagesize=A4)
-    _set_duplicates_metadata(c, collection, duplicates, "Repetidas (Resumido)")
+    _set_list_metadata(c, collection, cards, subtype, f"{title} (Resumido)")
 
     col_w = (page_w - 2 * MARGIN_PT - LIST_COL_GAP_PT) / 2
     column_xs = (MARGIN_PT, MARGIN_PT + col_w + LIST_COL_GAP_PT)
 
     y = page_h - MARGIN_PT
-    y = _draw_list_global_header(c, collection, "Repetidas — Resumido", duplicates, page_w, y)
+    y = _draw_list_global_header(c, collection, f"{title} — Resumido", cards, page_w, y)
     y_top_after_global = y
     col_idx = 0
     page_num = 1
     result = PdfGeneratorResult(output_path=output_path, pages=1)
 
-    if not duplicates:
+    if not cards:
         c.setFont("Helvetica", 11)
-        c.drawCentredString(page_w / 2, page_h / 2, "(no hay repetidas)")
+        c.drawCentredString(page_w / 2, page_h / 2, f"(no hay {title.lower()})")
         c.showPage()
         c.save()
         return result
@@ -611,7 +670,7 @@ def _generate_duplicates_summary(
         if y - LIST_LINE_HEIGHT_PT < MARGIN_PT:
             new_column()
 
-    grouped = groupby(duplicates, key=lambda ac: ac.card.code_id)
+    grouped = groupby(cards, key=lambda ac: ac.card.code_id)
     for code_id, items_iter in grouped:
         items = list(items_iter)
         ensure_room()
@@ -628,14 +687,15 @@ def _generate_duplicates_summary(
         line_x = indent_x
         first = True
         for ac in items:
-            text = str(ac.card.card_number) if first else f" / {ac.card.card_number}"
+            num_text = _format_summary_number(ac, show_quantity)
+            text = num_text if first else f" / {num_text}"
             w = c.stringWidth(text, "Helvetica", LIST_BODY_FONT_SIZE)
             if not first and line_x + w > max_x:
                 # Continuar en línea siguiente, alineado al indent_x.
                 y -= LIST_LINE_HEIGHT_PT
                 ensure_room()
                 line_x = indent_x
-                text = str(ac.card.card_number)
+                text = num_text
                 w = c.stringWidth(text, "Helvetica", LIST_BODY_FONT_SIZE)
                 first = True
             c.drawString(line_x, y, text)
@@ -646,21 +706,28 @@ def _generate_duplicates_summary(
 
     c.showPage()
     c.save()
-    result.cards_celeste_placeholder = len(duplicates)
+    result.cards_celeste_placeholder = len(cards)
     return result
 
 
-def _set_duplicates_metadata(
+def _format_summary_number(ac: AlbumCard, show_quantity: bool) -> str:
+    """Número solo o con cantidad inline (`24` vs `24×3`)."""
+    if show_quantity and ac.quantity > 1:
+        return f"{ac.card.card_number}×{ac.quantity}"
+    return str(ac.card.card_number)
+
+
+def _set_list_metadata(
     c: canvas.Canvas,
     collection: Collection,
-    duplicates: list[AlbumCard],
+    cards: list[AlbumCard],
+    subtype: str,
     title: str,
 ) -> None:
-    """Setea Title/Subject/Keywords con el mismo formato que los otros PDFs.
+    """Setea Title/Subject/Keywords con metadata de intercambio.
 
-    Mantiene la metadata de intercambio (subtype='duplicates') para que
-    los PDFs sigan siendo válidos para el lector de
-    `validate_exchange_pdf_metadata`, independiente del modo visual.
+    Compartido entre faltantes y repetidas: el `subtype` distingue
+    cuál es para `validate_exchange_pdf_metadata`.
     """
     assert collection.collection_id is not None
     cards_meta: list[dict[str, object]] = [
@@ -669,10 +736,10 @@ def _set_duplicates_metadata(
             "card_number": ac.card.card_number,
             "quantity": ac.quantity,
         }
-        for ac in duplicates
+        for ac in cards
     ]
     metadata_json = _build_exchange_metadata(
-        subtype="duplicates",
+        subtype=subtype,
         collection_id=collection.collection_id,
         collection_name=collection.collection_name,
         cards=cards_meta,

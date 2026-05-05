@@ -52,9 +52,9 @@ def view(qtbot, memory_db, album_setup):
 
 
 def test_album_view_loads_without_error(qtbot, view):
-    """Construye los 5 botones (album / missing / duplicates_full /
-    duplicates_summary / owned)."""
-    assert len(view._buttons) == 5
+    """Construye los 6 botones (album / missing_full / missing_summary /
+    duplicates_full / duplicates_summary / owned)."""
+    assert len(view._buttons) == 6
 
 
 def test_image_count_shows_zero_when_no_crests(
@@ -110,10 +110,11 @@ def _stub_worker(captured: dict):
     ("button_idx", "expected_kind", "expected_prefix"),
     [
         (0, "album", "Album"),
-        (1, "missing", "Faltantes"),
-        (2, "duplicates_full", "Repetidas_Completo"),
-        (3, "duplicates_summary", "Repetidas_Resumido"),
-        (4, "owned", "Tengo"),
+        (1, "missing_full", "Faltantes_Completo"),
+        (2, "missing_summary", "Faltantes_Resumido"),
+        (3, "duplicates_full", "Repetidas_Completo"),
+        (4, "duplicates_summary", "Repetidas_Resumido"),
+        (5, "owned", "Tengo"),
     ],
 )
 def test_each_button_dispatches_correct_kind_to_worker(

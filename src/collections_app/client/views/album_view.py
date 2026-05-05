@@ -25,8 +25,8 @@ from collections_app.core.repositories import (
 )
 from collections_app.core.services import (
     AlbumService,
-    DuplicatesReportMode,
     InventoryService,
+    ListReportMode,
     PdfGeneratorResult,
 )
 from collections_app.core.utils.paths import get_crest_path
@@ -52,7 +52,8 @@ class _PdfWorker(QThread):
         db_path: Path,
         collection_id: int,
         output_path: Path,
-        kind: str,  # "album"|"missing"|"duplicates_full"|"duplicates_summary"|"owned"
+        kind: str,  # "album"|"missing_full"|"missing_summary"|"duplicates_full"
+        # |"duplicates_summary"|"owned"
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -72,15 +73,21 @@ class _PdfWorker(QThread):
                 match self._kind:
                     case "album":
                         result = service.generate_album_pdf(col, self._output_path)
-                    case "missing":
-                        result = service.generate_missing_pdf(col, self._output_path)
+                    case "missing_full":
+                        result = service.generate_missing_pdf(
+                            col, self._output_path, mode=ListReportMode.FULL
+                        )
+                    case "missing_summary":
+                        result = service.generate_missing_pdf(
+                            col, self._output_path, mode=ListReportMode.SUMMARY
+                        )
                     case "duplicates_full":
                         result = service.generate_duplicates_pdf(
-                            col, self._output_path, mode=DuplicatesReportMode.FULL
+                            col, self._output_path, mode=ListReportMode.FULL
                         )
                     case "duplicates_summary":
                         result = service.generate_duplicates_pdf(
-                            col, self._output_path, mode=DuplicatesReportMode.SUMMARY
+                            col, self._output_path, mode=ListReportMode.SUMMARY
                         )
                     case "owned":
                         result = service.generate_owned_pdf(col, self._output_path)
@@ -102,17 +109,28 @@ class AlbumView(QWidget):
     # (kind interno, label visible, descripción, prefijo del filename)
     _PDF_KINDS: tuple[tuple[str, str, str, str], ...] = (
         ("album", "📄 Álbum visual completo", "Todas las cards — con foto o placeholder.", "Album"),
-        ("missing", "📋 PDF de faltantes", "Lista de cards que te faltan.", "Faltantes"),
+        (
+            "missing_full",
+            "📋 Faltantes — Completo",
+            "Categoría + flujo continuo número/nombre. Ideal para imprimir.",
+            "Faltantes_Completo",
+        ),
+        (
+            "missing_summary",
+            "📋 Faltantes — Resumido",
+            "Una línea por categoría, solo números. Compacto.",
+            "Faltantes_Resumido",
+        ),
         (
             "duplicates_full",
             "📋 Repetidas — Completo",
-            "Categoría + flujo continuo de número/nombre. Ideal para imprimir.",
+            "Categoría + flujo número/nombre con ×N. Ideal para compartir.",
             "Repetidas_Completo",
         ),
         (
             "duplicates_summary",
             "📋 Repetidas — Resumido",
-            "Una línea por categoría, solo números. Compacto.",
+            "Una línea por categoría con `número×N`. Compacto.",
             "Repetidas_Resumido",
         ),
         ("owned", "📋 PDF de lo que tengo", "Lista completa de tu colección actual.", "Tengo"),

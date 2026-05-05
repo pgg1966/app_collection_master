@@ -12,6 +12,7 @@ from collections_app.core.services.pdf_generator import (
     EXCHANGE_APP_NAME,
     AlbumCard,
     DuplicatesReportMode,
+    ListReportMode,
     _build_exchange_metadata,
     _chunks,
     format_label,
@@ -375,6 +376,125 @@ def test_duplicates_default_mode_is_full(tmp_path):
     meta = validate_exchange_pdf_metadata(out)
     assert meta is not None
     assert meta["subtype"] == "duplicates"
+
+
+# ----------------------------------------------------------------------
+# Faltantes — modos FULL / SUMMARY (Fix nuevo)
+# ----------------------------------------------------------------------
+
+
+def _extract_pdf_text(path: Path) -> str:
+    """Extrae el texto de TODAS las páginas de un PDF (concatenado)."""
+    reader = PdfReader(str(path))
+    return "\n".join(page.extract_text() or "" for page in reader.pages)
+
+
+def test_list_report_mode_enum():
+    assert ListReportMode.FULL == "full"
+    assert ListReportMode.SUMMARY == "summary"
+
+
+def test_duplicates_report_mode_alias():
+    """`DuplicatesReportMode` es alias de `ListReportMode` (back-compat)."""
+    assert DuplicatesReportMode is ListReportMode
+
+
+def test_missing_full_creates_file(tmp_path):
+    col = _collection()
+    cards = [_ac("ARG", n, qty=0, code_name="ARGENTINA") for n in range(1, 6)]
+    out = tmp_path / "missing_full.pdf"
+    result = generate_missing_pdf(col, cards, out, mode=ListReportMode.FULL)
+    assert out.exists()
+    assert out.stat().st_size > 1000
+    assert result.pages >= 1
+
+
+def test_missing_summary_creates_file(tmp_path):
+    col = _collection()
+    cards = [_ac("ARG", n, qty=0, code_name="ARGENTINA") for n in range(1, 6)]
+    out = tmp_path / "missing_summary.pdf"
+    result = generate_missing_pdf(col, cards, out, mode=ListReportMode.SUMMARY)
+    assert out.exists()
+    assert out.stat().st_size > 1000
+    assert result.pages >= 1
+
+
+def test_missing_default_mode_is_full(tmp_path):
+    col = _collection()
+    cards = [_ac("ARG", 1, qty=0, code_name="ARGENTINA")]
+    out = tmp_path / "default.pdf"
+    generate_missing_pdf(col, cards, out)
+    meta = validate_exchange_pdf_metadata(out)
+    assert meta is not None
+    assert meta["subtype"] == "missing"
+
+
+def test_missing_full_no_quantity_shown(tmp_path):
+    """Faltantes nunca muestran '×N' (show_quantity=False hardcoded)."""
+    col = _collection()
+    cards = [_ac("ARG", n, qty=0, code_name="ARGENTINA") for n in range(1, 4)]
+    out = tmp_path / "missing_full.pdf"
+    generate_missing_pdf(col, cards, out, mode=ListReportMode.FULL)
+    text = _extract_pdf_text(out)
+    assert "×" not in text
+
+
+def test_missing_summary_no_quantity_shown(tmp_path):
+    col = _collection()
+    cards = [_ac("ARG", n, qty=0, code_name="ARGENTINA") for n in range(1, 4)]
+    out = tmp_path / "missing_summary.pdf"
+    generate_missing_pdf(col, cards, out, mode=ListReportMode.SUMMARY)
+    text = _extract_pdf_text(out)
+    assert "×" not in text
+
+
+def test_duplicates_full_shows_quantity(tmp_path):
+    """En modo FULL de repetidas, '×N' aparece después de cada item."""
+    col = _collection()
+    cards = [
+        _ac("ARG", 24, qty=3, code_name="ARGENTINA", name="Messi"),
+        _ac("ARG", 7, qty=2, code_name="ARGENTINA", name="DiMaria"),
+    ]
+    out = tmp_path / "dups_full.pdf"
+    generate_duplicates_pdf(col, cards, out, mode=ListReportMode.FULL)
+    text = _extract_pdf_text(out)
+    assert "×3" in text
+    assert "×2" in text
+
+
+def test_duplicates_summary_shows_quantity_inline(tmp_path):
+    """En modo SUMMARY de repetidas, la cantidad va inline: '24×3'."""
+    col = _collection()
+    cards = [
+        _ac("ARG", 24, qty=3, code_name="ARGENTINA"),
+        _ac("ARG", 7, qty=2, code_name="ARGENTINA"),
+    ]
+    out = tmp_path / "dups_summary.pdf"
+    generate_duplicates_pdf(col, cards, out, mode=ListReportMode.SUMMARY)
+    text = _extract_pdf_text(out).replace("\n", "").replace(" ", "")
+    # Forma inline: "24×3" y "7×2" deben aparecer juntos (sin espacio).
+    assert "24×3" in text
+    assert "7×2" in text
+
+
+def test_summary_continuation_with_indent(tmp_path):
+    """Categoría con muchos números: el PDF se genera sin lanzar (wrap OK)."""
+    col = _collection()
+    cards = [_ac("ARG", n, qty=0, code_name="ARGENTINA") for n in range(1, 50)]
+    out = tmp_path / "long.pdf"
+    result = generate_missing_pdf(col, cards, out, mode=ListReportMode.SUMMARY)
+    assert out.exists()
+    assert result.pages >= 1
+
+
+def test_full_flow_wraps_at_column_boundary(tmp_path):
+    """Muchas cards: el PDF se genera (potencialmente con varias páginas)."""
+    col = _collection()
+    cards = [_ac("ARG", n, qty=0, code_name="ARGENTINA", name=f"Player {n}") for n in range(1, 50)]
+    out = tmp_path / "wrap.pdf"
+    result = generate_missing_pdf(col, cards, out, mode=ListReportMode.FULL)
+    assert out.exists()
+    assert result.pages >= 1
 
 
 # ----------------------------------------------------------------------

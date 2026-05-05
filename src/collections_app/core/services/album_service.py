@@ -25,6 +25,7 @@ from collections_app.core.repositories import (
 from collections_app.core.services.pdf_generator import (
     AlbumCard,
     DuplicatesReportMode,
+    ListReportMode,
     PdfGeneratorResult,
     generate_album_pdf,
     generate_duplicates_pdf,
@@ -104,10 +105,15 @@ class AlbumService:
         cards = self.build_album_cards(collection)
         return generate_album_pdf(collection, cards, output_path)
 
-    def generate_missing_pdf(self, collection: Collection, output_path: Path) -> PdfGeneratorResult:
+    def generate_missing_pdf(
+        self,
+        collection: Collection,
+        output_path: Path,
+        mode: ListReportMode = ListReportMode.FULL,
+    ) -> PdfGeneratorResult:
         """PDF lista de cards faltantes (`quantity == 0`)."""
         cards = self.build_album_cards(collection)
-        return generate_missing_pdf(collection, cards, output_path)
+        return generate_missing_pdf(collection, cards, output_path, mode=mode)
 
     def generate_duplicates_pdf(
         self,
