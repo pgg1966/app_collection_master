@@ -1,19 +1,16 @@
 [project]
 name = "collections"
-# Mantener sincronizado con src/collections_app/__version__.py
-version = "1.0.0"
+# Mantener sincronizado con src/collections_app/__init__.py (__version__).
+version = "0.2.0"
 description = "Aplicación para gestionar colecciones de cards/figuritas"
 authors = [{name = "Tu Nombre"}]
 requires-python = ">=3.11"
 dependencies = [
+    # Qt binding usado por la vista preservada (CardLoaderView). El resto
+    # de runtime deps de v0.1 (Pillow, numpy, requests, reportlab,
+    # beautifulsoup4, pypdf, packaging) se reincorporan cuando un Prompt
+    # futuro las requiera.
     "PySide6>=6.6",
-    "Pillow>=10.0",
-    "numpy>=1.24",
-    "requests>=2.31",
-    "reportlab>=4.0",
-    "beautifulsoup4>=4.12",
-    "pypdf>=5.0",
-    "packaging>=24.0",
 ]
 
 [project.optional-dependencies]
@@ -25,19 +22,8 @@ dev = [
     "black>=24.0",
     "ruff>=0.4",
     "mypy>=1.10",
-    "types-requests>=2.31",
-    "types-beautifulsoup4>=4.12",
+    "pre-commit>=3.5",
 ]
-build = [
-    "pyinstaller>=6.3",
-]
-svg = [
-    "cairosvg>=2.7.0",
-]
-
-[project.scripts]
-collections-admin = "collections_app.admin.main:main"
-collections-client = "collections_app.client.main:main"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
@@ -61,8 +47,6 @@ select = ["E", "F", "W", "I", "N", "B", "UP", "ANN", "S", "C4", "SIM"]
 ignore = ["S101"]
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["ANN", "S"]
-# AbmWidget es un widget genérico parametrizable; Any es deliberado.
-"src/collections_app/shared_ui/widgets/abm_widget.py" = ["ANN401"]
 
 [tool.mypy]
 python_version = "3.11"
@@ -74,5 +58,5 @@ disallow_untyped_defs = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-v --tb=short"
+addopts = "-v --tb=short --strict-markers"
 markers = ["gui: tests que requieren display"]
