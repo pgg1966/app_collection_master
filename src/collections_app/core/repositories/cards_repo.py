@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
+from collections_app.core.models.aggregates.code_stats import CodeStats
 from collections_app.core.models.card import Card
 from collections_app.core.repositories.base import BaseRepository
 
@@ -134,3 +135,50 @@ class CardsRepository(BaseRepository):
         """Borra la card. Cascade borra inventory y card_images. Retorna True si existía."""
         cursor = self.conn.execute("DELETE FROM cards WHERE card_id = ?", (card_id,))
         return cursor.rowcount > 0
+
+    def get_stats_by_code(self: CardsRepository, collection_id: int) -> list[CodeStats]:
+        """Stats agregadas por code_id de la colección.
+
+        Para cada code_id presente en `cards`: total de cards, cuántas
+        tiene el usuario (inventory.quantity > 0), porcentaje. code_name
+        se resuelve desde `codes_lines` filtrando por el header de la
+        colección; fallbackea al code_id si no hay match. Orden:
+        codes_lines.code_order primero, code_id alfabético como
+        tiebreak — coincide con el orden visible al usuario.
+
+        Retorna lista de CodeStats (dataclass slots, sec 2.3).
+        """
+        rows = self.conn.execute(
+            "SELECT c.code_id AS code_id, "
+            "       COALESCE(cl.code_name, c.code_id) AS code_name, "
+            "       COALESCE(cl.code_order, 0) AS code_order, "
+            "       COUNT(*) AS total, "
+            "       SUM(CASE WHEN i.quantity > 0 THEN 1 ELSE 0 END) AS owned "
+            "FROM cards c "
+            "LEFT JOIN inventory i ON i.card_id = c.card_id "
+            "LEFT JOIN codes_lines cl "
+            "  ON cl.code_id = c.code_id "
+            " AND cl.code_header_id = ("
+            "       SELECT code_header_id FROM collections "
+            "       WHERE collection_id = ?"
+            "    ) "
+            "WHERE c.collection_id = ? "
+            "GROUP BY c.code_id "
+            "ORDER BY code_order, c.code_id",
+            (collection_id, collection_id),
+        ).fetchall()
+        result: list[CodeStats] = []
+        for row in rows:
+            total = int(row["total"])
+            owned = int(row["owned"] or 0)
+            percentage = (owned / total * 100) if total > 0 else 0.0
+            result.append(
+                CodeStats(
+                    code_id=str(row["code_id"]),
+                    code_name=str(row["code_name"]),
+                    total=total,
+                    owned=owned,
+                    percentage=percentage,
+                )
+            )
+        return result
