@@ -37,3 +37,11 @@ build/hooks/__pycache__/
 Thumbs.db
 
 docs/reference/
+
+# User exports / personal diagnostics (no van al repo)
+/Album_*.pdf
+/MiAlbum_*.colexchange
+*.colexchange
+/check.py
+/check_project.py
+/diagnostico.txt
