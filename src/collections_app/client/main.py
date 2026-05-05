@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 
 from collections_app.__version__ import __app_name__, __version__
 from collections_app.client.dialogs.client_settings_dialog import ClientSettingsDialog
+from collections_app.client.dialogs.profile_setup_dialog import ProfileSetupDialog
 from collections_app.client.views.album_view import AlbumView
 from collections_app.client.views.card_loader import CardLoaderView
 from collections_app.client.views.compare_view import CompareView
@@ -46,6 +47,9 @@ logger = logging.getLogger(__name__)
 SETTING_SKIPPED_VERSION = "skipped_version"
 SETTING_SERVER_URL = "server_url"
 SETTING_SERVER_API_KEY = "server_api_key"
+# Marca que el wizard de bienvenida del perfil ya se mostró. Evita que
+# vuelva a aparecer en cada arranque si el usuario eligió "Empezar vacío".
+SETTING_SETUP_COMPLETED = "setup_completed"
 
 # Delay antes de chequear updates al arrancar. Damos margen para que la
 # UI quede 100% interactiva antes de tirar un request HTTP en background.
@@ -127,6 +131,11 @@ class ClientMainWindow(MainWindowBase):
         """Si no hay colección activa o no está unlocked, pedirla."""
         from collections_app.core.services import LicenseService, SettingsService
 
+        # Wizard de primera corrida ANTES del flow de elegir colección:
+        # si el perfil está vacío, ofrece importar estructura desde otro
+        # perfil. Después seguimos con el resto.
+        self._check_first_run()
+
         settings = SettingsService(self.conn)
         licenses = LicenseService(self.conn)
         active = settings.get_active_collection()
@@ -139,6 +148,44 @@ class ClientMainWindow(MainWindowBase):
             self._open_settings()
         else:
             self._build_central_widget()
+
+    def _check_first_run(self) -> None:
+        """Si el perfil está vacío, abre el `ProfileSetupDialog`.
+
+        Skipped si:
+          - El flag `setup_completed` ya está seteado en `app_settings`.
+          - O ya hay colecciones en la DB (caso típico del perfil default
+            de un usuario existente — marcamos el flag y seguimos).
+        """
+        from collections_app.core.repositories import (
+            CollectionsRepository,
+            SettingsRepository,
+        )
+        from collections_app.core.services import ProfileService
+
+        settings_repo = SettingsRepository(self.conn)
+        if settings_repo.get(SETTING_SETUP_COMPLETED):
+            return
+
+        if CollectionsRepository(self.conn).list_all():
+            # Perfil con datos preexistentes: marcar como completado para
+            # no volver a chequear en arranques futuros.
+            settings_repo.set(SETTING_SETUP_COMPLETED, "1")
+            self.conn.commit()
+            return
+
+        dialog = ProfileSetupDialog(
+            current_profile=get_active_profile(),
+            available_profiles=ProfileService.get_all_profiles(),
+            target_db_path=self.db_path,
+            parent=self,
+        )
+        dialog.exec()
+        # Independientemente de la elección (importar / empezar vacío),
+        # marcar como completado: si el usuario eligió "vacío" y luego
+        # se arrepiente, puede ir a Admin a cargar el catálogo manualmente.
+        settings_repo.set(SETTING_SETUP_COMPLETED, "1")
+        self.conn.commit()
 
     def _open_settings(self) -> None:
         dlg = ClientSettingsDialog(self.conn, parent=self)

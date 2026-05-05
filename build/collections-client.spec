@@ -49,6 +49,7 @@ a = Analysis(
         "collections_app.core.services.settings_service",
         "collections_app.core.services.update_service",
         "collections_app.core.services.exchange_service",
+        "collections_app.core.services.profile_service",
         # PySide6 — módulos que pueden no detectarse si la app los usa
         # solo de forma indirecta (ej. SVG en QPixmap, print preview).
         "PySide6.QtSvg",

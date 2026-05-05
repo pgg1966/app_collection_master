@@ -62,6 +62,21 @@ def _get_bundle_dir() -> Path:
     return Path(__file__).resolve().parent.parent.parent
 
 
+def get_base_app_dir() -> Path:
+    """Retorna la carpeta raíz `Collections` (sin subdirectorio de perfil).
+
+    Útil para herramientas que necesitan listar todos los perfiles
+    existentes (ver `ProfileService.get_all_profiles`).
+    """
+    if sys.platform == "win32":
+        base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+    else:
+        base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+    return base / "Collections"
+
+
 def get_app_data_dir() -> Path:
     r"""Retorna el directorio donde guardar datos del PERFIL ACTIVO.
 
@@ -70,22 +85,11 @@ def get_app_data_dir() -> Path:
       personal: %APPDATA%\Collections\personal\
       test:     %APPDATA%\Collections\test\
 
-    Windows: %APPDATA%\Collections[\<perfil>]
-    macOS:   ~/Library/Application Support/Collections[/<perfil>]
-    Linux:   ~/.local/share/Collections[/<perfil>]
-
     Las funciones derivadas (`get_database_path`, `get_crests_dir`,
     `get_generated_cards_dir`, `get_logs_dir`) heredan el perfil
     automáticamente.
     """
-    if sys.platform == "win32":
-        base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
-    elif sys.platform == "darwin":
-        base = Path.home() / "Library" / "Application Support"
-    else:
-        base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
-
-    app_dir = base / "Collections"
+    app_dir = get_base_app_dir()
     if _active_profile != "default":
         app_dir = app_dir / _active_profile
     app_dir.mkdir(parents=True, exist_ok=True)

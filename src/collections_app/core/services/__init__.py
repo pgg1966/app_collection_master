@@ -36,6 +36,10 @@ from collections_app.core.services.exchange_service import (
     EXCHANGE_FORMAT_VERSION,
     ExchangeService,
 )
+from collections_app.core.services.profile_service import (
+    ProfileInfo,
+    ProfileService,
+)
 from collections_app.core.services.update_service import (
     GitHubUpdateSource,
     ServerUpdateSource,
@@ -61,6 +65,8 @@ __all__ = [
     "LicenseValidator",
     "LocalHashLicenseValidator",
     "PdfGeneratorResult",
+    "ProfileInfo",
+    "ProfileService",
     "ReportsService",
     "ServerUpdateSource",
     "SettingsService",
