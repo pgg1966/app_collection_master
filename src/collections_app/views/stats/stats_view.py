@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 
 from collections_app.app_context import AppContext
 from collections_app.core.models.collection import Collection
+from collections_app.views._perf_log import plog  # TEMP perf diagnostic
 
 _HEADERS = ["Código", "Nombre", "Total", "Mías", "% Avance"]
 
@@ -83,26 +84,41 @@ class StatsView(QWidget):
         outer.addWidget(self._footer_label)
 
     def refresh(self: StatsView) -> None:
+        plog("StatsView.refresh: ENTER")  # TEMP
         assert self._collection.collection_id is not None
         cid = self._collection.collection_id
         stats = self._ctx.cards.get_stats_by_code(cid)
-        self._table.setRowCount(len(stats))
+        plog(
+            f"StatsView.refresh: get_stats_by_code -> {len(stats)} rows, BEFORE setRowCount+loop"
+        )  # TEMP
         total_cards = 0
         total_owned = 0
-        for row, s in enumerate(stats):
-            self._table.setItem(row, 0, QTableWidgetItem(s.code_id))
-            self._table.setItem(row, 1, QTableWidgetItem(s.code_name))
-            total_item = QTableWidgetItem(str(s.total))
-            total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            self._table.setItem(row, 2, total_item)
-            owned_item = QTableWidgetItem(str(s.owned))
-            owned_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            self._table.setItem(row, 3, owned_item)
-            pct_item = QTableWidgetItem(f"{_percentage(s.owned, s.total):.0f}%")
-            pct_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            self._table.setItem(row, 4, pct_item)
-            total_cards += s.total
-            total_owned += s.owned
+        # Suprimir repaints durante el llenado: ver justificación en InventoryTab.
+        self._table.setUpdatesEnabled(False)
+        try:
+            self._table.setRowCount(len(stats))
+            for row, s in enumerate(stats):
+                self._table.setItem(row, 0, QTableWidgetItem(s.code_id))
+                self._table.setItem(row, 1, QTableWidgetItem(s.code_name))
+                total_item = QTableWidgetItem(str(s.total))
+                total_item.setTextAlignment(
+                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+                )
+                self._table.setItem(row, 2, total_item)
+                owned_item = QTableWidgetItem(str(s.owned))
+                owned_item.setTextAlignment(
+                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+                )
+                self._table.setItem(row, 3, owned_item)
+                pct_item = QTableWidgetItem(f"{_percentage(s.owned, s.total):.0f}%")
+                pct_item.setTextAlignment(
+                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+                )
+                self._table.setItem(row, 4, pct_item)
+                total_cards += s.total
+                total_owned += s.owned
+        finally:
+            self._table.setUpdatesEnabled(True)
         self._footer_label.setText(
             self.tr("Total: {total} cards · Mías: {owned} · {pct:.0f}%").format(
                 total=total_cards,
@@ -110,6 +126,7 @@ class StatsView(QWidget):
                 pct=_percentage(total_owned, total_cards),
             )
         )
+        plog("StatsView.refresh: EXIT")  # TEMP
 
     def set_active_collection(self: StatsView, collection: Collection) -> None:
         self._collection = collection

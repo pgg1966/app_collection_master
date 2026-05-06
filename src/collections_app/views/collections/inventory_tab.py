@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 
 from collections_app.app_context import AppContext
 from collections_app.core.models.collection import Collection
+from collections_app.views._perf_log import plog  # TEMP perf diagnostic
 
 _ZERO_QTY_COLOR = QColor("#A0A0A0")  # gris medio para filas sin stock
 _HEADERS = ["Código", "Número", "Nombre", "Cantidad"]
@@ -81,16 +82,29 @@ class InventoryTab(QWidget):
 
     def refresh(self: InventoryTab) -> None:
         """Vuelve a cargar cards + inventory desde la DB y repuebla la tabla."""
+        plog("InventoryTab.refresh: ENTER")  # TEMP
         assert self._collection.collection_id is not None
         cid = self._collection.collection_id
         cards = self._ctx.cards.list_by_collection(cid)
+        plog(f"InventoryTab.refresh: list_by_collection -> {len(cards)} cards")  # TEMP
         items = self._ctx.inventory.list_owned(cid)
+        plog(f"InventoryTab.refresh: list_owned -> {len(items)} items")  # TEMP
         qty_by_card_id = {item.card_id: item.quantity for item in items}
 
-        self._table.setRowCount(len(cards))
-        for row, card in enumerate(cards):
-            qty = qty_by_card_id.get(card.card_id or 0, 0)
-            self._set_row(row, card.code_id, card.card_number, card.card_name, qty)
+        plog(f"InventoryTab.refresh: BEFORE setRowCount+loop ({len(cards)} rows)")  # TEMP
+        # Suprimir repaints durante el llenado masivo: con
+        # setAlternatingRowColors(True) Qt re-evalúa la paleta heredada
+        # en cada setItem post-cierre de modal, escalando O(N²). Un
+        # único repaint al re-habilitar evita el comportamiento patológico.
+        self._table.setUpdatesEnabled(False)
+        try:
+            self._table.setRowCount(len(cards))
+            for row, card in enumerate(cards):
+                qty = qty_by_card_id.get(card.card_id or 0, 0)
+                self._set_row(row, card.code_id, card.card_number, card.card_name, qty)
+        finally:
+            self._table.setUpdatesEnabled(True)
+        plog(f"InventoryTab.refresh: EXIT (populated {len(cards)} rows)")  # TEMP
 
     def set_active_collection(self: InventoryTab, collection: Collection) -> None:
         """Cambia la colección visible y refresca."""
