@@ -329,5 +329,8 @@ def test_main_window_collections_abm_discards_active_detail_if_collection_delete
         fake_exec,
     )
     win._open_collections_abm()
-    assert win.active_detail is None
+    # El bloque post-cierre (refresh selector + discard) se difiere con
+    # QTimer.singleShot(0, ...) para evitar deadlock con el teardown del
+    # modal — esperamos al próximo tick del event loop antes de aserciones.
+    qtbot.waitUntil(lambda: win.active_detail is None, timeout=500)
     assert win.selector.is_empty() is True
