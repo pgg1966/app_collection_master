@@ -161,23 +161,65 @@ def test_main_window_switching_collection_destroys_previous_detail(
     assert second.collection.collection_name == "Beta"
 
 
-def test_main_window_csv_menu_shows_placeholder(
+def test_main_window_csv_menu_opens_dialog(
     qtbot,  # type: ignore[no-untyped-def]
     monkeypatch: pytest.MonkeyPatch,
     empty_ctx: AppContext,
 ) -> None:
-    """La acción 'Nueva colección desde CSV...' muestra un QMessageBox.
+    """La acción 'Nueva colección desde CSV...' abre `CsvImportDialog`.
 
-    Se mockea QMessageBox.information para no abrir un dialog modal en CI."""
-    calls: list[tuple[object, str, str]] = []
+    Se mockea `CsvImportDialog.exec` para no bloquear en un dialog modal."""
+    exec_calls: list[object] = []
 
-    def fake_info(parent: object, title: str, text: str) -> None:
-        calls.append((parent, title, text))
+    def fake_exec(self: object) -> int:
+        exec_calls.append(self)
+        return 0
 
-    monkeypatch.setattr("collections_app.views.main_window.QMessageBox.information", fake_info)
+    monkeypatch.setattr(
+        "collections_app.views.admin.csv_import_dialog.CsvImportDialog.exec",
+        fake_exec,
+    )
 
     win = MainWindow(ctx=empty_ctx)
     qtbot.addWidget(win)
-    win._show_csv_placeholder()
-    assert len(calls) == 1
-    assert "Prompt 4" in calls[0][2]
+    win._open_csv_import_dialog()
+    assert len(exec_calls) == 1
+
+
+def test_main_window_refreshes_sidebar_on_import_completed(
+    qtbot,  # type: ignore[no-untyped-def]
+    empty_ctx: AppContext,
+    tmp_path: object,  # noqa: ARG001
+) -> None:
+    """Tras `import_completed`, el sidebar refresca y selecciona la primera
+    colección si la DB estaba vacía (saliendo del empty state)."""
+    win = MainWindow(ctx=empty_ctx)
+    qtbot.addWidget(win)
+    assert win.is_showing_empty_state() is True
+    assert win.selector.is_empty() is True
+
+    # Simulamos un import exitoso creando la collection vía service y
+    # disparando manualmente el slot que la MainWindow conecta al signal.
+    from collections_app.core.models.code_header import CodeHeader
+    from collections_app.core.models.collection import Collection
+
+    h = empty_ctx.code_headers.create(
+        CodeHeader(code_header_id=None, code_header_name="H", code_max_length=3)
+    )
+    assert h.code_header_id is not None
+    empty_ctx.collections.create(
+        Collection(
+            collection_id=None,
+            collection_name="Imported",
+            card_count=0,
+            requires_code=True,
+            code_field_name="País",
+            code_header_id=h.code_header_id,
+        )
+    )
+    empty_ctx.conn.commit()
+
+    win._on_import_completed({})
+    assert win.selector.is_empty() is False
+    assert win.is_showing_empty_state() is False
+    assert win.active_detail is not None

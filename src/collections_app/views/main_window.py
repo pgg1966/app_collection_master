@@ -27,11 +27,12 @@ El título refleja el profile activo:
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
-    QMessageBox,
     QSplitter,
     QStackedWidget,
     QVBoxLayout,
@@ -40,12 +41,18 @@ from PySide6.QtWidgets import (
 
 from collections_app.app_context import AppContext
 from collections_app.core.models.collection import Collection
+from collections_app.views.admin.csv_import_dialog import CsvImportDialog
 from collections_app.views.collections.collection_detail_view import (
     CollectionDetailView,
 )
 from collections_app.views.collections.collection_selector import (
     CollectionSelectorView,
 )
+
+if TYPE_CHECKING:
+    from collections_app.core.models.aggregates.csv_import_report import (
+        CsvImportReport,
+    )
 
 _EMPTY_STATE_MESSAGE = (
     "No hay colecciones cargadas todavía.\n\n"
@@ -111,7 +118,7 @@ class MainWindow(QMainWindow):
     def _build_menus(self: MainWindow) -> None:
         archivo = self.menuBar().addMenu(self.tr("&Archivo"))
         nueva = archivo.addAction(self.tr("&Nueva colección desde CSV..."))
-        nueva.triggered.connect(self._show_csv_placeholder)
+        nueva.triggered.connect(self._open_csv_import_dialog)
         archivo.addSeparator()
         salir = archivo.addAction(self.tr("&Salir"))
         salir.triggered.connect(self.close)
@@ -135,12 +142,24 @@ class MainWindow(QMainWindow):
         self._content_stack.addWidget(detail)
         self._content_stack.setCurrentWidget(detail)
 
-    def _show_csv_placeholder(self: MainWindow) -> None:
-        QMessageBox.information(
-            self,
-            self.tr("Importar CSV"),
-            self.tr("La importación de colecciones desde CSV se implementa en Prompt 4."),
-        )
+    def _open_csv_import_dialog(self: MainWindow) -> None:
+        """Abre el diálogo de import. Cuando termina, refresca el sidebar
+        para que la collection nueva sea seleccionable."""
+        dialog = CsvImportDialog(ctx=self._ctx, parent=self)
+        dialog.import_completed.connect(self._on_import_completed)
+        dialog.exec()
+
+    def _on_import_completed(self: MainWindow, _reports: dict[str, CsvImportReport]) -> None:
+        """Slot del signal `import_completed` del CsvImportDialog.
+
+        Refresca el sidebar (la colección nueva debe aparecer). Si era
+        la primera colección de la DB, la selecciona automáticamente
+        para que el empty state desaparezca.
+        """
+        was_empty = self._selector.is_empty()
+        self._selector.refresh()
+        if was_empty and not self._selector.is_empty():
+            self._selector.select_first()
 
     # ------------------------------------------------------------------
     # API útil para tests / la siguiente sesión
