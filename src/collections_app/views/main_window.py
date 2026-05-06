@@ -33,6 +33,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
+    QMessageBox,
     QSplitter,
     QStackedWidget,
     QVBoxLayout,
@@ -41,6 +42,9 @@ from PySide6.QtWidgets import (
 
 from collections_app.app_context import AppContext
 from collections_app.core.models.collection import Collection
+from collections_app.views.admin.cards_abm import CardsAbmView
+from collections_app.views.admin.codes_master_detail import CodesMasterDetailView
+from collections_app.views.admin.collections_abm import CollectionsAbmView
 from collections_app.views.admin.csv_import_dialog import CsvImportDialog
 from collections_app.views.collections.collection_detail_view import (
     CollectionDetailView,
@@ -119,9 +123,19 @@ class MainWindow(QMainWindow):
         archivo = self.menuBar().addMenu(self.tr("&Archivo"))
         nueva = archivo.addAction(self.tr("&Nueva colección desde CSV..."))
         nueva.triggered.connect(self._open_csv_import_dialog)
+        importar_inv = archivo.addAction(self.tr("&Importar inventario..."))
+        importar_inv.triggered.connect(self._show_inventory_import_placeholder)
         archivo.addSeparator()
         salir = archivo.addAction(self.tr("&Salir"))
         salir.triggered.connect(self.close)
+
+        admin = self.menuBar().addMenu(self.tr("A&dministración"))
+        cards_action = admin.addAction(self.tr("&Cards..."))
+        cards_action.triggered.connect(self._open_cards_abm)
+        collections_action = admin.addAction(self.tr("C&olecciones..."))
+        collections_action.triggered.connect(self._open_collections_abm)
+        codes_action = admin.addAction(self.tr("C&ódigos..."))
+        codes_action.triggered.connect(self._open_codes_master_detail)
 
     def _wire_signals(self: MainWindow) -> None:
         self._selector.collection_selected.connect(self._on_collection_selected)
@@ -160,6 +174,66 @@ class MainWindow(QMainWindow):
         self._selector.refresh()
         if was_empty and not self._selector.is_empty():
             self._selector.select_first()
+
+    def _show_inventory_import_placeholder(self: MainWindow) -> None:
+        """Placeholder hasta el Prompt 4c (importer de inventario desde Excel)."""
+        QMessageBox.information(
+            self,
+            self.tr("Importar inventario"),
+            self.tr(
+                "El importer de inventario desde Excel se implementa en "
+                "una sesión futura (Prompt 4c)."
+            ),
+        )
+
+    # ------------------------------------------------------------------
+    # ABMs administrativos (Prompt 4b)
+    # ------------------------------------------------------------------
+
+    def _open_cards_abm(self: MainWindow) -> None:
+        coll = self._active_detail.collection if self._active_detail else None
+        dialog = CardsAbmView(ctx=self._ctx, initial_collection=coll, parent=self)
+        dialog.exec()
+        self._refresh_active_detail()
+
+    def _open_collections_abm(self: MainWindow) -> None:
+        dialog = CollectionsAbmView(ctx=self._ctx, parent=self)
+        dialog.exec()
+        # El listado de colecciones puede haber cambiado: refrescar sidebar.
+        active_id = self._active_detail.collection.collection_id if self._active_detail else None
+        self._selector.refresh()
+        # Si la colección activa fue borrada, el detail queda obsoleto.
+        if active_id is not None and self._ctx.collections.get_by_id(active_id) is None:
+            self._discard_active_detail()
+        else:
+            self._refresh_active_detail()
+
+    def _open_codes_master_detail(self: MainWindow) -> None:
+        dialog = CodesMasterDetailView(ctx=self._ctx, parent=self)
+        dialog.exec()
+        self._refresh_active_detail()
+
+    def _refresh_active_detail(self: MainWindow) -> None:
+        """Refresca los tabs del detail view activo, si hay uno.
+
+        Patrón "alternativa simple" del plan: tras cerrar una ABM, los
+        datos visibles en el detail pueden haber cambiado; refrescar
+        todo es trivial para los volúmenes que manejamos.
+        """
+        if self._active_detail is None:
+            return
+        self._active_detail.refresh_all_tabs()
+
+    def _discard_active_detail(self: MainWindow) -> None:
+        """Quita el detail activo (la colección fue borrada)."""
+        if self._active_detail is None:
+            return
+        self._content_stack.removeWidget(self._active_detail)
+        self._active_detail.deleteLater()
+        self._active_detail = None
+        if self._selector.is_empty():
+            return
+        self._selector.select_first()
 
     # ------------------------------------------------------------------
     # API útil para tests / la siguiente sesión

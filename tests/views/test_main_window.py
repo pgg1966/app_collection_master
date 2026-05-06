@@ -223,3 +223,111 @@ def test_main_window_refreshes_sidebar_on_import_completed(
     assert win.selector.is_empty() is False
     assert win.is_showing_empty_state() is False
     assert win.active_detail is not None
+
+
+def test_main_window_inventory_import_menu_shows_placeholder(
+    qtbot,  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+    empty_ctx: AppContext,
+) -> None:
+    """'Archivo → Importar inventario...' muestra el placeholder de Prompt 4c."""
+    info_msgs: list[str] = []
+    monkeypatch.setattr(
+        "collections_app.views.main_window.QMessageBox.information",
+        lambda _p, _t, msg: info_msgs.append(msg) or 0,
+    )
+    win = MainWindow(ctx=empty_ctx)
+    qtbot.addWidget(win)
+    win._show_inventory_import_placeholder()
+    assert len(info_msgs) == 1
+    assert "Prompt 4c" in info_msgs[0]
+
+
+def test_main_window_admin_cards_menu_opens_dialog(
+    qtbot,  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+    empty_ctx: AppContext,
+) -> None:
+    exec_calls: list[object] = []
+    monkeypatch.setattr(
+        "collections_app.views.admin.cards_abm.CardsAbmView.exec",
+        lambda self: exec_calls.append(self) or 0,
+    )
+    win = MainWindow(ctx=empty_ctx)
+    qtbot.addWidget(win)
+    win._open_cards_abm()
+    assert len(exec_calls) == 1
+
+
+def test_main_window_admin_collections_menu_opens_dialog(
+    qtbot,  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+    empty_ctx: AppContext,
+) -> None:
+    exec_calls: list[object] = []
+    monkeypatch.setattr(
+        "collections_app.views.admin.collections_abm.CollectionsAbmView.exec",
+        lambda self: exec_calls.append(self) or 0,
+    )
+    win = MainWindow(ctx=empty_ctx)
+    qtbot.addWidget(win)
+    win._open_collections_abm()
+    assert len(exec_calls) == 1
+
+
+def test_main_window_admin_codes_menu_opens_dialog(
+    qtbot,  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+    empty_ctx: AppContext,
+) -> None:
+    exec_calls: list[object] = []
+    monkeypatch.setattr(
+        "collections_app.views.admin.codes_master_detail.CodesMasterDetailView.exec",
+        lambda self: exec_calls.append(self) or 0,
+    )
+    win = MainWindow(ctx=empty_ctx)
+    qtbot.addWidget(win)
+    win._open_codes_master_detail()
+    assert len(exec_calls) == 1
+
+
+def test_main_window_collections_abm_discards_active_detail_if_collection_deleted(
+    qtbot,  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+    empty_ctx: AppContext,
+) -> None:
+    """Si la ABM borra la collection activa, el detail se descarta."""
+    h = empty_ctx.code_headers.create(
+        CodeHeader(code_header_id=None, code_header_name="H", code_max_length=3)
+    )
+    assert h.code_header_id is not None
+    empty_ctx.collections.create(
+        Collection(
+            collection_id=None,
+            collection_name="ToDelete",
+            card_count=0,
+            requires_code=True,
+            code_field_name="País",
+            code_header_id=h.code_header_id,
+        )
+    )
+    empty_ctx.conn.commit()
+
+    win = MainWindow(ctx=empty_ctx)
+    qtbot.addWidget(win)
+    assert win.active_detail is not None
+    active_id = win.active_detail.collection.collection_id
+    assert active_id is not None
+
+    def fake_exec(self: object) -> int:
+        empty_ctx.collections.delete(active_id)
+        empty_ctx.conn.commit()
+        return 0
+
+    monkeypatch.setattr(
+        "collections_app.views.admin.collections_abm.CollectionsAbmView.exec",
+        fake_exec,
+    )
+    win._open_collections_abm()
+    assert win.active_detail is None
+    assert win.selector.is_empty() is True
