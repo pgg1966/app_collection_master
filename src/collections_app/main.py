@@ -1,56 +1,83 @@
 """Punto de entrada de la app.
 
-Bootstrap mínimo: arma el `AppContext`, abre la vista preservada
-`CardLoaderView` con la primera colección disponible, y corre el
-event loop. Si no hay colecciones cargadas, muestra un dialog
-informativo y sale con código 0.
-
-Está pensado como spike funcional para validar el stack end-to-end.
-La nav real (selector de colecciones, menú principal, etc.) la arma
-Prompt 3.
+Bootstrap:
+1. Parsea `--profile` con argparse (antes de QApplication para fallar
+   limpio si el nombre es inválido).
+2. Resuelve `db_path` vía `get_db_path_for_profile`.
+3. Construye el `AppContext` (aplica migraciones).
+4. Abre `MainWindow` con el sufijo de título correspondiente.
+5. Corre el event loop hasta cierre.
 
 Uso:
-    python -m collections_app.main
+    python -m collections_app.main                  # default profile
+    python -m collections_app.main --profile demo   # collections_demo.db
 """
 
 from __future__ import annotations
 
+import argparse
 import sys
+from collections.abc import Sequence
 
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication
 
 from collections_app.app_context import AppContext, create_app_context
-from collections_app.core.utils.paths import get_default_db_path
-from collections_app.views.inventory.card_loader import CardLoaderView
+from collections_app.core.utils.paths import get_db_path_for_profile
+from collections_app.views.main_window import MainWindow
 from collections_app.views.shared.theme import apply_app_style
 
 
-def _run(ctx: AppContext, app: QApplication) -> int:
-    """Resuelve la colección activa y lanza la vista preservada.
+def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="collections_app",
+        description=(
+            "Collections — gestor de colecciones de cards/cromos. "
+            "Sin --profile usa la DB default; con --profile <nombre> "
+            "usa collections_<nombre>.db en el mismo directorio."
+        ),
+    )
+    parser.add_argument(
+        "--profile",
+        default=None,
+        help=(
+            "Nombre de profile (alfanumerico + guion bajo). "
+            "Cada profile es una DB independiente."
+        ),
+    )
+    return parser.parse_args(argv)
 
-    Se separa del `main()` para que sea testeable con un AppContext
-    inyectado contra `:memory:`.
-    """
-    collections = ctx.collections.list_all()
-    if not collections:
-        QMessageBox.information(
-            None,
-            "Collections",
-            "No hay colecciones cargadas. La carga inicial se hara en Prompt 3.",
-        )
-        return 0
-    view = CardLoaderView(service=ctx.inventory, collection=collections[0])
-    view.setWindowTitle("Collections — Carga rapida")
-    view.show()
+
+def _title_suffix_for(profile: str | None) -> str:
+    return f" — [{profile}]" if profile else ""
+
+
+def _run(ctx: AppContext, app: QApplication, profile: str | None) -> int:
+    """Ejecuta la app con `ctx` ya construido. Separado del `main()` para
+    que sea testeable inyectando un context contra `:memory:`."""
+    window = MainWindow(ctx=ctx, title_suffix=_title_suffix_for(profile))
+    window.show()
     return app.exec()
 
 
-def main() -> int:
-    app = QApplication(sys.argv)
-    apply_app_style(app)
-    ctx = create_app_context(get_default_db_path())
+def main(argv: Sequence[str] | None = None) -> int:
+    """Entrypoint del script.
+
+    Returns:
+        0 al cerrar la app.
+        2 si --profile es inválido (mensaje al usuario via stderr).
+    """
+    args = _parse_args(argv)
     try:
-        return _run(ctx, app)
+        db_path = get_db_path_for_profile(args.profile)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    apply_app_style(app)
+    ctx = create_app_context(db_path)
+    try:
+        return _run(ctx, app, args.profile)
     finally:
         ctx.close()
 
