@@ -46,6 +46,9 @@ from collections_app.views.admin.cards_abm import CardsAbmView
 from collections_app.views.admin.codes_master_detail import CodesMasterDetailView
 from collections_app.views.admin.collections_abm import CollectionsAbmView
 from collections_app.views.admin.csv_import_dialog import CsvImportDialog
+from collections_app.views.admin.inventory_import_dialog import (
+    InventoryImportDialog,
+)
 from collections_app.views.collections.collection_detail_view import (
     CollectionDetailView,
 )
@@ -124,7 +127,7 @@ class MainWindow(QMainWindow):
         nueva = archivo.addAction(self.tr("&Nueva colección desde CSV..."))
         nueva.triggered.connect(self._open_csv_import_dialog)
         importar_inv = archivo.addAction(self.tr("&Importar inventario..."))
-        importar_inv.triggered.connect(self._show_inventory_import_placeholder)
+        importar_inv.triggered.connect(self._open_inventory_import_dialog)
         archivo.addSeparator()
         salir = archivo.addAction(self.tr("&Salir"))
         salir.triggered.connect(self.close)
@@ -194,16 +197,28 @@ class MainWindow(QMainWindow):
         if was_empty and not self._selector.is_empty():
             self._selector.select_first()
 
-    def _show_inventory_import_placeholder(self: MainWindow) -> None:
-        """Placeholder hasta el Prompt 4c (importer de inventario desde Excel)."""
-        QMessageBox.information(
-            self,
-            self.tr("Importar inventario"),
-            self.tr(
-                "El importer de inventario desde Excel se implementa en "
-                "una sesión futura (Prompt 4c)."
-            ),
+    def _open_inventory_import_dialog(self: MainWindow) -> None:
+        """Abre el diálogo de import de inventario sobre la colección activa.
+
+        Si no hay colección activa, muestra un info y NO abre el dialog
+        (la importación necesita una colección target).
+        """
+        if self._active_detail is None:
+            QMessageBox.information(
+                self,
+                self.tr("Importar inventario"),
+                self.tr("Seleccioná una colección antes de importar inventario."),
+            )
+            return
+        coll = self._active_detail.collection
+        dialog = InventoryImportDialog(ctx=self._ctx, collection=coll, parent=self)
+        # Refresh deferido para evitar disparar el path post-modal del
+        # issue #002 (el dialog no tiene QTableWidget grande, pero
+        # mantenemos simetría con los otros _open_*_abm).
+        dialog.import_completed.connect(
+            lambda _report: QTimer.singleShot(0, self._refresh_active_detail)
         )
+        dialog.exec()
 
     # ------------------------------------------------------------------
     # ABMs administrativos (Prompt 4b)

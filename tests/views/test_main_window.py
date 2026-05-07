@@ -225,12 +225,13 @@ def test_main_window_refreshes_sidebar_on_import_completed(
     assert win.active_detail is not None
 
 
-def test_main_window_inventory_import_menu_shows_placeholder(
+def test_main_window_inventory_import_without_active_collection_shows_warning(
     qtbot,  # type: ignore[no-untyped-def]
     monkeypatch: pytest.MonkeyPatch,
     empty_ctx: AppContext,
 ) -> None:
-    """'Archivo → Importar inventario...' muestra el placeholder de Prompt 4c."""
+    """Sin colección activa, 'Importar inventario...' muestra warning y
+    NO abre el dialog (no hay collection target)."""
     info_msgs: list[str] = []
     monkeypatch.setattr(
         "collections_app.views.main_window.QMessageBox.information",
@@ -238,9 +239,10 @@ def test_main_window_inventory_import_menu_shows_placeholder(
     )
     win = MainWindow(ctx=empty_ctx)
     qtbot.addWidget(win)
-    win._show_inventory_import_placeholder()
+    assert win.active_detail is None
+    win._open_inventory_import_dialog()
     assert len(info_msgs) == 1
-    assert "Prompt 4c" in info_msgs[0]
+    assert "Seleccioná" in info_msgs[0]
 
 
 def test_main_window_admin_cards_menu_opens_dialog(
