@@ -11,6 +11,9 @@ dependencies = [
     # beautifulsoup4, pypdf, packaging) se reincorporan cuando un Prompt
     # futuro las requiera.
     "PySide6>=6.6",
+    # Lectura/escritura de .xlsx en el importer de inventario (Prompt 4c).
+    # Pure Python, sin dependencias nativas — instala limpio en Windows.
+    "openpyxl>=3.1",
 ]
 
 [project.optional-dependencies]
