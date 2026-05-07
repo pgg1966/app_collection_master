@@ -35,16 +35,27 @@ del Prompt 4a).
 
 from __future__ import annotations
 
+import csv
 import logging
 import sqlite3
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 
+from collections_app.core.models.aggregates.inventory_import_report import (
+    InventoryImportError,
+    InventoryImportReport,
+    InventoryImportWarning,
+)
+from collections_app.core.models.transaction import OperationType, Transaction
 from collections_app.core.repositories.cards_repo import CardsRepository
 from collections_app.core.repositories.code_lines_repo import CodeLinesRepository
 from collections_app.core.repositories.inventory_repo import InventoryRepository
 from collections_app.core.repositories.transactions_repo import TransactionsRepository
+from collections_app.services._event_id import generate_event_id
 from collections_app.services.collections_service import CollectionsService
 from collections_app.services.exceptions import ServiceError
 
@@ -55,6 +66,25 @@ _TEMPLATE_SHEET_CODES = "Códigos"
 _TEMPLATE_HEADERS_WITH_CODE = ["código", "número", "cantidad"]
 _TEMPLATE_HEADERS_WITHOUT_CODE = ["número", "cantidad"]
 _CODES_SHEET_HEADERS = ["code_id", "code_name"]
+
+# Cap de errores y warnings en el reporte (mismo patrón que Prompt 4a).
+_REPORT_CAP = 200
+
+ImportMode = Literal["replace", "add"]
+
+
+def _utc_now_naive() -> datetime:
+    """UTC actual sin tzinfo, matchea el formato del default SQL."""
+    return datetime.now(UTC).replace(tzinfo=None)
+
+
+@dataclass(slots=True)
+class _PendingChange:
+    """Cambio validado, listo para aplicar dentro del bloque atómico."""
+
+    row_index: int
+    card_id: int
+    new_qty: int  # cantidad target leída del archivo (>0; qty=0 ya filtrado)
 
 
 class InventoryImportService:
@@ -120,3 +150,291 @@ class InventoryImportService:
         wb.save(str(dest_path))
         logger.info("generate_template: collection_id=%d dest=%s", collection_id, dest_path)
         return dest_path
+
+    # ------------------------------------------------------------------
+    # Import
+    # ------------------------------------------------------------------
+
+    def import_inventory(
+        self: InventoryImportService,
+        *,
+        file_path: Path,
+        collection_id: int,
+        mode: ImportMode,
+    ) -> InventoryImportReport:
+        """Lee `file_path` (xlsx o csv) y aplica el inventario a `collection_id`.
+
+        El encoding de CSV es `utf-8-sig`, que acepta tanto UTF-8 plain
+        como UTF-8 con BOM (Excel en Windows guarda CSVs con BOM por
+        default; sin esto la validación de header fallaría por un
+        carácter invisible al inicio).
+
+        Modos:
+        - "replace": la cantidad del archivo pisa la actual.
+        - "add": la cantidad del archivo se suma a la actual.
+
+        En ambos modos qty=0 se trata como warning y NO se aplica
+        (decisión: si el usuario quiere "borrar" stock, no incluya la
+        fila). En modo replace, si la cantidad del archivo coincide con
+        la actual el delta es 0 → no se genera transaction pero la fila
+        cuenta como aplicada (procesada exitosamente).
+
+        Atomicidad: todo el archivo se aplica dentro de un único
+        `with self._conn:`. Si una mutación falla, rollback total.
+
+        Logging: cada cambio efectivo (delta != 0) genera una
+        Transaction con `exchange_event_id` compartido por todas las
+        filas del mismo import — útil para trazar/revertir el evento
+        completo desde el historial.
+        """
+        collection = self._collections.get_by_id(collection_id)
+        if collection is None:
+            raise ServiceError(f"collection_id={collection_id} no existe")
+
+        rows = self._read_rows(file_path)
+        if not rows:
+            return InventoryImportReport(rows_total=0, rows_applied=0, rows_skipped=0)
+
+        column_indexes, data_rows = self._validate_header(
+            rows, requires_code=collection.requires_code
+        )
+
+        valid_codes: set[str] = set()
+        if collection.requires_code:
+            valid_codes = {
+                line.code_id for line in self._code_lines.list_by_header(collection.code_header_id)
+            }
+
+        # Mapa (code_id, card_number) -> card_id para lookup eficiente.
+        cards = self._cards.list_by_collection(collection_id)
+        cards_index: dict[tuple[str, int], int] = {
+            (c.code_id, c.card_number): c.card_id for c in cards if c.card_id is not None
+        }
+
+        errors: list[InventoryImportError] = []
+        warnings_: list[InventoryImportWarning] = []
+        pending: list[_PendingChange] = []
+
+        for i, row in enumerate(data_rows, start=1):
+            self._classify_row(
+                row=row,
+                row_index=i,
+                column_indexes=column_indexes,
+                requires_code=collection.requires_code,
+                valid_codes=valid_codes,
+                cards_index=cards_index,
+                errors=errors,
+                warnings_=warnings_,
+                pending=pending,
+            )
+
+        # Aplicación atómica. Si cualquier write rompe (FK, sintaxis SQL
+        # inesperada, etc.) el bloque hace rollback total.
+        rows_applied = 0
+        event_id = generate_event_id()
+        with self._conn:
+            for change in pending:
+                applied = self._apply_change(change=change, mode=mode, event_id=event_id)
+                if applied:
+                    rows_applied += 1
+
+        report = InventoryImportReport(
+            rows_total=len(data_rows),
+            rows_applied=rows_applied,
+            rows_skipped=len(errors) + len(warnings_),
+            errors=errors[:_REPORT_CAP],
+            warnings=warnings_[:_REPORT_CAP],
+        )
+        logger.info(
+            "import_inventory: file=%s collection_id=%d mode=%s "
+            "total=%d applied=%d errors=%d warnings=%d event_id=%d",
+            file_path.name,
+            collection_id,
+            mode,
+            report.rows_total,
+            report.rows_applied,
+            len(errors),
+            len(warnings_),
+            event_id,
+        )
+        return report
+
+    # ------------------------------------------------------------------
+    # Helpers internos
+    # ------------------------------------------------------------------
+
+    def _read_rows(self: InventoryImportService, file_path: Path) -> list[list[str]]:
+        """Lee el archivo (xlsx o csv) en memoria como lista de filas de strings."""
+        suffix = file_path.suffix.lower()
+        if suffix == ".xlsx":
+            wb = load_workbook(str(file_path), read_only=True, data_only=True)
+            try:
+                # Primera pestaña por posición (la pestaña "Códigos" si
+                # existe se ignora).
+                sheet = wb.worksheets[0]
+                rows: list[list[str]] = []
+                for raw in sheet.iter_rows(values_only=True):
+                    rows.append(["" if v is None else str(v).strip() for v in raw])
+            finally:
+                wb.close()
+            # Filas vacías al final del sheet ("", "", ...) — descartarlas.
+            while rows and not any(c for c in rows[-1]):
+                rows.pop()
+            return rows
+        if suffix == ".csv":
+            with file_path.open("r", encoding="utf-8-sig", newline="") as fh:
+                return [[c.strip() for c in row] for row in csv.reader(fh)]
+        raise ServiceError(f"formato no soportado: {suffix!r}. Use .xlsx o .csv.")
+
+    def _validate_header(
+        self: InventoryImportService,
+        rows: list[list[str]],
+        *,
+        requires_code: bool,
+    ) -> tuple[dict[str, int], list[list[str]]]:
+        """Verifica que la primera fila matchee los headers esperados.
+
+        Si no, raise ServiceError catastrófico — nada se importa.
+        Devuelve `(column_indexes, data_rows)` con la primera fila ya
+        consumida.
+        """
+        expected = _TEMPLATE_HEADERS_WITH_CODE if requires_code else _TEMPLATE_HEADERS_WITHOUT_CODE
+        first = [c.strip().lower() for c in rows[0]]
+        if first[: len(expected)] != expected:
+            raise ServiceError(
+                "El archivo no tiene los headers esperados "
+                f"({', '.join(expected)}). Volvé a descargar el modelo."
+            )
+        column_indexes = {name: i for i, name in enumerate(expected)}
+        return column_indexes, rows[1:]
+
+    def _classify_row(
+        self: InventoryImportService,
+        *,
+        row: list[str],
+        row_index: int,
+        column_indexes: dict[str, int],
+        requires_code: bool,
+        valid_codes: set[str],
+        cards_index: dict[tuple[str, int], int],
+        errors: list[InventoryImportError],
+        warnings_: list[InventoryImportWarning],
+        pending: list[_PendingChange],
+    ) -> None:
+        """Valida una fila y la clasifica en errors / warnings / pending."""
+        code_id = ""
+        if requires_code:
+            code_id = self._cell(row, column_indexes, "código")
+            if not code_id:
+                errors.append(InventoryImportError(row_index, "código vacío"))
+                return
+            if code_id not in valid_codes:
+                errors.append(
+                    InventoryImportError(row_index, f"código {code_id!r} no existe en el header")
+                )
+                return
+
+        num_str = self._cell(row, column_indexes, "número")
+        try:
+            number = int(num_str)
+        except ValueError:
+            errors.append(InventoryImportError(row_index, f"número {num_str!r} no es entero"))
+            return
+        if number <= 0:
+            errors.append(InventoryImportError(row_index, f"número {number} debe ser > 0"))
+            return
+
+        qty_str = self._cell(row, column_indexes, "cantidad")
+        try:
+            qty = int(qty_str)
+        except ValueError:
+            errors.append(InventoryImportError(row_index, f"cantidad {qty_str!r} no es entero"))
+            return
+        if qty < 0:
+            errors.append(InventoryImportError(row_index, f"cantidad {qty} no puede ser negativa"))
+            return
+
+        card_id = cards_index.get((code_id, number))
+        if card_id is None:
+            errors.append(
+                InventoryImportError(
+                    row_index,
+                    f"card ({code_id!r}, {number}) no existe en el catálogo",
+                )
+            )
+            return
+
+        if qty == 0:
+            warnings_.append(
+                InventoryImportWarning(
+                    row_index=row_index,
+                    code_id=code_id,
+                    card_number=number,
+                    message="cantidad = 0; fila ignorada",
+                )
+            )
+            return
+
+        pending.append(_PendingChange(row_index, card_id, qty))
+
+    def _cell(
+        self: InventoryImportService,
+        row: list[str],
+        column_indexes: dict[str, int],
+        name: str,
+    ) -> str:
+        idx = column_indexes.get(name)
+        if idx is None or idx >= len(row):
+            return ""
+        return row[idx].strip()
+
+    def _apply_change(
+        self: InventoryImportService,
+        *,
+        change: _PendingChange,
+        mode: ImportMode,
+        event_id: int,
+    ) -> bool:
+        """Aplica un cambio validado al inventory + log de transaction.
+
+        Devuelve True si el cambio se aplicó exitosamente. En modo
+        replace con delta=0, devuelve True (la fila se procesó OK) sin
+        generar transaction.
+        """
+        current = self._inventory.get_by_card_id(change.card_id)
+        current_qty = current.quantity if current is not None else 0
+
+        if mode == "replace":
+            delta = change.new_qty - current_qty
+        elif mode == "add":
+            delta = change.new_qty
+        else:
+            raise ServiceError(f"mode {mode!r} no soportado")
+
+        if delta == 0:
+            return True
+        if delta > 0:
+            self._inventory.adjust_quantity(change.card_id, delta)
+            self._transactions.log(
+                Transaction(
+                    transaction_id=None,
+                    card_id=change.card_id,
+                    operation=OperationType.ALTA,
+                    quantity=delta,
+                    transaction_date=_utc_now_naive(),
+                    exchange_event_id=event_id,
+                )
+            )
+        else:
+            self._inventory.adjust_quantity(change.card_id, delta)
+            self._transactions.log(
+                Transaction(
+                    transaction_id=None,
+                    card_id=change.card_id,
+                    operation=OperationType.BAJA,
+                    quantity=-delta,
+                    transaction_date=_utc_now_naive(),
+                    exchange_event_id=event_id,
+                )
+            )
+        return True
