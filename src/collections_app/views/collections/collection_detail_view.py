@@ -52,7 +52,7 @@ class CollectionDetailView(QWidget):
 
         self._tabs = QTabWidget()
         self._inventory_tab = InventoryTab(ctx=self._ctx, collection=self._collection)
-        self._loader_tab = CardLoaderView(service=self._ctx.inventory, collection=self._collection)
+        self._loader_tab = CardLoaderView(ctx=self._ctx, collection=self._collection)
         self._history_tab = HistoryTab(ctx=self._ctx, collection=self._collection)
         self._stats_tab = StatsView(ctx=self._ctx, collection=self._collection)
         self._reports_tab = ReportsView(ctx=self._ctx, collection=self._collection)

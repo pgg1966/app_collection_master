@@ -96,6 +96,7 @@ def test_loader_tab_uses_ctx_inventory_service(
     view = CollectionDetailView(ctx=ctx_with_demo, collection=demo_collection)
     qtbot.addWidget(view)
     # Acceso al atributo privado _service del CardLoaderView (test helper).
+    assert view.loader_tab._ctx is ctx_with_demo
     assert view.loader_tab._service is ctx_with_demo.inventory
 
 

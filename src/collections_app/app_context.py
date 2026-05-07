@@ -8,7 +8,7 @@ recibe el service que necesita, no el contenedor entero.
 Uso típico:
 
     ctx = create_app_context(get_default_db_path())
-    view = CardLoaderView(service=ctx.inventory, collection=...)
+    view = CardLoaderView(ctx=ctx, collection=...)
 
 Tests pueden construir un context contra `:memory:`:
 

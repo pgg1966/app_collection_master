@@ -239,24 +239,22 @@ def test_main_window_refreshes_sidebar_on_import_completed(
     assert win.active_detail is not None
 
 
-def test_main_window_inventory_import_without_active_collection_shows_warning(
+def test_main_window_file_menu_has_only_csv_and_exit(
     qtbot,  # type: ignore[no-untyped-def]
-    monkeypatch: pytest.MonkeyPatch,
     empty_ctx: AppContext,
 ) -> None:
-    """Sin colección activa, 'Importar inventario...' muestra warning y
-    NO abre el dialog (no hay collection target)."""
-    info_msgs: list[str] = []
-    monkeypatch.setattr(
-        "collections_app.views.main_window.QMessageBox.information",
-        lambda _p, _t, msg: info_msgs.append(msg) or 0,
-    )
+    """Tras el embed del importer (Prompt 5b), el menú Archivo ya no
+    incluye "Importar inventario..." — solo "Nueva colección desde CSV"
+    y "Salir" (con separator)."""
     win = MainWindow(ctx=empty_ctx)
     qtbot.addWidget(win)
-    assert win.active_detail is None
-    win._open_inventory_import_dialog()
-    assert len(info_msgs) == 1
-    assert "Seleccioná" in info_msgs[0]
+    archivo_menu = next(
+        m for m in win.menuBar().findChildren(QMenu) if m.title().replace("&", "") == "Archivo"
+    )
+    visible_actions = [
+        a.text().replace("&", "") for a in archivo_menu.actions() if not a.isSeparator()
+    ]
+    assert visible_actions == ["Nueva colección desde CSV...", "Salir"]
 
 
 def test_main_window_admin_cards_menu_opens_dialog(

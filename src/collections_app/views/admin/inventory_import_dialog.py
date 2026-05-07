@@ -1,22 +1,18 @@
-"""Diálogo "Importar inventario desde archivo" (Prompt 4c).
+"""Importador de inventario — panel reusable + wrapper modal.
 
-Reemplaza el placeholder del menú "Archivo → Importar inventario..."
-de la `MainWindow`. Pre-requisito: hay una colección activa en
-`MainWindow` (la verificación vive ahí, no acá — el dialog la recibe
-por constructor).
+Estructura post-Prompt 5b:
 
-UX:
-- File picker para .xlsx o .csv.
-- Toggle modo replace / add (default replace).
-- Botón "Descargar modelo" para generar el .xlsx vacío con headers
-  + pestaña "Códigos" como referencia visual.
-- Botón "Importar" deshabilitado hasta que haya archivo seleccionado.
-- Tras importar: tabla con errores y warnings. El dialog NO se
-  autocierra — el usuario revisa el reporte y cierra manualmente.
-- Signal `import_completed(InventoryImportReport)` que el caller
-  (MainWindow) usa para refrescar el detail view activo. El refresh
-  corre mientras el dialog sigue abierto, lo que evita disparar el
-  path post-modal del issue #002.
+- `InventoryImportPanel(QWidget)`: widget con toda la UI (file picker,
+  modo replace/add, descargar modelo, importar, tabla de resultado).
+  Reusable: se embebe en `CardLoaderView` lado a lado con la carga
+  manual.
+- `InventoryImportDialog(QDialog)`: wrapper modal thin — instancia un
+  panel adentro, re-emite el signal `import_completed`. Mantenido para
+  posibles usos modal futuros, aunque la app actual lo embebe en el
+  tab de carga.
+
+Pre-requisito en ambos casos: hay una colección activa pasada por
+constructor. Las verificaciones "hay collection" viven en el caller.
 
 Cap de errores y warnings mostrados: 200 (mismo `_DISPLAY_CAP` que
 el patrón Prompt 4a). Si hay más, un mensaje en pie alerta sobre
@@ -73,13 +69,20 @@ def _slugify_for_filename(name: str) -> str:
     return "".join(safe).strip("_") or "inventario"
 
 
-class InventoryImportDialog(QDialog):
-    """Diálogo único para importar inventario desde Excel/CSV."""
+class InventoryImportPanel(QWidget):
+    """Widget reusable con toda la UI del importer.
+
+    Se embebe en `CardLoaderView` o se envuelve en `InventoryImportDialog`
+    para uso modal. Tras un import exitoso emite `import_completed` con
+    el `InventoryImportReport` — los callers usan eso para refrescar
+    vistas dependientes. NO autocierra ni autoresetea: el usuario revisa
+    el reporte y decide cuándo limpiar (vía `reset()`) o cuándo cerrar.
+    """
 
     import_completed = Signal(object)  # InventoryImportReport
 
     def __init__(
-        self: InventoryImportDialog,
+        self: InventoryImportPanel,
         ctx: AppContext,
         collection: Collection,
         parent: QWidget | None = None,
@@ -87,8 +90,6 @@ class InventoryImportDialog(QDialog):
         super().__init__(parent)
         self._ctx = ctx
         self._collection = collection
-        self.setWindowTitle(self.tr("Importar inventario desde archivo"))
-        self.resize(700, 600)
         self._build_ui()
         self._update_import_enabled()
 
@@ -96,13 +97,14 @@ class InventoryImportDialog(QDialog):
     # UI
     # ------------------------------------------------------------------
 
-    def _build_ui(self: InventoryImportDialog) -> None:
+    def _build_ui(self: InventoryImportPanel) -> None:
         outer = QVBoxLayout(self)
 
         form = QFormLayout()
 
         coll_label = QLabel(self._collection.collection_name)
         coll_label.setEnabled(False)
+        self._collection_label = coll_label
         form.addRow(self.tr("Colección"), coll_label)
 
         self._file_edit, file_row = self._make_file_picker()
@@ -123,26 +125,18 @@ class InventoryImportDialog(QDialog):
 
         outer.addLayout(form)
 
-        # Botón descargar modelo (alineado a izquierda, separado).
-        template_row = QHBoxLayout()
-        template_row.addWidget(QLabel(self.tr("¿No tenés un archivo?")))
+        # Botón descargar modelo + botón importar (alineados a la derecha).
+        actions_row = QHBoxLayout()
+        actions_row.addWidget(QLabel(self.tr("¿No tenés un archivo?")))
         self._template_btn = QPushButton(self.tr("Descargar modelo"))
         self._template_btn.clicked.connect(self._on_download_template)
-        template_row.addWidget(self._template_btn)
-        template_row.addStretch()
-        outer.addLayout(template_row)
-
-        # Botones principales (cancelar / importar).
-        btn_row = QHBoxLayout()
-        btn_row.addStretch()
-        self._cancel_btn = QPushButton(self.tr("Cancelar"))
-        self._cancel_btn.clicked.connect(self.reject)
+        actions_row.addWidget(self._template_btn)
+        actions_row.addStretch()
         self._import_btn = QPushButton(self.tr("Importar"))
         self._import_btn.setDefault(True)
         self._import_btn.clicked.connect(self._on_import)
-        btn_row.addWidget(self._cancel_btn)
-        btn_row.addWidget(self._import_btn)
-        outer.addLayout(btn_row)
+        actions_row.addWidget(self._import_btn)
+        outer.addLayout(actions_row)
 
         # Resultado
         self._result_label = QLabel("")
@@ -167,7 +161,7 @@ class InventoryImportDialog(QDialog):
         outer.addWidget(self._truncation_label)
 
     def _make_file_picker(
-        self: InventoryImportDialog,
+        self: InventoryImportPanel,
     ) -> tuple[QLineEdit, QHBoxLayout]:
         edit = QLineEdit()
         edit.setReadOnly(True)
@@ -192,21 +186,45 @@ class InventoryImportDialog(QDialog):
         return edit, row
 
     # ------------------------------------------------------------------
+    # API pública
+    # ------------------------------------------------------------------
+
+    def set_active_collection(self: InventoryImportPanel, collection: Collection) -> None:
+        """Cambia la collection target y resetea el estado del panel."""
+        self._collection = collection
+        self._collection_label.setText(collection.collection_name)
+        self.reset()
+
+    def reset(self: InventoryImportPanel) -> None:
+        """Limpia archivo seleccionado, resultado y truncation note.
+
+        El modo (replace/add) queda en su valor actual — no se resetea
+        a default para no sorprender al usuario tras imports consecutivos.
+        """
+        self._file_edit.clear()
+        self._result_label.clear()
+        self._result_label.setVisible(False)
+        self._result_table.setRowCount(0)
+        self._result_table.setVisible(False)
+        self._truncation_label.clear()
+        self._truncation_label.setVisible(False)
+
+    # ------------------------------------------------------------------
     # Estado / acciones
     # ------------------------------------------------------------------
 
-    def _update_import_enabled(self: InventoryImportDialog) -> None:
+    def _update_import_enabled(self: InventoryImportPanel) -> None:
         self._import_btn.setEnabled(bool(self._file_edit.text().strip()))
 
-    def _selected_mode(self: InventoryImportDialog) -> Literal["replace", "add"]:
+    def _selected_mode(self: InventoryImportPanel) -> Literal["replace", "add"]:
         return "replace" if self._mode_replace.isChecked() else "add"
 
-    def _default_template_filename(self: InventoryImportDialog) -> str:
+    def _default_template_filename(self: InventoryImportPanel) -> str:
         slug = _slugify_for_filename(self._collection.collection_name)
         date = datetime.now().strftime(_DATE_SLUG_FORMAT)
         return f"inventario_{slug}_{date}.xlsx"
 
-    def _on_download_template(self: InventoryImportDialog) -> None:
+    def _on_download_template(self: InventoryImportPanel) -> None:
         path_str, _ = QFileDialog.getSaveFileName(
             self,
             self.tr("Guardar modelo"),
@@ -237,7 +255,7 @@ class InventoryImportDialog(QDialog):
             self.tr("Modelo guardado en:\n{path}").format(path=path),
         )
 
-    def _on_import(self: InventoryImportDialog) -> None:
+    def _on_import(self: InventoryImportPanel) -> None:
         file_path = Path(self._file_edit.text().strip())
         assert self._collection.collection_id is not None
         try:
@@ -264,7 +282,7 @@ class InventoryImportDialog(QDialog):
     # Render del resultado
     # ------------------------------------------------------------------
 
-    def _render_result(self: InventoryImportDialog, report: InventoryImportReport) -> None:
+    def _render_result(self: InventoryImportPanel, report: InventoryImportReport) -> None:
         self._result_label.setText(
             self.tr(
                 "Filas leídas: {total} · Aplicadas: {applied} · "
@@ -310,3 +328,28 @@ class InventoryImportDialog(QDialog):
             self._truncation_label.setVisible(True)
         else:
             self._truncation_label.setVisible(False)
+
+
+class InventoryImportDialog(QDialog):
+    """Wrapper modal thin sobre `InventoryImportPanel`.
+
+    La app actual embebe el panel en `CardLoaderView` directamente; este
+    dialog se conserva para posibles usos modal futuros sin duplicar la
+    lógica del panel.
+    """
+
+    import_completed = Signal(object)  # re-emitido del panel
+
+    def __init__(
+        self: InventoryImportDialog,
+        ctx: AppContext,
+        collection: Collection,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(self.tr("Importar inventario desde archivo"))
+        self.resize(700, 600)
+        outer = QVBoxLayout(self)
+        self._panel = InventoryImportPanel(ctx=ctx, collection=collection, parent=self)
+        self._panel.import_completed.connect(self.import_completed)
+        outer.addWidget(self._panel)

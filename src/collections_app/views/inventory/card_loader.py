@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
     QCompleter,
     QFrame,
     QGridLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -45,11 +46,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from collections_app.app_context import AppContext
 from collections_app.core.models.card import Card
 from collections_app.core.models.collection import Collection
 from collections_app.core.models.inventory_item import InventoryItem
 from collections_app.services.exceptions import AmbiguousCardError, InventoryError
-from collections_app.services.inventory_service import InventoryService
+from collections_app.views.admin.inventory_import_dialog import InventoryImportPanel
 from collections_app.views.shared.theme import (
     INPUT_BG_ALTA,
     INPUT_BG_BAJA,
@@ -142,12 +144,19 @@ class CardLoaderView(QWidget):
 
     def __init__(
         self,
-        service: InventoryService,
+        ctx: AppContext,
         collection: Collection,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self._service = service
+        # Sec 7.1: la firma `service` se cambió a `ctx` (Prompt 5b) para
+        # poder embeber `InventoryImportPanel` lado a lado con el form
+        # manual; ese panel necesita acceso a varios services del ctx.
+        # `self._service` se mantiene como alias del inventory service
+        # — el resto del archivo (validaciones, máquina de ambigüedad,
+        # signals/slots) usa esa referencia sin cambios.
+        self._ctx = ctx
+        self._service = ctx.inventory
         self.collection = collection
         self._navigator = EnterNavigator(self)
         # Estado: cuando hay >1 match en find_by_number, se ofrece al
@@ -194,6 +203,9 @@ class CardLoaderView(QWidget):
             self._clear_completer()
             self._set_code_visible(False)
         self._reset_form()
+        # Propagar al panel embebido para que apunte a la nueva collection
+        # y limpie estado (file picker + resultado anterior).
+        self._import_panel.set_active_collection(collection)
 
     # ------------------------------------------------------------------
     # Construcción de la UI
@@ -201,12 +213,22 @@ class CardLoaderView(QWidget):
 
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
-        outer.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
         outer.setContentsMargins(Spacing.LG, Spacing.LG, Spacing.LG, Spacing.LG)
+
+        # Layout horizontal: a la izquierda el formulario manual (compacto,
+        # ~550px), a la derecha el panel de import (se estira al espacio
+        # restante). Stretch 0:1 para que el form no se infle.
+        split = QHBoxLayout()
+        split.setSpacing(Spacing.LG)
+
+        left_group = QGroupBox(self.tr("Carga manual"))
+        left_group.setMaximumWidth(550)
+        left_layout = QVBoxLayout(left_group)
+        left_layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
 
         container = QWidget()
         container.setMaximumWidth(500)
-        outer.addWidget(container, alignment=Qt.AlignmentFlag.AlignHCenter)
+        left_layout.addWidget(container, alignment=Qt.AlignmentFlag.AlignHCenter)
 
         grid = QGridLayout(container)
         grid.setHorizontalSpacing(Spacing.MD)
@@ -284,11 +306,33 @@ class CardLoaderView(QWidget):
         self._status_label = QLabel("")
         self._status_label.setVisible(False)
         self._status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        outer.addWidget(self._status_label, alignment=Qt.AlignmentFlag.AlignHCenter)
-        outer.addStretch()
+        left_layout.addWidget(self._status_label, alignment=Qt.AlignmentFlag.AlignHCenter)
+        left_layout.addStretch()
+
+        split.addWidget(left_group, 0)
+
+        # Lado derecho: panel de import embebido. Cuando termina un import
+        # exitoso, propagamos `card_changed` para que los demás tabs se
+        # refresquen igual que tras un alta manual.
+        right_group = QGroupBox(self.tr("Importar desde archivo"))
+        right_layout = QVBoxLayout(right_group)
+        self._import_panel = InventoryImportPanel(ctx=self._ctx, collection=self.collection)
+        self._import_panel.import_completed.connect(self._on_import_completed)
+        right_layout.addWidget(self._import_panel)
+        split.addWidget(right_group, 1)
+
+        outer.addLayout(split, 1)
 
         # Tinte inicial del frame de operación según el modo activo (Alta).
         self._apply_input_mode_styling()
+
+    def _on_import_completed(self, _report: object) -> None:
+        """Propaga `card_changed` para refrescar inventory/history/etc.
+
+        El panel ya muestra el reporte internamente; acá solo notificamos
+        a los demás tabs vía el mismo signal que dispara una alta manual.
+        """
+        self.card_changed.emit()
 
     def _build_operation_row(self) -> QFrame:
         """Frame contenedor de los radios Alta/Baja, coloreable por modo.
