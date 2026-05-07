@@ -30,7 +30,6 @@ from PySide6.QtWidgets import (
 from collections_app.app_context import AppContext
 from collections_app.core.models.collection import Collection
 from collections_app.core.models.transaction import OperationType
-from collections_app.views._perf_log import plog  # TEMP perf diagnostic
 
 _HISTORY_LIMIT = 200
 _HEADERS = ["Fecha", "Operación", "Card", "Cantidad"]
@@ -94,16 +93,12 @@ class HistoryTab(QWidget):
 
     def refresh(self: HistoryTab) -> None:
         """Lee las últimas N transacciones + cards y repuebla la tabla."""
-        plog("HistoryTab.refresh: ENTER")  # TEMP
         assert self._collection.collection_id is not None
         cid = self._collection.collection_id
         cards = self._ctx.cards.list_by_collection(cid)
-        plog(f"HistoryTab.refresh: list_by_collection -> {len(cards)} cards")  # TEMP
         cards_by_id = {card.card_id: card for card in cards if card.card_id is not None}
         txns = self._ctx.transactions.list_by_collection(cid, limit=_HISTORY_LIMIT)
-        plog(f"HistoryTab.refresh: list_by_collection (txns) -> {len(txns)} txns")  # TEMP
 
-        plog(f"HistoryTab.refresh: BEFORE setRowCount+loop ({len(txns)} rows)")  # TEMP
         # Suprimir repaints durante el llenado: ver justificación en
         # InventoryTab — alternating-row colors + setItem repetidos.
         self._table.setUpdatesEnabled(False)
@@ -120,7 +115,6 @@ class HistoryTab(QWidget):
                 self._set_row(row, date_label, op_label, card_label, txn.quantity)
         finally:
             self._table.setUpdatesEnabled(True)
-        plog(f"HistoryTab.refresh: EXIT (populated {len(txns)} rows)")  # TEMP
 
     def set_active_collection(self: HistoryTab, collection: Collection) -> None:
         self._collection = collection

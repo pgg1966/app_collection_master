@@ -24,7 +24,6 @@ from PySide6.QtWidgets import (
 
 from collections_app.app_context import AppContext
 from collections_app.core.models.collection import Collection
-from collections_app.views._perf_log import plog  # TEMP perf diagnostic
 
 _HEADERS = ["Código", "Nombre", "Total", "Mías", "% Avance"]
 
@@ -84,13 +83,9 @@ class StatsView(QWidget):
         outer.addWidget(self._footer_label)
 
     def refresh(self: StatsView) -> None:
-        plog("StatsView.refresh: ENTER")  # TEMP
         assert self._collection.collection_id is not None
         cid = self._collection.collection_id
         stats = self._ctx.cards.get_stats_by_code(cid)
-        plog(
-            f"StatsView.refresh: get_stats_by_code -> {len(stats)} rows, BEFORE setRowCount+loop"
-        )  # TEMP
         total_cards = 0
         total_owned = 0
         # Suprimir repaints durante el llenado: ver justificación en InventoryTab.
@@ -126,7 +121,6 @@ class StatsView(QWidget):
                 pct=_percentage(total_owned, total_cards),
             )
         )
-        plog("StatsView.refresh: EXIT")  # TEMP
 
     def set_active_collection(self: StatsView, collection: Collection) -> None:
         self._collection = collection

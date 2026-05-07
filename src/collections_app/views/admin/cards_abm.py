@@ -43,7 +43,6 @@ from collections_app.app_context import AppContext
 from collections_app.core.models.card import Card
 from collections_app.core.models.collection import Collection
 from collections_app.services.exceptions import CardsError
-from collections_app.views._perf_log import plog  # TEMP perf diagnostic
 
 _HEADERS = ["Código", "Número", "Nombre"]
 _FILTER_ALL = "(todos)"
@@ -147,17 +146,13 @@ class CardsAbmView(QDialog):
         initial_collection: Collection | None = None,
         parent: QWidget | None = None,
     ) -> None:
-        plog("CardsAbmView.__init__: ENTER")  # TEMP
         super().__init__(parent)
         self._ctx = ctx
         self.setWindowTitle(self.tr("Administración de cards"))
         self.resize(900, 600)
         self._all_cards: list[Card] = []
-        plog("CardsAbmView.__init__: BEFORE _build_ui")  # TEMP
         self._build_ui()
-        plog("CardsAbmView.__init__: AFTER _build_ui, BEFORE _populate_collections")  # TEMP
         self._populate_collections(initial_collection)
-        plog("CardsAbmView.__init__: EXIT")  # TEMP
 
     # ------------------------------------------------------------------
     # UI
@@ -223,13 +218,9 @@ class CardsAbmView(QDialog):
     # ------------------------------------------------------------------
 
     def _populate_collections(self: CardsAbmView, initial: Collection | None) -> None:
-        plog("CardsAbmView._populate_collections: ENTER")  # TEMP
         self._collection_combo.blockSignals(True)
         self._collection_combo.clear()
         collections = self._ctx.collections.list_all()
-        plog(
-            f"CardsAbmView._populate_collections: list_all -> {len(collections)} collections"
-        )  # TEMP
         for coll in collections:
             self._collection_combo.addItem(coll.collection_name, coll)
         self._collection_combo.blockSignals(False)
@@ -238,29 +229,18 @@ class CardsAbmView(QDialog):
                 if self._collection_combo.itemData(i).collection_id == initial.collection_id:
                     self._collection_combo.setCurrentIndex(i)
                     break
-        plog("CardsAbmView._populate_collections: BEFORE _on_collection_changed")  # TEMP
         self._on_collection_changed(self._collection_combo.currentIndex())
-        plog("CardsAbmView._populate_collections: EXIT")  # TEMP
 
     def _on_collection_changed(self: CardsAbmView, _idx: int) -> None:
-        plog("CardsAbmView._on_collection_changed: ENTER")  # TEMP
         coll = self._current_collection()
         if coll is None or coll.collection_id is None:
             self._all_cards = []
             self._refresh_code_filter()
             self._refresh_table()
-            plog("CardsAbmView._on_collection_changed: EXIT (no collection)")  # TEMP
             return
-        plog("CardsAbmView._on_collection_changed: BEFORE list_by_collection")  # TEMP
         self._all_cards = self._ctx.cards.list_by_collection(coll.collection_id)
-        plog(
-            f"CardsAbmView._on_collection_changed: AFTER list_by_collection "
-            f"-> {len(self._all_cards)} cards"
-        )  # TEMP
         self._refresh_code_filter()
-        plog("CardsAbmView._on_collection_changed: AFTER _refresh_code_filter")  # TEMP
         self._refresh_table()
-        plog("CardsAbmView._on_collection_changed: EXIT (after _refresh_table)")  # TEMP
 
     def _current_collection(self: CardsAbmView) -> Collection | None:
         data = self._collection_combo.currentData()
@@ -275,12 +255,7 @@ class CardsAbmView(QDialog):
         self._code_filter_combo.blockSignals(False)
 
     def _refresh_table(self: CardsAbmView) -> None:
-        plog("CardsAbmView._refresh_table: ENTER")  # TEMP
         filtered = self._filtered_cards()
-        plog(
-            f"CardsAbmView._refresh_table: filtered -> {len(filtered)} rows, "
-            f"BEFORE setRowCount+loop"
-        )  # TEMP
         # Suprimir repaints intermedios: con `setAlternatingRowColors(True)`
         # cada setItem fuerza re-evaluación de paleta tras cerrar un
         # modal y la inserción degenera en O(N²).
@@ -300,7 +275,6 @@ class CardsAbmView(QDialog):
                 self._table.setItem(row, 2, name_item)
         finally:
             self._table.setUpdatesEnabled(True)
-        plog(f"CardsAbmView._refresh_table: EXIT (populated {len(filtered)} rows)")  # TEMP
 
     def _filtered_cards(self: CardsAbmView) -> list[Card]:
         code_filter = self._code_filter_combo.currentText()

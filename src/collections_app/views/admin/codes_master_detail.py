@@ -45,7 +45,6 @@ from collections_app.app_context import AppContext
 from collections_app.core.models.code_header import CodeHeader
 from collections_app.core.models.code_line import CodeLine
 from collections_app.services.exceptions import CodeHeadersError, CodeLinesError
-from collections_app.views._perf_log import plog  # TEMP perf diagnostic
 
 _LINE_HEADERS = ["Código", "Nombre", "Orden"]
 
@@ -202,16 +201,12 @@ class CodesMasterDetailView(QDialog):
         ctx: AppContext,
         parent: QWidget | None = None,
     ) -> None:
-        plog("CodesMasterDetailView.__init__: ENTER")  # TEMP
         super().__init__(parent)
         self._ctx = ctx
         self.setWindowTitle(self.tr("Administración de códigos"))
         self.resize(900, 600)
-        plog("CodesMasterDetailView.__init__: BEFORE _build_ui")  # TEMP
         self._build_ui()
-        plog("CodesMasterDetailView.__init__: AFTER _build_ui, BEFORE _refresh_master")  # TEMP
         self._refresh_master()
-        plog("CodesMasterDetailView.__init__: EXIT")  # TEMP
 
     def _build_ui(self: CodesMasterDetailView) -> None:
         outer = QVBoxLayout(self)
@@ -301,12 +296,9 @@ class CodesMasterDetailView(QDialog):
     # ------------------------------------------------------------------
 
     def _refresh_master(self: CodesMasterDetailView) -> None:
-        plog("CodesMasterDetailView._refresh_master: ENTER")  # TEMP
         previous = self._selected_header()
         self._master_list.clear()
-        headers = self._ctx.code_headers.list_all()
-        plog(f"CodesMasterDetailView._refresh_master: list_all -> {len(headers)} headers")  # TEMP
-        for header in headers:
+        for header in self._ctx.code_headers.list_all():
             item = QListWidgetItem(header.code_header_name)
             item.setData(Qt.ItemDataRole.UserRole, header)
             self._master_list.addItem(item)
@@ -387,14 +379,11 @@ class CodesMasterDetailView(QDialog):
     # ------------------------------------------------------------------
 
     def _refresh_detail(self: CodesMasterDetailView) -> None:
-        plog("CodesMasterDetailView._refresh_detail: ENTER")  # TEMP
         header = self._selected_header()
         self._detail_table.setRowCount(0)
         if header is None or header.code_header_id is None:
-            plog("CodesMasterDetailView._refresh_detail: EXIT (no header)")  # TEMP
             return
         lines = self._ctx.code_lines.list_by_header(header.code_header_id)
-        plog(f"CodesMasterDetailView._refresh_detail: list_by_header -> {len(lines)} lines")  # TEMP
         # Consistencia con el resto de tablas: un solo repaint al final.
         self._detail_table.setUpdatesEnabled(False)
         try:
@@ -411,7 +400,6 @@ class CodesMasterDetailView(QDialog):
                 self._detail_table.setItem(row, 2, order_item)
         finally:
             self._detail_table.setUpdatesEnabled(True)
-        plog(f"CodesMasterDetailView._refresh_detail: EXIT ({len(lines)} rows)")  # TEMP
 
     def _selected_line(self: CodesMasterDetailView) -> CodeLine | None:
         row = self._detail_table.currentRow()

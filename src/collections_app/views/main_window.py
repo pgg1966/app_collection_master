@@ -42,7 +42,6 @@ from PySide6.QtWidgets import (
 
 from collections_app.app_context import AppContext
 from collections_app.core.models.collection import Collection
-from collections_app.views._perf_log import plog  # TEMP perf diagnostic
 from collections_app.views.admin.cards_abm import CardsAbmView
 from collections_app.views.admin.codes_master_detail import CodesMasterDetailView
 from collections_app.views.admin.collections_abm import CollectionsAbmView
@@ -130,13 +129,32 @@ class MainWindow(QMainWindow):
         salir = archivo.addAction(self.tr("&Salir"))
         salir.triggered.connect(self.close)
 
+        # Workaround issue #002 — ver docs/v02_known_issues.md.
+        # Las ABM administrativas exhiben slowdown patológico de
+        # `QTableWidget.setItem` post-cierre del modal contra datasets
+        # reales (~7 minutos para 994 cards). Diagnóstico granular y
+        # múltiples fixes (QTimer defer, setUpdatesEnabled, unpolish/
+        # polish, blockSignals, Fusion style, QT_ACCESSIBILITY=0) no
+        # resolvieron. Deshabilitamos el menú hasta refactorizar a
+        # QTableView+QStandardItemModel. Los slots quedan en su lugar
+        # para reactivación trivial cuando haya fix real.
+        disabled_tooltip = self.tr(
+            "Temporalmente deshabilitado por bug de performance "
+            "(issue #002). Editá los datos via CSV y reimportá."
+        )
         admin = self.menuBar().addMenu(self.tr("A&dministración"))
         cards_action = admin.addAction(self.tr("&Cards..."))
         cards_action.triggered.connect(self._open_cards_abm)
+        cards_action.setEnabled(False)
+        cards_action.setToolTip(disabled_tooltip)
         collections_action = admin.addAction(self.tr("C&olecciones..."))
         collections_action.triggered.connect(self._open_collections_abm)
+        collections_action.setEnabled(False)
+        collections_action.setToolTip(disabled_tooltip)
         codes_action = admin.addAction(self.tr("C&ódigos..."))
         codes_action.triggered.connect(self._open_codes_master_detail)
+        codes_action.setEnabled(False)
+        codes_action.setToolTip(disabled_tooltip)
 
     def _wire_signals(self: MainWindow) -> None:
         self._selector.collection_selected.connect(self._on_collection_selected)
@@ -193,31 +211,21 @@ class MainWindow(QMainWindow):
 
     def _open_cards_abm(self: MainWindow) -> None:
         coll = self._active_detail.collection if self._active_detail else None
-        plog("MainWindow._open_cards_abm: BEFORE CardsAbmView()")  # TEMP
         dialog = CardsAbmView(ctx=self._ctx, initial_collection=coll, parent=self)
-        plog("MainWindow._open_cards_abm: AFTER CardsAbmView() (constructed)")  # TEMP
-        plog("MainWindow._open_cards_abm: BEFORE dialog.exec()")  # TEMP
         dialog.exec()
-        plog("MainWindow._open_cards_abm: AFTER dialog.exec()")  # TEMP
         # Diferimos el refresh al próximo tick del event loop: si lo
         # ejecutamos en línea, repueblan tablas grandes mientras Qt
         # todavía está cerrando el modal y se traba el event loop.
         QTimer.singleShot(0, self._refresh_active_detail)
-        plog("MainWindow._open_cards_abm: scheduled refresh via QTimer")  # TEMP
 
     def _open_collections_abm(self: MainWindow) -> None:
-        plog("MainWindow._open_collections_abm: BEFORE CollectionsAbmView()")  # TEMP
         dialog = CollectionsAbmView(ctx=self._ctx, parent=self)
-        plog("MainWindow._open_collections_abm: AFTER CollectionsAbmView()")  # TEMP
-        plog("MainWindow._open_collections_abm: BEFORE dialog.exec()")  # TEMP
         dialog.exec()
-        plog("MainWindow._open_collections_abm: AFTER dialog.exec()")  # TEMP
         # Capturamos el id activo ahora (snapshot, no después del timer)
         # para que un cambio sincrónico al active_detail entre tanto no
         # nos confunda — y diferimos todo el bloque que toca UI.
         active_id = self._active_detail.collection.collection_id if self._active_detail else None
         QTimer.singleShot(0, lambda: self._after_collections_abm_close(active_id))
-        plog("MainWindow._open_collections_abm: scheduled refresh via QTimer")  # TEMP
 
     def _after_collections_abm_close(self: MainWindow, active_id: int | None) -> None:
         """Bloque diferido tras cerrar el ABM de colecciones.
@@ -226,24 +234,17 @@ class MainWindow(QMainWindow):
         sigue válido. Lo invoca `QTimer.singleShot(0, ...)` para que
         Qt termine el teardown del modal antes de tocar widgets.
         """
-        plog("MainWindow._after_collections_abm_close: ENTER (deferred)")  # TEMP
         self._selector.refresh()
         # Si la colección activa fue borrada, el detail queda obsoleto.
         if active_id is not None and self._ctx.collections.get_by_id(active_id) is None:
             self._discard_active_detail()
         else:
             self._refresh_active_detail()
-        plog("MainWindow._after_collections_abm_close: EXIT (deferred)")  # TEMP
 
     def _open_codes_master_detail(self: MainWindow) -> None:
-        plog("MainWindow._open_codes_master_detail: BEFORE CodesMasterDetailView()")  # TEMP
         dialog = CodesMasterDetailView(ctx=self._ctx, parent=self)
-        plog("MainWindow._open_codes_master_detail: AFTER CodesMasterDetailView()")  # TEMP
-        plog("MainWindow._open_codes_master_detail: BEFORE dialog.exec()")  # TEMP
         dialog.exec()
-        plog("MainWindow._open_codes_master_detail: AFTER dialog.exec()")  # TEMP
         QTimer.singleShot(0, self._refresh_active_detail)
-        plog("MainWindow._open_codes_master_detail: scheduled refresh via QTimer")  # TEMP
 
     def _refresh_active_detail(self: MainWindow) -> None:
         """Refresca los tabs del detail view activo, si hay uno.
@@ -253,11 +254,8 @@ class MainWindow(QMainWindow):
         todo es trivial para los volúmenes que manejamos.
         """
         if self._active_detail is None:
-            plog("MainWindow._refresh_active_detail: NO active detail, skip")  # TEMP
             return
-        plog("MainWindow._refresh_active_detail: START refresh_all_tabs")  # TEMP
         self._active_detail.refresh_all_tabs()
-        plog("MainWindow._refresh_active_detail: END refresh_all_tabs")  # TEMP
 
     def _discard_active_detail(self: MainWindow) -> None:
         """Quita el detail activo (la colección fue borrada)."""
