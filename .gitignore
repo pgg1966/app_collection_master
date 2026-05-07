@@ -49,3 +49,6 @@ docs/reference/
 # Personal planning artifacts (generated locally for conversation context)
 docs/project_structure.md
 docs/data_dictionary.md
+# Datos personales del usuario (no versionar)
+mi_inventario_sticker.csv
+export_inventory.py
