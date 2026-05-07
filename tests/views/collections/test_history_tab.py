@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from PySide6.QtCore import Qt
 
 from collections_app.app_context import AppContext
 from collections_app.core.models.collection import Collection
@@ -12,6 +13,12 @@ from collections_app.views.collections.history_tab import (
 )
 
 pytestmark = pytest.mark.gui
+
+
+def _cell_text(tab: HistoryTab, row: int, col: int) -> str:
+    """Texto que el modelo expone vía DisplayRole."""
+    value = tab._model.data(tab._model.index(row, col), Qt.ItemDataRole.DisplayRole)
+    return "" if value is None else str(value)
 
 
 def test_format_card_label_combines_fields() -> None:
@@ -26,7 +33,7 @@ def test_history_tab_empty_when_no_transactions(
 ) -> None:
     tab = HistoryTab(ctx=ctx_with_demo, collection=demo_collection)
     qtbot.addWidget(tab)
-    assert tab._table.rowCount() == 0
+    assert tab._model.rowCount() == 0
 
 
 def test_history_tab_lists_transaction_after_alta(
@@ -41,9 +48,9 @@ def test_history_tab_lists_transaction_after_alta(
 
     tab = HistoryTab(ctx=ctx_with_demo, collection=demo_collection)
     qtbot.addWidget(tab)
-    assert tab._table.rowCount() == 1
-    assert tab._table.item(0, 1).text() == "Alta"
-    assert tab._table.item(0, 3).text() == "3"
+    assert tab._model.rowCount() == 1
+    assert _cell_text(tab, 0, 1) == "Alta"
+    assert _cell_text(tab, 0, 3) == "3"
 
 
 def test_history_tab_renders_card_label_with_code_and_name(
@@ -59,9 +66,7 @@ def test_history_tab_renders_card_label_with_code_and_name(
 
     tab = HistoryTab(ctx=ctx_with_demo, collection=demo_collection)
     qtbot.addWidget(tab)
-    card_cell = tab._table.item(0, 2)
-    assert card_cell is not None
-    assert card_cell.text() == "BRA-2 · Rodrygo"
+    assert _cell_text(tab, 0, 2) == "BRA-2 · Rodrygo"
 
 
 def test_history_tab_orders_recent_first(
@@ -79,8 +84,8 @@ def test_history_tab_orders_recent_first(
     tab = HistoryTab(ctx=ctx_with_demo, collection=demo_collection)
     qtbot.addWidget(tab)
     # La columna 2 es Card. La más reciente debería ser BRA-1.
-    assert tab._table.rowCount() == 3
-    assert "BRA-1" in tab._table.item(0, 2).text()
+    assert tab._model.rowCount() == 3
+    assert "BRA-1" in _cell_text(tab, 0, 2)
 
 
 def test_history_tab_baja_renders_label_baja(
@@ -96,8 +101,8 @@ def test_history_tab_baja_renders_label_baja(
     tab = HistoryTab(ctx=ctx_with_demo, collection=demo_collection)
     qtbot.addWidget(tab)
     # La operación más reciente es la baja.
-    assert tab._table.item(0, 1).text() == "Baja"
-    assert tab._table.item(0, 3).text() == "2"
+    assert _cell_text(tab, 0, 1) == "Baja"
+    assert _cell_text(tab, 0, 3) == "2"
 
 
 def test_history_tab_set_active_collection_swaps(
@@ -123,6 +128,6 @@ def test_history_tab_set_active_collection_swaps(
 
     tab = HistoryTab(ctx=ctx_with_demo, collection=demo_collection)
     qtbot.addWidget(tab)
-    assert tab._table.rowCount() == 1
+    assert tab._model.rowCount() == 1
     tab.set_active_collection(other)
-    assert tab._table.rowCount() == 0
+    assert tab._model.rowCount() == 0

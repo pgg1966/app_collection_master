@@ -61,7 +61,7 @@ def test_card_changed_signal_refreshes_inventory_and_history(
     qtbot.addWidget(view)
 
     # Estado inicial: 0 transacciones, 0 qty para todas.
-    assert view.history_tab._table.rowCount() == 0
+    assert view.history_tab._model.rowCount() == 0
 
     # Mutación atómica via service (simula lo que el loader haría al save).
     cid = demo_collection.collection_id or 0
@@ -82,8 +82,9 @@ def test_card_changed_signal_refreshes_inventory_and_history(
     assert arg1_qty == "5"
 
     # History tab debe mostrar 1 transaction con label granular.
-    assert view.history_tab._table.rowCount() == 1
-    assert "ARG-1" in view.history_tab._table.item(0, 2).text()
+    hist_model = view.history_tab._model
+    assert hist_model.rowCount() == 1
+    assert "ARG-1" in hist_model.data(hist_model.index(0, 2))
 
 
 def test_loader_tab_uses_ctx_inventory_service(
