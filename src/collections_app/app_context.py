@@ -29,6 +29,7 @@ from collections_app.services.code_headers_service import CodeHeadersService
 from collections_app.services.code_lines_service import CodeLinesService
 from collections_app.services.collections_service import CollectionsService
 from collections_app.services.csv_import_service import CsvImportService
+from collections_app.services.inventory_import_service import InventoryImportService
 from collections_app.services.inventory_service import InventoryService
 from collections_app.services.settings_service import SettingsService
 from collections_app.services.transactions_service import TransactionsService
@@ -47,6 +48,7 @@ class AppContext:
     transactions: TransactionsService
     settings: SettingsService
     csv_import: CsvImportService
+    inventory_import: InventoryImportService
 
     def close(self: AppContext) -> None:
         """Cierra la conexión SQLite. Idempotente."""
@@ -73,4 +75,5 @@ def create_app_context(db_path: Path | str) -> AppContext:
         transactions=TransactionsService(conn),
         settings=SettingsService(conn),
         csv_import=CsvImportService(conn),
+        inventory_import=InventoryImportService(conn),
     )
