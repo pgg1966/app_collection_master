@@ -28,8 +28,14 @@
 
 ---
 
-## #002 — Slowdown patológico de `QTableWidget.setItem` post-cierre de modal
+## #002 — Slowdown patológico de `QTableWidget.setItem` — relevante para futura herramienta admin
 
+- **Decisión arquitectónica:** v0.2.0 distribuye solo la app de
+  usuario. La gestión de catálogo (alta/baja/edición de cards, codes,
+  collections) se va a hacer desde una herramienta admin separada que
+  se construye post-Mundial. Esta separación coincide con la
+  arquitectura del sistema anterior y resuelve el problema sin
+  necesidad de fix técnico.
 - **Archivos afectados:** todas las vistas que repueblan tablas grandes
   tras cerrar un `QDialog` modal.
   - [src/collections_app/views/collections/inventory_tab.py](../src/collections_app/views/collections/inventory_tab.py)
@@ -88,20 +94,25 @@
   siendo posible vía CSV import (Archivo → Nueva colección desde
   CSV...). El refresh de los tabs del detail view sigue funcionando
   (no es modal → no dispara el bug).
-- **Plan futuro:** refactorizar las 4 vistas afectadas a
-  `QTableView` + `QStandardItemModel`. El bug está en `QTableWidget`
-  (conveniencia que combina view + model implícito); `QTableView` con
-  un `QStandardItemModel` explícito no exhibe el problema según
-  documentación de Qt y reportes upstream. Refactor estructural,
-  fuera del scope de un micro-prompt — agendado para sesión dedicada.
+- **Cuando se aborde:** sesión dedicada para construir la herramienta
+  admin separada. Approach probable: app standalone con
+  `QTableView`+`QStandardItemModel` desde el principio (el bug está
+  en `QTableWidget`; `QTableView` con modelo explícito no lo exhibe
+  según documentación de Qt y reportes upstream). Comparte los
+  servicios y la DB con la app de usuario, pero tiene su propio entry
+  point y sus propias vistas.
 - **Reproducción mínima:** `python -m collections_app.main --profile
   mundial`, abrir Cards desde el menú deshabilitado (requiere
   re-habilitar la action manualmente para reproducir), esperar la
   carga (~170ms), cerrar con X o Cerrar, observar la `MainWindow`
   congelada varios minutos.
-- **Estado:** abierto. Workaround D aplicado. Los fixes #2 y #3
-  (QTimer + setUpdatesEnabled) quedan en el código como defensa
-  preventiva.
+- **Estado:** no bloqueante para v0.2.0; las ABM no son parte de la
+  app distribuible. Relevante cuando se construya la herramienta
+  admin separada. Workaround D activo (menú deshabilitado en
+  MainWindow). Los fixes commiteados #2 y #3 (QTimer +
+  setUpdatesEnabled, commits 3aff4aa y 3b1ea74) quedan en el código
+  como defensa preventiva por si el path post-modal aparece en otro
+  contexto.
 
 ---
 
