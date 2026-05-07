@@ -72,11 +72,12 @@ def test_card_changed_signal_refreshes_inventory_and_history(
     view.loader_tab.card_changed.emit()
 
     # Inventory tab debe mostrar 5 en ARG-1.
+    inv_model = view.inventory_tab._model
     arg1_qty = next(
-        view.inventory_tab._table.item(row, 3).text()
-        for row in range(view.inventory_tab._table.rowCount())
-        if view.inventory_tab._table.item(row, 0).text() == "ARG"
-        and view.inventory_tab._table.item(row, 1).text() == "1"
+        inv_model.data(inv_model.index(row, 3))
+        for row in range(inv_model.rowCount())
+        if inv_model.data(inv_model.index(row, 0)) == "ARG"
+        and inv_model.data(inv_model.index(row, 1)) == "1"
     )
     assert arg1_qty == "5"
 
@@ -124,13 +125,14 @@ def test_refresh_all_tabs_updates_inventory_after_external_change(
     view.refresh_all_tabs()
 
     # Inventory tab debe reflejar qty=7 en ARG-1.
+    inv_model = view.inventory_tab._model
     found_qty = None
-    for row in range(view.inventory_tab._table.rowCount()):
+    for row in range(inv_model.rowCount()):
         if (
-            view.inventory_tab._table.item(row, 0).text() == "ARG"
-            and view.inventory_tab._table.item(row, 1).text() == "1"
+            inv_model.data(inv_model.index(row, 0)) == "ARG"
+            and inv_model.data(inv_model.index(row, 1)) == "1"
         ):
-            found_qty = view.inventory_tab._table.item(row, 3).text()
+            found_qty = inv_model.data(inv_model.index(row, 3))
             break
     assert found_qty == "7"
     # Stats tab muestra 1 owned para ARG.
