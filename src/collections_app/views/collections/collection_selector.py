@@ -59,6 +59,11 @@ class CollectionSelectorView(QWidget):
         self._list = QListWidget()
         self._list.itemActivated.connect(self._emit_for_item)
         self._list.itemDoubleClicked.connect(self._emit_for_item)
+        # Click simple en una fila distinta + flechas del teclado +
+        # `setCurrentRow` programático: todos disparan currentItemChanged
+        # una sola vez por cambio efectivo. Sin esta conexión, un click
+        # simple no emitía el signal y el detail view no se refrescaba.
+        self._list.currentItemChanged.connect(self._on_current_changed)
         outer.addWidget(self._list, stretch=1)
 
         toolbar = QHBoxLayout()
@@ -89,15 +94,16 @@ class CollectionSelectorView(QWidget):
     def select_first(self: CollectionSelectorView) -> Collection | None:
         """Selecciona la primera fila programáticamente y la emite. Útil al
         arrancar la MainWindow cuando hay >=1 colección. Retorna la
-        Collection seleccionada, o None si no había ninguna."""
+        Collection seleccionada, o None si no había ninguna.
+
+        El emit se delega a `_on_current_changed`: `setCurrentRow(0)`
+        dispara `currentItemChanged` cuando el QListWidget no tenía
+        selección previa (caso de los 3 callsites — init, post-import
+        sobre DB vacía, post-discard tras refresh del list)."""
         if self._list.count() == 0:
             return None
-        self._list.setCurrentRow(0)
-        item = self._list.item(0)
-        coll = self._collection_for_item(item)
-        if coll is not None:
-            self.collection_selected.emit(coll)
-        return coll
+        self._list.setCurrentRow(0)  # → currentItemChanged → emit
+        return self._collection_for_item(self._list.item(0))
 
     # ------------------------------------------------------------------
     # Slots internos
@@ -107,6 +113,17 @@ class CollectionSelectorView(QWidget):
         coll = self._collection_for_item(item)
         if coll is not None:
             self.collection_selected.emit(coll)
+
+    def _on_current_changed(
+        self: CollectionSelectorView,
+        current: QListWidgetItem | None,
+        previous: QListWidgetItem | None,  # noqa: ARG002 — Qt API
+    ) -> None:
+        """Cambio de selección (click simple, flechas, setCurrentRow)
+        — emite el signal si hay item activo. Cuando current es None
+        (post-clear o setCurrentRow(-1)) no emite."""
+        if current is not None:
+            self._emit_for_item(current)
 
     def _emit_for_current(self: CollectionSelectorView) -> None:
         item = self._list.currentItem()
