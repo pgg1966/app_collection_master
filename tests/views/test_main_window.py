@@ -5,7 +5,8 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 import pytest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtGui import QAction
+from PySide6.QtWidgets import QApplication, QMenu
 
 from collections_app.app_context import AppContext, create_app_context
 from collections_app.core.models.card import Card
@@ -15,6 +16,19 @@ from collections_app.views.collections.collection_detail_view import (
     CollectionDetailView,
 )
 from collections_app.views.main_window import MainWindow
+
+
+def _admin_actions(win: MainWindow) -> tuple[QAction, QAction, QAction]:
+    """Devuelve (cards, collections, codes) buscando en el menú
+    "Administración" por título de acción (sin mnemonic `&`)."""
+    admin_menu = next(
+        m
+        for m in win.menuBar().findChildren(QMenu)
+        if m.title().replace("&", "") == "Administración"
+    )
+    by_label = {a.text().replace("&", "").rstrip("."): a for a in admin_menu.actions()}
+    return by_label["Cards"], by_label["Colecciones"], by_label["Códigos"]
+
 
 pytestmark = pytest.mark.gui
 
@@ -336,3 +350,35 @@ def test_main_window_collections_abm_discards_active_detail_if_collection_delete
     # modal — esperamos al próximo tick del event loop antes de aserciones.
     qtbot.waitUntil(lambda: win.active_detail is None, timeout=500)
     assert win.selector.is_empty() is True
+
+
+# ---------------------------------------------------------------------
+# Modo admin condicional vía COLLECTIONS_ADMIN
+# ---------------------------------------------------------------------
+
+
+def test_admin_menu_disabled_without_env_var(
+    qtbot,  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+    empty_ctx: AppContext,
+) -> None:
+    """Sin COLLECTIONS_ADMIN seteado, las 3 acciones admin quedan disabled."""
+    monkeypatch.delenv("COLLECTIONS_ADMIN", raising=False)
+    win = MainWindow(ctx=empty_ctx)
+    qtbot.addWidget(win)
+    for action in _admin_actions(win):
+        assert action.isEnabled() is False
+        assert "COLLECTIONS_ADMIN" in action.toolTip()
+
+
+def test_admin_menu_enabled_with_env_var(
+    qtbot,  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+    empty_ctx: AppContext,
+) -> None:
+    """Con COLLECTIONS_ADMIN=1, las 3 acciones admin quedan enabled."""
+    monkeypatch.setenv("COLLECTIONS_ADMIN", "1")
+    win = MainWindow(ctx=empty_ctx)
+    qtbot.addWidget(win)
+    for action in _admin_actions(win):
+        assert action.isEnabled() is True

@@ -27,6 +27,7 @@ El título refleja el profile activo:
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt, QTimer
@@ -132,32 +133,35 @@ class MainWindow(QMainWindow):
         salir = archivo.addAction(self.tr("&Salir"))
         salir.triggered.connect(self.close)
 
-        # Workaround issue #002 — ver docs/v02_known_issues.md.
-        # Las ABM administrativas exhiben slowdown patológico de
-        # `QTableWidget.setItem` post-cierre del modal contra datasets
-        # reales (~7 minutos para 994 cards). Diagnóstico granular y
-        # múltiples fixes (QTimer defer, setUpdatesEnabled, unpolish/
-        # polish, blockSignals, Fusion style, QT_ACCESSIBILITY=0) no
-        # resolvieron. Deshabilitamos el menú hasta refactorizar a
-        # QTableView+QStandardItemModel. Los slots quedan en su lugar
-        # para reactivación trivial cuando haya fix real.
+        # Modo admin condicional (ver docs/admin_mode.md). Las ABM
+        # administrativas se mantienen deshabilitadas por defecto: la
+        # separación admin/usuario es decisión arquitectónica para
+        # Camino C (distribución a comunidad amplia post-Mundial). El
+        # bug del issue #002 que motivó el workaround original está
+        # resuelto en raíz tras el refactor a QTableView +
+        # QAbstractTableModel (commits fdb2c2c y 441f8ac). Para activar
+        # el menú admin, setear COLLECTIONS_ADMIN=1 antes de ejecutar.
+        admin_enabled = os.environ.get("COLLECTIONS_ADMIN") == "1"
         disabled_tooltip = self.tr(
-            "Temporalmente deshabilitado por bug de performance "
-            "(issue #002). Editá los datos via CSV y reimportá."
+            "Modo admin deshabilitado. Setear COLLECTIONS_ADMIN=1 para "
+            "activar. Ver docs/admin_mode.md."
         )
         admin = self.menuBar().addMenu(self.tr("A&dministración"))
         cards_action = admin.addAction(self.tr("&Cards..."))
         cards_action.triggered.connect(self._open_cards_abm)
-        cards_action.setEnabled(False)
-        cards_action.setToolTip(disabled_tooltip)
+        cards_action.setEnabled(admin_enabled)
+        if not admin_enabled:
+            cards_action.setToolTip(disabled_tooltip)
         collections_action = admin.addAction(self.tr("C&olecciones..."))
         collections_action.triggered.connect(self._open_collections_abm)
-        collections_action.setEnabled(False)
-        collections_action.setToolTip(disabled_tooltip)
+        collections_action.setEnabled(admin_enabled)
+        if not admin_enabled:
+            collections_action.setToolTip(disabled_tooltip)
         codes_action = admin.addAction(self.tr("C&ódigos..."))
         codes_action.triggered.connect(self._open_codes_master_detail)
-        codes_action.setEnabled(False)
-        codes_action.setToolTip(disabled_tooltip)
+        codes_action.setEnabled(admin_enabled)
+        if not admin_enabled:
+            codes_action.setToolTip(disabled_tooltip)
 
     def _wire_signals(self: MainWindow) -> None:
         self._selector.collection_selected.connect(self._on_collection_selected)
