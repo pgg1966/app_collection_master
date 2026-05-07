@@ -576,6 +576,74 @@ def test_import_caps_errors_at_200(
     assert len(report.errors) == 200  # display truncado
 
 
+# ---------------------------------------------------------------------
+# import_inventory — modo add
+# ---------------------------------------------------------------------
+
+
+def test_import_add_mode_sums_to_existing(
+    tmp_path: Path,
+    service: InventoryImportService,
+    db_conn: sqlite3.Connection,
+    collection_with_codes: Collection,
+) -> None:
+    """Pre-set qty=2; archivo qty=3 → final qty=5."""
+    cards = _seed_cards(db_conn, collection_with_codes, [("ARG", 1, "M")])
+    InventoryRepository(db_conn).adjust_quantity(cards[("ARG", 1)], 2)
+    db_conn.commit()
+    file_path = tmp_path / "inv.xlsx"
+    _write_xlsx(file_path, ["código", "número", "cantidad"], [["ARG", 1, 3]])
+    assert collection_with_codes.collection_id is not None
+    report = service.import_inventory(
+        file_path=file_path,
+        collection_id=collection_with_codes.collection_id,
+        mode="add",
+    )
+    assert report.rows_applied == 1
+    assert _qty_for(db_conn, cards[("ARG", 1)]) == 5
+
+
+def test_import_add_mode_starts_from_zero(
+    tmp_path: Path,
+    service: InventoryImportService,
+    db_conn: sqlite3.Connection,
+    collection_with_codes: Collection,
+) -> None:
+    """Sin pre-existente: add con qty=4 → final qty=4 (alta por 4)."""
+    cards = _seed_cards(db_conn, collection_with_codes, [("ARG", 1, "M")])
+    file_path = tmp_path / "inv.xlsx"
+    _write_xlsx(file_path, ["código", "número", "cantidad"], [["ARG", 1, 4]])
+    assert collection_with_codes.collection_id is not None
+    service.import_inventory(
+        file_path=file_path,
+        collection_id=collection_with_codes.collection_id,
+        mode="add",
+    )
+    assert _qty_for(db_conn, cards[("ARG", 1)]) == 4
+
+
+def test_import_add_mode_logs_alta_only(
+    tmp_path: Path,
+    service: InventoryImportService,
+    db_conn: sqlite3.Connection,
+    collection_with_codes: Collection,
+) -> None:
+    """En add mode todas las transactions son ALTA (nunca BAJA)."""
+    cards = _seed_cards(db_conn, collection_with_codes, [("ARG", 1, "M")])
+    InventoryRepository(db_conn).adjust_quantity(cards[("ARG", 1)], 100)
+    db_conn.commit()
+    file_path = tmp_path / "inv.xlsx"
+    _write_xlsx(file_path, ["código", "número", "cantidad"], [["ARG", 1, 1]])
+    assert collection_with_codes.collection_id is not None
+    service.import_inventory(
+        file_path=file_path,
+        collection_id=collection_with_codes.collection_id,
+        mode="add",
+    )
+    ops = db_conn.execute("SELECT operation FROM transactions").fetchall()
+    assert all(op[0] == "alta" for op in ops)
+
+
 def test_import_unsupported_format_raises(
     tmp_path: Path,
     service: InventoryImportService,
