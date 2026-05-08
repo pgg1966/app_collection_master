@@ -28,16 +28,33 @@
 
 ---
 
-## #002 — Slowdown patológico de `QTableWidget.setItem` — relevante para futura herramienta admin
+## #002 — RESUELTO: Slowdown patológico de `QTableWidget.setItem` post-modal
 
-- **Decisión arquitectónica:** v0.2.0 distribuye solo la app de
-  usuario. La gestión de catálogo (alta/baja/edición de cards, codes,
-  collections) se va a hacer desde una herramienta admin separada que
-  se construye post-Mundial. Esta separación coincide con la
-  arquitectura del sistema anterior y resuelve el problema sin
-  necesidad de fix técnico.
-- **Archivos afectados:** todas las vistas que repueblan tablas grandes
-  tras cerrar un `QDialog` modal.
+- **Estado:** RESUELTO (2026-05-07).
+- **Resolución:**
+  - Causa raíz confirmada experimentalmente: `QTableWidget.setItem`
+    en loops masivos post-cierre de modal disparaba style cascade
+    re-evaluation por celda, escalando el costo a ~280ms/setItem
+    (vs ~0.1ms en estado limpio).
+  - Refactor aplicado a Modelo/Vista nativo de Qt:
+    [InventoryTab](../src/collections_app/views/collections/inventory_tab.py)
+    (commit `fdb2c2c`) y
+    [HistoryTab](../src/collections_app/views/collections/history_tab.py)
+    (commit `441f8ac`) migrados de `QTableWidget` a
+    `QTableView` + `QAbstractTableModel`. El llenado masivo se hace
+    via `beginResetModel/endResetModel` (UNA operación), bypassando
+    el path patológico.
+  - Validación experimental (2026-05-07): import de 258 cards reales
+    via Excel → cierre del dialog en <2s. Menú admin reactivado
+    temporalmente confirmó que las 3 ABM (Cards, Colecciones, Códigos)
+    también funcionan rápido tras el refactor.
+  - La regla 2.8 de CLAUDE.md formaliza la lección: tablas con
+    datasets >500 filas DEBEN usar QTableView+modelo.
+- **Diagnóstico granular (referencia histórica)** — el detalle del
+  proceso de debugging se preserva acá por valor para sesiones
+  futuras que enfrenten síntomas similares.
+- **Archivos afectados originalmente:** todas las vistas que
+  repueblan tablas grandes tras cerrar un `QDialog` modal.
   - [src/collections_app/views/collections/inventory_tab.py](../src/collections_app/views/collections/inventory_tab.py)
   - [src/collections_app/views/admin/cards_abm.py](../src/collections_app/views/admin/cards_abm.py)
   - [src/collections_app/views/admin/codes_master_detail.py](../src/collections_app/views/admin/codes_master_detail.py)
@@ -106,13 +123,35 @@
   re-habilitar la action manualmente para reproducir), esperar la
   carga (~170ms), cerrar con X o Cerrar, observar la `MainWindow`
   congelada varios minutos.
-- **Estado:** no bloqueante para v0.2.0; las ABM no son parte de la
-  app distribuible. Relevante cuando se construya la herramienta
-  admin separada. Workaround D activo (menú deshabilitado en
-  MainWindow). Los fixes commiteados #2 y #3 (QTimer +
-  setUpdatesEnabled, commits 3aff4aa y 3b1ea74) quedan en el código
-  como defensa preventiva por si el path post-modal aparece en otro
-  contexto.
+- **Estado final:** RESUELTO en raíz por el refactor a QTableView +
+  QAbstractTableModel (ver bloque "Resolución" al inicio del issue).
+  El menú admin permanece deshabilitado por default vía
+  `COLLECTIONS_ADMIN` (decisión arquitectónica de separación
+  admin/usuario para Camino C, no por el bug). Los fixes commiteados
+  `3aff4aa` (QTimer defer) y `3b1ea74` (setUpdatesEnabled) quedan en
+  el código como defensa preventiva — son práctica estándar de Qt y
+  no dañan, aunque ya no son la línea de defensa principal.
+
+---
+
+## #003 — Vistas pendientes de migrar a QTableView+QAbstractTableModel
+
+**Estado:** Deuda técnica menor.
+
+**Vistas afectadas:**
+- StatsView (52 filas, no exhibe el bug en práctica).
+- ReportsView (usa QTextEdit en realidad, no QTableWidget — verificar).
+- 3 ABM administrativas: CardsAbmView, CollectionsAbmView, CodesMasterDetailView (deshabilitadas por default vía COLLECTIONS_ADMIN, no exhiben el bug en condiciones normales).
+
+**Razón de la deuda:**
+Tras el refactor de InventoryTab+HistoryTab y validación experimental con menú admin reactivado, se confirmó que estas vistas no exhiben el bug del issue #002 en la práctica. Se deja la migración como deuda para no escalar trabajo sin valor inmediato.
+
+**Cuándo abordar:**
+- Si se reactiva permanentemente el menú admin.
+- Si las vistas crecen significativamente en datasets (>500 filas).
+- Como parte del "limpieza pre-1.0" antes de release público.
+
+**Approach:** aplicar el mismo patrón de migración usado en commits `fdb2c2c` (InventoryTab) y `441f8ac` (HistoryTab).
 
 ---
 

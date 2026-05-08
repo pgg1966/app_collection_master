@@ -50,5 +50,6 @@ docs/reference/
 docs/project_structure.md
 docs/data_dictionary.md
 # Datos personales del usuario (no versionar)
-mi_inventario_sticker.csv
+mi_inventario_*.csv
+mi_inventario_*.xlsx
 export_inventory.py

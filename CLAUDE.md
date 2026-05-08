@@ -8,7 +8,7 @@
 
 ## 1. Contexto del proyecto
 
-- Aplicación de escritorio Python (PySide/PyQt) para gestionar colecciones de cards/cromos.
+- Aplicación de escritorio Python (PySide6 — oficial Qt for Python) para gestionar colecciones de cards/cromos.
 - Versión actual: **0.2.0** — rewrite con lecciones aprendidas del informe de auditoría de v0.1.
 - Arquitectura en capas estricta:
   ```
@@ -16,6 +16,10 @@
   ```
 - Persistencia: SQLite local, migraciones versionadas en `core/db/schema/NNN_*.sql`.
 - Contexto canónico se regenera con `scripts/generate_context.py` → `data_dictionary.md` y `project_structure.md`. **No editar a mano.**
+- **Profiles**: la app soporta múltiples DBs vía `--profile <nombre>`. La validación es alfanumérico + underscore. Ubicación: `%APPDATA%/Collections/`. Profiles canónicos:
+  - `mundial`: catálogo Mundial 2026 con datos reales (testing principal).
+  - `demo`: dataset chico (12 cards) para testing rápido.
+  - sin profile: DB default `collections.db`, vacía.
 
 ---
 
@@ -78,6 +82,15 @@ Antes de agregar una columna, **buscar en `data_dictionary.md`** si el dato ya e
   - Idempotente (correrla 2 veces no rompe nada).
   - Probada con un test que la aplica sobre `:memory:` y verifica el schema resultante.
 
+### 2.8 Tablas con datasets grandes
+Para tablas que potencialmente alberguen >500 filas:
+- USAR `QTableView` + `QAbstractTableModel` o `QStandardItemModel`.
+- NO usar `QTableWidget` con loops de `setItem`.
+
+Razón: `QTableWidget.setItem()` post-cierre de modal exhibe slowdown patológico en Windows 11/PySide6 (~280ms por celda vs ~0.1ms en estado limpio). El refactor a Modelo/Vista nativo bypassa el path patológico al usar `beginResetModel/endResetModel` (UNA operación masiva). Ver issue #002 en `docs/v02_known_issues.md` para diagnóstico completo.
+
+Excepción permitida: tablas con dataset garantizado <100 filas (vistas de resumen, contadores). Para esas, QTableWidget está OK.
+
 ---
 
 ## 3. Workflow obligatorio del agente
@@ -89,7 +102,15 @@ Para cualquiera de estos casos:
 - Refactor que toca >3 archivos.
 - Cambio en firma pública de un método público de service o repo.
 
-→ El agente **debe** producir primero un plan textual con: qué cambia, por qué, qué archivos toca, qué tests agrega. **Esperar confirmación humana antes de codear.**
+→ El agente **debe** producir primero un plan textual con: qué cambia, por qué, qué archivos toca, qué tests agrega.
+
+**Off-plan check obligatorio:** todo plan que modifique firma pública o comportamiento de signals/slots debe incluir una sección "Off-plan check" que use grep/Select-String para encontrar TODOS los callsites en el repo, listar cada archivo afectado con su línea, y mencionar cómo se va a adaptar (mecánico vs conceptual).
+
+Si durante implementación CC descubre archivos no listados:
+- Cambio mecánico (mismo patrón ya aprobado): aplicar y mencionar en commit message.
+- Cambio conceptual: STOP y reportar antes de continuar.
+
+**Esperar confirmación humana antes de codear.**
 
 ### 3.2 TDD
 - `services/` y `repositories/`: **test primero, debe fallar, después implementación.**
@@ -109,6 +130,32 @@ Cada sesión tiene un objetivo único declarado. Si el agente detecta que "ya qu
 - Listarlo en una sección "Detectado pero no abordado" al final de la sesión.
 - **No** tocarlo.
 - Crear un issue / TODO para una sesión futura.
+- Para bugs no abordables o deuda técnica detectada: documentar en `docs/v02_known_issues.md` con número incremental (#001, #002, ...).
+
+### 3.6 Verificación manual con datos reales
+Para features que manipulan tablas, listas o datasets:
+- Tests pytest-qt con datos sintéticos NO son suficientes para detectar bugs de performance/UI en runtime real.
+- Antes de marcar Definition of Done de una feature, ejecutar verificación MANUAL contra `--profile mundial` o profile equivalente con datos reales.
+- Verificar específicamente: tiempos de respuesta UI, comportamiento al cerrar modals, estabilidad post-operaciones masivas.
+
+Esta regla es crítica para features que tocan widgets de Qt con datasets reales (>100 items). Tests sintéticos pueden no exhibir bugs que aparecen solo con jerarquías profundas + volumen real.
+
+### 3.7 Validación incremental de refactors arquitectónicos
+Para refactors que afectan >2 archivos similares (ej: migrar 5 vistas al mismo patrón):
+- Implementar PRIMERO en un caso representativo.
+- Verificar manualmente que el approach resuelve el problema (no solo tests verdes).
+- DESPUÉS aplicar el patrón a los demás casos.
+
+NO aplicar el patrón a todos los casos en una sola sesión sin validación intermedia. Si el approach falla, perdemos N veces más esfuerzo en deshacer.
+
+Excepción: casos donde el approach ya está validado en el repo.
+
+### 3.8 Logs temporales de diagnóstico
+Para debugging de bugs de performance/UI no determinísticos:
+- Es válido y recomendable agregar logs temporales con `time.perf_counter()` o módulo de logging dedicado.
+- Marcar TODOS los logs temporales con comentario `# TEMP perf diagnostic` para identificación fácil al limpiar.
+- Crear módulo aislado (ej: `views/_perf_log.py`) para que la limpieza sea trivial al final del diagnóstico.
+- NO commitear logs temporales en commits de features. Si es necesario durante debugging, hacer commit aparte que se revierte/elimina al final.
 
 ---
 
@@ -152,13 +199,14 @@ Estos patrones aparecieron en v0.1 y causaron deuda. **Prohibido reintroducirlos
 
 Algunos módulos de v0.1 funcionan correctamente y se conservan en v0.2 con cambios mínimos.
 
-### 7.1 Pantalla de alta de stock / inventario
-- Ubicación esperada en v0.2: `views/inventory/stock_entry_view.py` (nombre tentativo, ajustar al definitivo de v0.1).
-- **Política:** la lógica de UI (signals, slots, layout) se preserva sin modificaciones funcionales. Cambios permitidos:
-  - Estéticos (colores, spacing, fuentes) si son explícitamente pedidos.
-  - Adaptación de los **callsites a services**, porque los services tienen API nueva.
-  - Adaptación de imports si los modelos de dominio cambian de paquete.
-- **Política:** la lógica interna de la vista (validaciones, cálculos en el slot, máquinas de estado) **NO se toca** salvo bug encontrado durante integración.
+### 7.1 Pantalla de carga de stock / inventario
+- Ubicación real: `views/inventory/card_loader.py`.
+- **Política original (v0.1):** la lógica de UI (signals, slots, layout) se preservaba sin modificaciones funcionales. Cambios permitidos solo en callsites de services y adaptación de imports.
+- **Cambios deliberados aplicados (commits ea5edd2):**
+  - Firma del constructor: `service: InventoryService` → `ctx: AppContext`. Necesario porque el panel de import embebido necesita acceso a múltiples services.
+  - Layout: split horizontal con QGroupBox "Carga manual" a la izquierda + `InventoryImportPanel` embebido a la derecha. La sección manual queda con `setMaximumWidth(550)` para no estirarse.
+  - El menú "Archivo → Importar inventario..." se eliminó (single entry point en el tab).
+- **Política actualizada:** la lógica interna del formulario manual (validaciones, máquina de estados del completer, lookup de cards) NO se toca salvo bug encontrado durante integración. Cambios estéticos / de layout SÍ están permitidos si son explícitamente pedidos.
 - Si durante la integración aparece un bug heredado: documentarlo, NO arreglarlo en la misma sesión, abrir issue.
 
 ---
@@ -176,7 +224,28 @@ Algunos módulos de v0.1 funcionan correctamente y se conservan en v0.2 con camb
 
 ---
 
-## 9. Lo que NO hace este archivo
+## 9. Datos personales del usuario
+
+Archivos con inventario real, exports a CSV/Excel/PDF, scripts de diagnóstico, o cualquier dato personal del desarrollador NO se commitean. Patrones a ignorar (ya en `.gitignore`):
+
+- `mi_inventario_*.csv` / `mi_inventario_*.xlsx`
+- `export_inventory.py` y otros scripts puntuales generados localmente
+- `Album_*.pdf` / `MiAlbum_*.colexchange`
+- `diagnostico.txt`, `check.py`, `check_project.py`
+
+Razón: el repo es público potencialmente, los datos personales son del usuario. Si CC necesita datos para testing, usar profiles canónicos (`--profile demo`) o generar fixtures sintéticas en `tests/`.
+
+---
+
+## 10. Lecciones aprendidas (issues resueltos)
+
+- **Issue #002**: QTableWidget.setItem post-modal exhibe slowdown patológico en Windows 11/PySide6 (~280ms/celda vs ~0.1ms en estado limpio). Resuelto con refactor a QTableView+QAbstractTableModel (commits fdb2c2c InventoryTab, 441f8ac HistoryTab). Ver regla 2.8 y `docs/v02_known_issues.md`.
+
+- **Bug del sidebar (no numerado, fix de ayer)**: `CollectionSelectorView` solo conectaba `itemActivated` y `itemDoubleClicked`, no `currentItemChanged`. Click simple no emitía signal. Resuelto en commit 5ca3274.
+
+---
+
+## 11. Lo que NO hace este archivo
 
 - No reemplaza la revisión humana de PRs.
 - No cubre detalles de UX / look & feel de Qt; eso vive en `docs/ui_guidelines.md` (futuro).
