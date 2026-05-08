@@ -53,3 +53,5 @@ docs/data_dictionary.md
 mi_inventario_*.csv
 mi_inventario_*.xlsx
 export_inventory.py
+
+tools/
