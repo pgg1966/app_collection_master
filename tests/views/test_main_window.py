@@ -153,15 +153,22 @@ def test_main_window_auto_selects_first_collection(
     assert detail.collection.collection_name == "Alpha"
 
 
-def test_main_window_switching_collection_destroys_previous_detail(
+def test_main_window_switching_collection_reuses_detail_view(
     qtbot,  # type: ignore[no-untyped-def]
     seeded_ctx: AppContext,
 ) -> None:
-    """Al cambiar de colección, el detail anterior se elimina del stack."""
+    """Al cambiar de colección, el detail se REUTILIZA (no se destruye).
+
+    Decisión post-debugging del cambio lento: destruir+recrear el
+    CollectionDetailView dispara teardown costoso de Qt (~1.3-2s con
+    994 cards). El fix es propagar la nueva collection a los 5 tabs
+    via `set_active_collection` y mantener el mismo widget.
+    """
     win = MainWindow(ctx=seeded_ctx)
     qtbot.addWidget(win)
     first = win.active_detail
     assert first is not None
+    assert first.collection.collection_name == "Alpha"
 
     # Buscar el item Beta en el selector y emitir.
     listw = win.selector._list
@@ -171,8 +178,24 @@ def test_main_window_switching_collection_destroys_previous_detail(
 
     second = win.active_detail
     assert second is not None
-    assert second is not first  # objeto distinto: se recreó.
+    assert second is first  # mismo objeto: se reutiliza tras el fix.
     assert second.collection.collection_name == "Beta"
+
+
+def test_main_window_selecting_same_collection_is_idempotent(
+    qtbot,  # type: ignore[no-untyped-def]
+    seeded_ctx: AppContext,
+) -> None:
+    """Re-seleccionar la colección activa no destruye ni reconstruye nada."""
+    win = MainWindow(ctx=seeded_ctx)
+    qtbot.addWidget(win)
+    detail_before = win.active_detail
+    assert detail_before is not None
+    listw = win.selector._list
+    alpha_row = next(i for i in range(listw.count()) if listw.item(i).text() == "Alpha")
+    win.selector._list.itemActivated.emit(listw.item(alpha_row))
+    assert win.active_detail is detail_before  # mismo objeto, sin cambios.
+    assert win.active_detail.collection.collection_name == "Alpha"
 
 
 def test_main_window_csv_menu_opens_dialog(

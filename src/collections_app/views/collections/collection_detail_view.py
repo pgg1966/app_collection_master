@@ -85,6 +85,22 @@ class CollectionDetailView(QWidget):
     # API pública
     # ------------------------------------------------------------------
 
+    def set_active_collection(self: CollectionDetailView, collection: Collection) -> None:
+        """Cambia la colección activa propagando a los 5 tabs.
+
+        Reemplaza la destrucción + recreación del detail completo en
+        `MainWindow._on_collection_selected`. Cada tab refresca sus
+        datos para la nueva collection sin tirar y reconstruir QWidgets
+        — la lección del bug del cambio lento (commit `fe24c8d` para
+        el diagnóstico, este commit para el fix).
+        """
+        self._collection = collection
+        self._inventory_tab.set_active_collection(collection)
+        self._loader_tab.set_active_collection(collection)
+        self._history_tab.set_active_collection(collection)
+        self._stats_tab.set_active_collection(collection)
+        self._reports_tab.set_active_collection(collection)
+
     def refresh_all_tabs(self: CollectionDetailView) -> None:
         """Fuerza refresh de los tabs que leen DB.
 

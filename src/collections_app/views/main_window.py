@@ -15,10 +15,12 @@ QSplitter horizontal con sidebar a la izquierda. El área de contenido
 es un `QStackedWidget` que alterna entre el placeholder de empty state
 y el `CollectionDetailView` activo.
 
-Cuando el usuario cambia de colección desde el sidebar, **se destruye
-y se recrea** el `CollectionDetailView` (decisión del plan: sin estado
-fantasma entre colecciones; signals viejos quedan colgados sobre un
-widget eliminado y Qt los limpia).
+Cuando el usuario cambia de colección desde el sidebar, el
+`CollectionDetailView` activo se **reutiliza**: se propaga la nueva
+colección a los 5 tabs vía `set_active_collection`. Destruir + recrear
+exhibía un teardown costoso de Qt (~1.3-2s con datasets reales);
+reutilizar evita ese costo. Idempotente si la colección seleccionada
+es la misma que la activa.
 
 El título refleja el profile activo:
 - profile None → "Collections"
@@ -166,19 +168,30 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_collection_selected(self: MainWindow, collection: Collection) -> None:
-        """Reemplaza el detail view activo. Destruye el previo si había uno."""
+        """Activa el detail de `collection`, reutilizándolo si ya existe.
+
+        Reutilización (vs destruir+recrear) elimina el costo de teardown
+        de los widgets del detail anterior, que era el bottleneck del
+        cambio lento (logs del commit `fe24c8d` mostraron que el delay
+        venía de la destrucción, no de la construcción).
+
+        Idempotencia: si la collection seleccionada coincide con la
+        activa, no se hace nada — evita refresh innecesario al re-emitir
+        el signal sobre la fila ya seleccionada.
+        """
         plog(  # TEMP perf diagnostic
             f"MainWindow._on_collection_selected: ENTER ({collection.collection_name!r})"
         )
-        if self._active_detail is not None:
-            self._content_stack.removeWidget(self._active_detail)
-            self._active_detail.deleteLater()
-            self._active_detail = None
+        if self._active_detail is None:
+            # Primera vez: construir el detail y agregarlo al stack.
+            self._active_detail = CollectionDetailView(ctx=self._ctx, collection=collection)
+            self._content_stack.addWidget(self._active_detail)
+        elif self._active_detail.collection.collection_id != collection.collection_id:
+            # Cambio real de colección: propagar a los 5 tabs sin reconstruir.
+            self._active_detail.set_active_collection(collection)
+        # else: misma colección activa → idempotente, no hacer nada.
 
-        detail = CollectionDetailView(ctx=self._ctx, collection=collection)
-        self._active_detail = detail
-        self._content_stack.addWidget(detail)
-        self._content_stack.setCurrentWidget(detail)
+        self._content_stack.setCurrentWidget(self._active_detail)
         plog("MainWindow._on_collection_selected: EXIT")  # TEMP perf diagnostic
 
     def _open_csv_import_dialog(self: MainWindow) -> None:
