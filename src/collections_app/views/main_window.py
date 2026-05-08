@@ -42,6 +42,7 @@ from PySide6.QtWidgets import (
 
 from collections_app.app_context import AppContext
 from collections_app.core.models.collection import Collection
+from collections_app.views._perf_log import plog  # TEMP perf diagnostic
 from collections_app.views.admin.cards_abm import CardsAbmView
 from collections_app.views.admin.codes_master_detail import CodesMasterDetailView
 from collections_app.views.admin.collections_abm import CollectionsAbmView
@@ -166,6 +167,9 @@ class MainWindow(QMainWindow):
 
     def _on_collection_selected(self: MainWindow, collection: Collection) -> None:
         """Reemplaza el detail view activo. Destruye el previo si había uno."""
+        plog(  # TEMP perf diagnostic
+            f"MainWindow._on_collection_selected: ENTER ({collection.collection_name!r})"
+        )
         if self._active_detail is not None:
             self._content_stack.removeWidget(self._active_detail)
             self._active_detail.deleteLater()
@@ -175,6 +179,7 @@ class MainWindow(QMainWindow):
         self._active_detail = detail
         self._content_stack.addWidget(detail)
         self._content_stack.setCurrentWidget(detail)
+        plog("MainWindow._on_collection_selected: EXIT")  # TEMP perf diagnostic
 
     def _open_csv_import_dialog(self: MainWindow) -> None:
         """Abre el diálogo de import. Cuando termina, refresca el sidebar
