@@ -12,7 +12,13 @@ from collections_app.services.code_headers_service import CodeHeadersService
 from collections_app.services.code_lines_service import CodeLinesService
 from collections_app.services.collections_service import CollectionsService
 from collections_app.services.csv_import_service import CsvImportService
+from collections_app.services.exchange_apply_service import ExchangeApplyService
+from collections_app.services.exchange_export_service import ExchangeExportService
+from collections_app.services.exchange_import_service import ExchangeImportService
 from collections_app.services.inventory_service import InventoryService
+from collections_app.services.inventory_snapshot_service import (
+    InventorySnapshotService,
+)
 from collections_app.services.settings_service import SettingsService
 from collections_app.services.transactions_service import TransactionsService
 
@@ -38,6 +44,10 @@ def test_app_context_exposes_all_services() -> None:
         assert isinstance(ctx.transactions, TransactionsService)
         assert isinstance(ctx.settings, SettingsService)
         assert isinstance(ctx.csv_import, CsvImportService)
+        assert isinstance(ctx.inventory_snapshot, InventorySnapshotService)
+        assert isinstance(ctx.exchange_export, ExchangeExportService)
+        assert isinstance(ctx.exchange_import, ExchangeImportService)
+        assert isinstance(ctx.exchange_apply, ExchangeApplyService)
     finally:
         ctx.close()
 

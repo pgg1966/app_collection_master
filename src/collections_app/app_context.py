@@ -29,8 +29,12 @@ from collections_app.services.code_headers_service import CodeHeadersService
 from collections_app.services.code_lines_service import CodeLinesService
 from collections_app.services.collections_service import CollectionsService
 from collections_app.services.csv_import_service import CsvImportService
+from collections_app.services.exchange_apply_service import ExchangeApplyService
+from collections_app.services.exchange_export_service import ExchangeExportService
+from collections_app.services.exchange_import_service import ExchangeImportService
 from collections_app.services.inventory_import_service import InventoryImportService
 from collections_app.services.inventory_service import InventoryService
+from collections_app.services.inventory_snapshot_service import InventorySnapshotService
 from collections_app.services.settings_service import SettingsService
 from collections_app.services.transactions_service import TransactionsService
 
@@ -49,6 +53,10 @@ class AppContext:
     settings: SettingsService
     csv_import: CsvImportService
     inventory_import: InventoryImportService
+    inventory_snapshot: InventorySnapshotService
+    exchange_export: ExchangeExportService
+    exchange_import: ExchangeImportService
+    exchange_apply: ExchangeApplyService
 
     def close(self: AppContext) -> None:
         """Cierra la conexión SQLite. Idempotente."""
@@ -76,4 +84,8 @@ def create_app_context(db_path: Path | str) -> AppContext:
         settings=SettingsService(conn),
         csv_import=CsvImportService(conn),
         inventory_import=InventoryImportService(conn),
+        inventory_snapshot=InventorySnapshotService(conn),
+        exchange_export=ExchangeExportService(conn),
+        exchange_import=ExchangeImportService(conn),
+        exchange_apply=ExchangeApplyService(conn),
     )
