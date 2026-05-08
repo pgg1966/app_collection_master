@@ -36,7 +36,6 @@ from PySide6.QtWidgets import (
 from collections_app.app_context import AppContext
 from collections_app.core.models.card import Card
 from collections_app.core.models.collection import Collection
-from collections_app.views._perf_log import plog  # TEMP perf diagnostic
 
 _ZERO_QTY_COLOR = QColor("#A0A0A0")  # gris medio para filas sin stock
 _HEADERS = ["Código", "Número", "Nombre", "Cantidad"]
@@ -165,7 +164,6 @@ class InventoryTab(QWidget):
         self._collection = collection
         self._build_ui()
         self.refresh()
-        plog("InventoryTab.__init__: DONE")  # TEMP perf diagnostic
 
     # ------------------------------------------------------------------
     # UI

@@ -51,7 +51,6 @@ from collections_app.core.models.card import Card
 from collections_app.core.models.collection import Collection
 from collections_app.core.models.inventory_item import InventoryItem
 from collections_app.services.exceptions import AmbiguousCardError, InventoryError
-from collections_app.views._perf_log import plog  # TEMP perf diagnostic
 from collections_app.views.admin.inventory_import_dialog import InventoryImportPanel
 from collections_app.views.shared.theme import (
     INPUT_BG_ALTA,
@@ -187,7 +186,6 @@ class CardLoaderView(QWidget):
         self._wire_navigator()
         focus_target = self._first_active_input()
         focus_target.setFocus()
-        plog("CardLoaderView.__init__: DONE")  # TEMP perf diagnostic
 
     # ------------------------------------------------------------------
     # API pública

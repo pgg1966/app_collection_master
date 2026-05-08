@@ -44,7 +44,6 @@ from PySide6.QtWidgets import (
 
 from collections_app.app_context import AppContext
 from collections_app.core.models.collection import Collection
-from collections_app.views._perf_log import plog  # TEMP perf diagnostic
 from collections_app.views.admin.cards_abm import CardsAbmView
 from collections_app.views.admin.codes_master_detail import CodesMasterDetailView
 from collections_app.views.admin.collections_abm import CollectionsAbmView
@@ -179,9 +178,6 @@ class MainWindow(QMainWindow):
         activa, no se hace nada — evita refresh innecesario al re-emitir
         el signal sobre la fila ya seleccionada.
         """
-        plog(  # TEMP perf diagnostic
-            f"MainWindow._on_collection_selected: ENTER ({collection.collection_name!r})"
-        )
         if self._active_detail is None:
             # Primera vez: construir el detail y agregarlo al stack.
             self._active_detail = CollectionDetailView(ctx=self._ctx, collection=collection)
@@ -192,7 +188,6 @@ class MainWindow(QMainWindow):
         # else: misma colección activa → idempotente, no hacer nada.
 
         self._content_stack.setCurrentWidget(self._active_detail)
-        plog("MainWindow._on_collection_selected: EXIT")  # TEMP perf diagnostic
 
     def _open_csv_import_dialog(self: MainWindow) -> None:
         """Abre el diálogo de import. Cuando termina, refresca el sidebar

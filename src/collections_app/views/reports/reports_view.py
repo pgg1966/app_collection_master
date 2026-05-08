@@ -56,7 +56,6 @@ from PySide6.QtWidgets import (
 
 from collections_app.app_context import AppContext
 from collections_app.core.models.collection import Collection
-from collections_app.views._perf_log import plog  # TEMP perf diagnostic
 from collections_app.views.reports._formatters import (
     URL_SAFE_LIMIT,
     format_duplicates_report,
@@ -266,7 +265,6 @@ class ReportsView(QWidget):
         self._collection = collection
         self._build_ui()
         self.refresh()
-        plog("ReportsView.__init__: DONE")  # TEMP perf diagnostic
 
     def _build_ui(self: ReportsView) -> None:
         outer = QVBoxLayout(self)
@@ -300,43 +298,16 @@ class ReportsView(QWidget):
         assert self._collection.collection_id is not None
         cid = self._collection.collection_id
 
-        plog("ReportsView.refresh: BEFORE list_by_header")  # TEMP perf diagnostic
         codes = self._ctx.code_lines.list_by_header(self._collection.code_header_id)
-        plog(  # TEMP perf diagnostic
-            f"ReportsView.refresh: AFTER list_by_header ({len(codes)} codes)"
-        )
 
-        plog("ReportsView.refresh: BEFORE list_missing")  # TEMP perf diagnostic
         missing_cards = self._ctx.inventory.list_missing(cid)
-        plog(  # TEMP perf diagnostic
-            f"ReportsView.refresh: AFTER list_missing ({len(missing_cards)} missing)"
-        )
-
-        plog("ReportsView.refresh: BEFORE format_missing_report")  # TEMP perf diagnostic
         missing_text = format_missing_report(missing_cards, codes)
-        plog(  # TEMP perf diagnostic
-            f"ReportsView.refresh: AFTER format_missing_report ({len(missing_text)} chars)"
-        )
         self._missing_section.set_text(missing_text)
 
-        plog("ReportsView.refresh: BEFORE list_duplicates")  # TEMP perf diagnostic
         duplicates = self._ctx.inventory.list_duplicates(cid)
-        plog(  # TEMP perf diagnostic
-            f"ReportsView.refresh: AFTER list_duplicates ({len(duplicates)} items)"
-        )
-
-        plog("ReportsView.refresh: BEFORE list_by_collection")  # TEMP perf diagnostic
         cards = self._ctx.cards.list_by_collection(cid)
-        plog(  # TEMP perf diagnostic
-            f"ReportsView.refresh: AFTER list_by_collection ({len(cards)} cards)"
-        )
         cards_by_id = {card.card_id: card for card in cards if card.card_id is not None}
-
-        plog("ReportsView.refresh: BEFORE format_duplicates_report")  # TEMP perf diagnostic
         duplicates_text = format_duplicates_report(duplicates, cards_by_id, codes)
-        plog(  # TEMP perf diagnostic
-            f"ReportsView.refresh: AFTER format_duplicates_report ({len(duplicates_text)} chars)"
-        )
         self._duplicates_section.set_text(duplicates_text)
 
     def set_active_collection(self: ReportsView, collection: Collection) -> None:

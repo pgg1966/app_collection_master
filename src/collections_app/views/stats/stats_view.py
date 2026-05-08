@@ -24,7 +24,6 @@ from PySide6.QtWidgets import (
 
 from collections_app.app_context import AppContext
 from collections_app.core.models.collection import Collection
-from collections_app.views._perf_log import plog  # TEMP perf diagnostic
 
 _HEADERS = ["Código", "Nombre", "Total", "Mías", "% Avance"]
 
@@ -51,7 +50,6 @@ class StatsView(QWidget):
         self._collection = collection
         self._build_ui()
         self.refresh()
-        plog("StatsView.__init__: DONE")  # TEMP perf diagnostic
 
     def _build_ui(self: StatsView) -> None:
         outer = QVBoxLayout(self)

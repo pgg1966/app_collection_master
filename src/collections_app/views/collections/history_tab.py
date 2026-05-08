@@ -36,7 +36,6 @@ from collections_app.app_context import AppContext
 from collections_app.core.models.card import Card
 from collections_app.core.models.collection import Collection
 from collections_app.core.models.transaction import OperationType, Transaction
-from collections_app.views._perf_log import plog  # TEMP perf diagnostic
 
 _HISTORY_LIMIT = 200
 _HEADERS = ["Fecha", "Operación", "Card", "Cantidad"]
@@ -172,7 +171,6 @@ class HistoryTab(QWidget):
         self._collection = collection
         self._build_ui()
         self.refresh()
-        plog("HistoryTab.__init__: DONE")  # TEMP perf diagnostic
 
     # ------------------------------------------------------------------
     # UI
