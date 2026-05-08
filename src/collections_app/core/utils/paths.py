@@ -33,6 +33,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import tempfile
 from pathlib import Path
 
 _PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
@@ -108,6 +109,25 @@ def get_default_db_path() -> Path:
     con callers existentes en bootstrap.
     """
     return get_db_path_for_profile(None)
+
+
+def get_downloads_dir() -> Path:
+    """Carpeta Descargas del usuario, con fallback a temp.
+
+    Por convención `~/Downloads` existe en Windows, macOS y Linux con
+    una instalación estándar. Si no existe (entornos minimalistas,
+    Docker, CI), fallback a `tempfile.gettempdir()` — siempre
+    escribible.
+
+    Pensado para features que generan archivos para que el usuario
+    los comparta (ej. archivos `.colexchange` del Prompt 5). El caller
+    obtiene el `Path` final del archivo y puede ofrecer "Abrir
+    carpeta" en la UI.
+    """
+    candidate = Path.home() / "Downloads"
+    if candidate.is_dir():
+        return candidate
+    return Path(tempfile.gettempdir())
 
 
 def get_generated_cards_dir_for_profile(profile: str | None) -> Path:

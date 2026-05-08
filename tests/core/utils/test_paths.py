@@ -150,3 +150,35 @@ def test_get_generated_cards_dir_creates_directory(
 def test_get_generated_cards_dir_rejects_invalid_profile() -> None:
     with pytest.raises(ValueError, match="profile invalido"):
         get_generated_cards_dir_for_profile("bad/name")
+
+
+# ---------------------------------------------------------------------
+# get_downloads_dir
+# ---------------------------------------------------------------------
+
+
+def test_get_downloads_dir_returns_downloads_when_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Si `~/Downloads` existe, lo retorna."""
+    from collections_app.core.utils.paths import get_downloads_dir
+
+    fake_home = tmp_path / "home"
+    (fake_home / "Downloads").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    assert get_downloads_dir() == fake_home / "Downloads"
+
+
+def test_get_downloads_dir_falls_back_to_tempdir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Si `~/Downloads` no existe, fallback a tempfile.gettempdir()."""
+    import tempfile as _tempfile
+
+    from collections_app.core.utils.paths import get_downloads_dir
+
+    fake_home = tmp_path / "home_minimal"
+    fake_home.mkdir()  # sin Downloads adentro
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    result = get_downloads_dir()
+    assert result == Path(_tempfile.gettempdir())
