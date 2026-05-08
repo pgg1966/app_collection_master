@@ -1,14 +1,16 @@
-"""Vista de detalle de una colección — orquesta los 5 tabs.
+"""Vista de detalle de una colección — orquesta los 6 tabs.
 
 - "Mis cards"     → InventoryTab
 - "Cargar stock"  → CardLoaderView (vista preservada de v0.1, embebida)
 - "Historial"     → HistoryTab
 - "Estadísticas"  → StatsView (Prompt 4b)
 - "Reportes"      → ReportsView (Prompt 4b)
+- "Intercambio"   → ExchangeTab (Prompt 5b)
 
-El cableado clave es el signal `CardLoaderView.card_changed`: cada vez
-que el usuario cierra un alta/baja, los otros 4 tabs se refrescan
-automáticamente para reflejar la mutación.
+Cableado de refresh:
+- `CardLoaderView.card_changed` → refresh de los 4 tabs lectores.
+- `ExchangeTab.inventory_changed` (post-apply de un intercambio) →
+  mismo refresh.
 
 `refresh_all_tabs()` permite a la `MainWindow` forzar un refresh de
 todos los tabs cuando una ABM modal modificó datos.
@@ -22,6 +24,7 @@ from collections_app.app_context import AppContext
 from collections_app.core.models.collection import Collection
 from collections_app.views.collections.history_tab import HistoryTab
 from collections_app.views.collections.inventory_tab import InventoryTab
+from collections_app.views.exchange.exchange_tab import ExchangeTab
 from collections_app.views.inventory.card_loader import CardLoaderView
 from collections_app.views.reports.reports_view import ReportsView
 from collections_app.views.stats.stats_view import StatsView
@@ -56,12 +59,14 @@ class CollectionDetailView(QWidget):
         self._history_tab = HistoryTab(ctx=self._ctx, collection=self._collection)
         self._stats_tab = StatsView(ctx=self._ctx, collection=self._collection)
         self._reports_tab = ReportsView(ctx=self._ctx, collection=self._collection)
+        self._exchange_tab = ExchangeTab(ctx=self._ctx, collection=self._collection)
 
         self._tabs.addTab(self._inventory_tab, self.tr("Mis cards"))
         self._tabs.addTab(self._loader_tab, self.tr("Cargar stock"))
         self._tabs.addTab(self._history_tab, self.tr("Historial"))
         self._tabs.addTab(self._stats_tab, self.tr("Estadísticas"))
         self._tabs.addTab(self._reports_tab, self.tr("Reportes"))
+        self._tabs.addTab(self._exchange_tab, self.tr("Intercambio"))
 
         outer.addWidget(self._tabs)
 
@@ -70,18 +75,23 @@ class CollectionDetailView(QWidget):
     # ------------------------------------------------------------------
 
     def _wire_refresh_chain(self: CollectionDetailView) -> None:
-        """`card_changed` del loader → refresh de los 4 tabs no-loader."""
-        self._loader_tab.card_changed.connect(self._inventory_tab.refresh)
-        self._loader_tab.card_changed.connect(self._history_tab.refresh)
-        self._loader_tab.card_changed.connect(self._stats_tab.refresh)
-        self._loader_tab.card_changed.connect(self._reports_tab.refresh)
+        """Mutaciones de inventario → refresh de los 4 tabs lectores.
+
+        Dos orígenes posibles: alta/baja manual desde el loader y
+        aplicación de una propuesta de intercambio.
+        """
+        for source in (self._loader_tab.card_changed, self._exchange_tab.inventory_changed):
+            source.connect(self._inventory_tab.refresh)
+            source.connect(self._history_tab.refresh)
+            source.connect(self._stats_tab.refresh)
+            source.connect(self._reports_tab.refresh)
 
     # ------------------------------------------------------------------
     # API pública
     # ------------------------------------------------------------------
 
     def set_active_collection(self: CollectionDetailView, collection: Collection) -> None:
-        """Cambia la colección activa propagando a los 5 tabs.
+        """Cambia la colección activa propagando a los 6 tabs.
 
         Reemplaza la destrucción + recreación del detail completo en
         `MainWindow._on_collection_selected`. Cada tab refresca sus
@@ -95,6 +105,7 @@ class CollectionDetailView(QWidget):
         self._history_tab.set_active_collection(collection)
         self._stats_tab.set_active_collection(collection)
         self._reports_tab.set_active_collection(collection)
+        self._exchange_tab.set_active_collection(collection)
 
     def refresh_all_tabs(self: CollectionDetailView) -> None:
         """Fuerza refresh de los tabs que leen DB.
@@ -139,3 +150,7 @@ class CollectionDetailView(QWidget):
     @property
     def reports_tab(self: CollectionDetailView) -> ReportsView:
         return self._reports_tab
+
+    @property
+    def exchange_tab(self: CollectionDetailView) -> ExchangeTab:
+        return self._exchange_tab

@@ -11,6 +11,7 @@ from collections_app.views.collections.collection_detail_view import (
 )
 from collections_app.views.collections.history_tab import HistoryTab
 from collections_app.views.collections.inventory_tab import InventoryTab
+from collections_app.views.exchange.exchange_tab import ExchangeTab
 from collections_app.views.inventory.card_loader import CardLoaderView
 from collections_app.views.reports.reports_view import ReportsView
 from collections_app.views.stats.stats_view import StatsView
@@ -18,20 +19,21 @@ from collections_app.views.stats.stats_view import StatsView
 pytestmark = pytest.mark.gui
 
 
-def test_detail_view_constructs_with_five_tabs(
+def test_detail_view_constructs_with_six_tabs(
     qtbot,  # type: ignore[no-untyped-def]
     ctx_with_demo: AppContext,
     demo_collection: Collection,
 ) -> None:
     view = CollectionDetailView(ctx=ctx_with_demo, collection=demo_collection)
     qtbot.addWidget(view)
-    assert view._tabs.count() == 5
+    assert view._tabs.count() == 6
     # Orden y tipos esperados.
     assert isinstance(view._tabs.widget(0), InventoryTab)
     assert isinstance(view._tabs.widget(1), CardLoaderView)
     assert isinstance(view._tabs.widget(2), HistoryTab)
     assert isinstance(view._tabs.widget(3), StatsView)
     assert isinstance(view._tabs.widget(4), ReportsView)
+    assert isinstance(view._tabs.widget(5), ExchangeTab)
 
 
 def test_detail_view_tab_titles_in_spanish(
@@ -48,6 +50,7 @@ def test_detail_view_tab_titles_in_spanish(
         "Historial",
         "Estadísticas",
         "Reportes",
+        "Intercambio",
     ]
 
 
