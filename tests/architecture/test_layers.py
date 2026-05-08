@@ -10,6 +10,7 @@ Mapeo path → capa:
     services/                           -> "services"
     core/repositories/                  -> "repositories"
     core/models/                        -> "models"
+    core/security/                      -> "security"
     core/{db,utils}/                    -> capa libre (no se chequea)
 
 Reglas (prefijos de módulo prohibidos por capa, matcheados con startswith):
@@ -27,6 +28,14 @@ Reglas (prefijos de módulo prohibidos por capa, matcheados con startswith):
                     collections_app.core.repositories,
                     collections_app.core.db,
                     collections_app.views
+    security     -> sqlite3, PySide6, PyQt5, PyQt6,
+                    collections_app.services,
+                    collections_app.core.repositories,
+                    collections_app.core.db,
+                    collections_app.views
+                    (solo stdlib + collections_app.core.models permitido —
+                    aislado para que la firma HMAC del .colexchange no
+                    arrastre dependencias de IO/UI/persistencia.)
 
 TODOs (extender en Prompt 1, ya hay scaffolding mental):
 
@@ -57,6 +66,7 @@ LAYER_PATHS: dict[str, str] = {
     "services": "services",
     "core/repositories": "repositories",
     "core/models": "models",
+    "core/security": "security",
 }
 
 # Prefijos prohibidos por capa. Match con `module == p` o `module.startswith(p + ".")`.
@@ -97,8 +107,23 @@ FORBIDDEN_BY_LAYER: dict[str, frozenset[str]] = {
             "collections_app.views",
         }
     ),
+    "security": frozenset(
+        {
+            "sqlite3",
+            "PySide6",
+            "PyQt5",
+            "PyQt6",
+            "collections_app.services",
+            "collections_app.core.repositories",
+            "collections_app.core.db",
+            "collections_app.views",
+        }
+    ),
 }
 
+# `security` no se incluye en EXPECTED_LAYERS porque la capa puede no
+# tener archivos al inicio del Prompt 5 (solo aparece tras commit 1).
+# El sanity check sigue garantizando las 4 capas core.
 EXPECTED_LAYERS = frozenset({"views", "services", "repositories", "models"})
 
 
