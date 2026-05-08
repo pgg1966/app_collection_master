@@ -1,39 +1,89 @@
-"""Genera documentación de contexto del proyecto para retomarla en una conversación nueva.
+"""Genera `docs/project_structure.md` con la estructura completa del proyecto.
 
-Produce UN ÚNICO archivo en `docs/project_structure.md` con tres
-secciones, en este orden:
+Características:
 
-1. **Estructura**: árbol completo del proyecto (links a cada archivo).
-2. **Código fuente**: contenido COMPLETO de cada archivo `.py` (con el
-   path como encabezado y el código dentro de un bloque ```python).
-3. **Contexto**: schema SQL parseado de las migraciones, modelos
-   (dataclasses) y métodos públicos de cada Repository. Pensado como
-   resumen compacto para alimentar a un LLM.
+- **Respeta `.gitignore`**: usa `git ls-files --cached --others --exclude-standard`
+  para listar exactamente los archivos que git considera versionables. Si git
+  no está disponible, fallback a una lista hardcoded de directorios/extensiones.
+- **Cubre todos los archivos texto del repo**, no solo `.py`. Markdown, SQL,
+  TOML, YAML, JSON, scripts shell/batch, etc. se incluyen completos. Binarios
+  (imágenes, .db, .pdf, .xlsx) se listan con nota.
+- **Por cada archivo `.py`**: outline de clases/funciones públicas con
+  signaturas + docstring de primer renglón **antes** del código completo.
+- Mantiene la sección de **schema SQL + dataclasses + repositories** como
+  hand-off compacto para alimentar a un LLM.
 
 Uso:
     python scripts/generate_context.py
 
-Sin argumentos (toma todo del root del proyecto). El script no requiere
-dependencias externas: solo `ast` + regex de la stdlib.
+Sin argumentos. Output: `docs/project_structure.md` (sobreescribe).
 """
+
+from __future__ import annotations
 
 import ast
 import re
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC_DIR = ROOT / "src"
-TESTS_DIR = ROOT / "tests"
-SCRIPTS_DIR = ROOT / "scripts"
 SCHEMA_DIR = SRC_DIR / "collections_app" / "core" / "db" / "schema"
 MODELS_DIR = SRC_DIR / "collections_app" / "core" / "models"
 REPOS_DIR = SRC_DIR / "collections_app" / "core" / "repositories"
 DOCS_DIR = ROOT / "docs"
+OUTPUT_PATH = DOCS_DIR / "project_structure.md"
 
-# Directorios y patrones a ignorar al armar el árbol.
-IGNORE_DIRS = frozenset(
+# Extensiones tratadas como texto (contenido se incluye completo).
+TEXT_SUFFIXES = frozenset(
+    {
+        ".py",
+        ".md",
+        ".rst",
+        ".txt",
+        ".toml",
+        ".cfg",
+        ".ini",
+        ".yml",
+        ".yaml",
+        ".json",
+        ".sql",
+        ".sh",
+        ".bat",
+        ".ps1",
+        ".env.example",
+        ".editorconfig",
+        ".gitignore",
+        ".gitattributes",
+    }
+)
+# Archivos sin extensión que tratamos como texto (Makefile, LICENSE, etc.).
+TEXT_NAMES = frozenset({"Makefile", "Dockerfile", "LICENSE", "README", ".gitignore"})
+
+# Mapping de extensión → lenguaje del code fence en markdown.
+LANGUAGE_BY_SUFFIX = {
+    ".py": "python",
+    ".md": "markdown",
+    ".rst": "rst",
+    ".toml": "toml",
+    ".cfg": "ini",
+    ".ini": "ini",
+    ".yml": "yaml",
+    ".yaml": "yaml",
+    ".json": "json",
+    ".sql": "sql",
+    ".sh": "bash",
+    ".bat": "batch",
+    ".ps1": "powershell",
+    ".gitignore": "gitignore",
+    ".gitattributes": "gitattributes",
+    ".editorconfig": "ini",
+}
+
+# Fallback si `git` no está disponible.
+FALLBACK_IGNORE_DIRS = frozenset(
     {
         "__pycache__",
         ".venv",
@@ -49,18 +99,84 @@ IGNORE_DIRS = frozenset(
         "data",
         ".idea",
         ".vscode",
-        "collections.egg-info",
     }
 )
-IGNORE_FILE_SUFFIXES = frozenset({".pyc", ".pyo", ".db", ".db-journal", ".log"})
-IGNORE_FILES = frozenset({".DS_Store"})
-
-# Solo incluimos estos roots en el árbol y el detalle.
-INCLUDE_ROOTS = (SRC_DIR, TESTS_DIR, SCRIPTS_DIR, DOCS_DIR)
+FALLBACK_IGNORE_SUFFIXES = frozenset({".pyc", ".pyo", ".db", ".db-journal", ".log"})
 
 
 # ---------------------------------------------------------------------
-# Modelos internos del extractor
+# File listing (gitignore-aware)
+# ---------------------------------------------------------------------
+
+
+def list_repo_files() -> list[Path]:
+    """Lista los archivos del repo respetando `.gitignore`.
+
+    Usa `git ls-files --cached --others --exclude-standard`:
+    - `--cached`: archivos versionados (ya en el index).
+    - `--others`: archivos untracked.
+    - `--exclude-standard`: excluye los matchados por `.gitignore`,
+      `.git/info/exclude` y `core.excludesFile`.
+
+    Si git no está disponible o no es un repo, fallback a un walk
+    manual con la lista hardcoded de `FALLBACK_IGNORE_*`.
+    """
+    # Argumentos hardcoded; no hay input del usuario. `git` se busca en
+    # PATH — aceptable para una herramienta de proyecto local.
+    cmd = ["git", "ls-files", "--cached", "--others", "--exclude-standard"]  # noqa: S607
+    try:
+        result = subprocess.run(  # noqa: S603
+            cmd,
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return _fallback_walk()
+
+    paths: list[Path] = []
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        path = ROOT / line
+        if path.is_file():
+            paths.append(path)
+    paths.sort()
+    return paths
+
+
+def _fallback_walk() -> list[Path]:
+    """Walk manual si git no responde."""
+    paths: list[Path] = []
+    for path in sorted(ROOT.rglob("*")):
+        if not path.is_file():
+            continue
+        if any(part in FALLBACK_IGNORE_DIRS for part in path.parts):
+            continue
+        if path.suffix in FALLBACK_IGNORE_SUFFIXES:
+            continue
+        paths.append(path)
+    return paths
+
+
+def relative(path: Path) -> str:
+    """Path relativo al ROOT con `/` como separador (links MD válidos)."""
+    return path.resolve().relative_to(ROOT).as_posix()
+
+
+def is_text_file(path: Path) -> bool:
+    """True si el archivo se trata como texto (contenido va al output)."""
+    return path.suffix in TEXT_SUFFIXES or path.name in TEXT_NAMES
+
+
+def language_for(path: Path) -> str:
+    return LANGUAGE_BY_SUFFIX.get(path.suffix, "")
+
+
+# ---------------------------------------------------------------------
+# AST extractor (outline para .py)
 # ---------------------------------------------------------------------
 
 
@@ -77,7 +193,7 @@ class ClassSummary:
     bases: list[str]
     is_dataclass: bool
     docstring_first_line: str | None
-    fields: list[str]  # solo para dataclasses
+    fields: list[str]
     methods: list[FunctionSummary]
 
 
@@ -90,35 +206,6 @@ class ModuleSummary:
     error: str | None = None
 
 
-# ---------------------------------------------------------------------
-# Walking
-# ---------------------------------------------------------------------
-
-
-def is_ignored(path: Path) -> bool:
-    if any(part in IGNORE_DIRS for part in path.parts):
-        return True
-    if path.suffix in IGNORE_FILE_SUFFIXES:
-        return True
-    return path.name in IGNORE_FILES
-
-
-def walk_relevant_files(root: Path) -> list[Path]:
-    """Lista todos los archivos no-ignorados bajo `root`, ordenados."""
-    files: list[Path] = []
-    if not root.exists():
-        return files
-    for path in sorted(root.rglob("*")):
-        if path.is_file() and not is_ignored(path):
-            files.append(path)
-    return files
-
-
-def relative(path: Path) -> str:
-    """Devuelve el path relativo al ROOT con / como separador."""
-    return path.resolve().relative_to(ROOT).as_posix()
-
-
 def first_line(text: str | None) -> str | None:
     if text is None:
         return None
@@ -126,11 +213,6 @@ def first_line(text: str | None) -> str | None:
     if not stripped:
         return None
     return stripped.splitlines()[0].strip()
-
-
-# ---------------------------------------------------------------------
-# AST helpers
-# ---------------------------------------------------------------------
 
 
 def format_arg(arg: ast.arg) -> str:
@@ -141,35 +223,27 @@ def format_arg(arg: ast.arg) -> str:
 
 
 def format_signature(func: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
-    """Reconstruye la signatura como texto: `(arg1: T, arg2=default) -> R`."""
     args_node = func.args
     parts: list[str] = []
-
-    # posicionales (incluye self/cls)
     pos_args = list(args_node.posonlyargs) + list(args_node.args)
     defaults = list(args_node.defaults)
-    # padding de defaults
     pad = [None] * (len(pos_args) - len(defaults)) + defaults
     for arg, default in zip(pos_args, pad, strict=False):
         s = format_arg(arg)
         if default is not None:
             s += f" = {ast.unparse(default)}"
         parts.append(s)
-
     if args_node.vararg is not None:
         parts.append(f"*{format_arg(args_node.vararg)}")
     elif args_node.kwonlyargs:
         parts.append("*")
-
     for arg, default in zip(args_node.kwonlyargs, args_node.kw_defaults, strict=True):
         s = format_arg(arg)
         if default is not None:
             s += f" = {ast.unparse(default)}"
         parts.append(s)
-
     if args_node.kwarg is not None:
         parts.append(f"**{format_arg(args_node.kwarg)}")
-
     sig = f"({', '.join(parts)})"
     if func.returns is not None:
         sig += f" -> {ast.unparse(func.returns)}"
@@ -177,15 +251,10 @@ def format_signature(func: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
 
 
 def has_dataclass_decorator(node: ast.ClassDef) -> bool:
-    for dec in node.decorator_list:
-        text = ast.unparse(dec)
-        if "dataclass" in text:
-            return True
-    return False
+    return any("dataclass" in ast.unparse(dec) for dec in node.decorator_list)
 
 
 def extract_dataclass_fields(node: ast.ClassDef) -> list[str]:
-    """Retorna los nombres de campo (con tipo) de una @dataclass."""
     fields: list[str] = []
     for item in node.body:
         if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
@@ -202,7 +271,7 @@ def summarize_module(path: Path) -> ModuleSummary:
     try:
         source = path.read_text(encoding="utf-8")
         tree = ast.parse(source, filename=str(path))
-    except (OSError, SyntaxError) as exc:
+    except (OSError, SyntaxError, UnicodeDecodeError) as exc:
         return ModuleSummary(path, None, [], [], error=str(exc))
 
     classes: list[ClassSummary] = []
@@ -254,7 +323,7 @@ def summarize_module(path: Path) -> ModuleSummary:
 
 
 # ---------------------------------------------------------------------
-# SQL parsing
+# SQL parsing (sin cambios respecto del script original)
 # ---------------------------------------------------------------------
 
 
@@ -282,10 +351,6 @@ ALTER_ADD_COLUMN_RE = re.compile(
 
 
 def split_top_level_commas(body: str) -> list[str]:
-    """Divide `col1, col2, FOREIGN KEY (a) REFERENCES x(b), …` por comas top-level.
-
-    Ignora las comas que están adentro de paréntesis (FOREIGN KEY tiene paréntesis).
-    """
     parts: list[str] = []
     depth = 0
     current: list[str] = []
@@ -305,21 +370,16 @@ def split_top_level_commas(body: str) -> list[str]:
 
 
 def parse_sql_schema(sql_files: list[Path]) -> dict[str, TableSchema]:
-    """Combina múltiples migraciones y retorna `{tabla: TableSchema}`."""
     tables: dict[str, TableSchema] = {}
     indexes_by_table: dict[str, list[str]] = {}
-
     for path in sql_files:
         sql = path.read_text(encoding="utf-8")
-        # Quitar comentarios `-- …` para no confundir el regex.
         sql_no_comments = re.sub(r"--[^\n]*", "", sql)
-
-        # Tablas
         for match in CREATE_TABLE_RE.finditer(sql_no_comments):
             name = match.group(1)
             body = match.group(2)
             if name in tables:
-                continue  # primera definición gana; las migraciones futuras alteran columnas
+                continue
             cols: list[str] = []
             fks: list[str] = []
             pk: str | None = None
@@ -329,32 +389,23 @@ def parse_sql_schema(sql_files: list[Path]) -> dict[str, TableSchema]:
                     pk = piece
                 elif upper.startswith("FOREIGN KEY"):
                     fks.append(piece)
-                elif upper.startswith("CHECK") or upper.startswith("UNIQUE"):
-                    # restricciones extra: las pegamos como nota de columna virtual
-                    cols.append(piece)
                 else:
                     cols.append(piece)
             tables[name] = TableSchema(
                 name=name, columns=cols, primary_key=pk, foreign_keys=fks, indexes=[]
             )
-
-        # ALTER TABLE … ADD COLUMN
         for match in ALTER_ADD_COLUMN_RE.finditer(sql_no_comments):
             tbl_name = match.group(1)
-            col_def = " ".join(match.group(2).split())  # normalizar whitespace
+            col_def = " ".join(match.group(2).split())
             if tbl_name in tables and col_def not in tables[tbl_name].columns:
                 tables[tbl_name].columns.append(col_def)
-
-        # Índices
         for match in CREATE_INDEX_RE.finditer(sql_no_comments):
             idx_name = match.group(1)
             tbl_name = match.group(2)
             indexes_by_table.setdefault(tbl_name, []).append(idx_name)
-
     for tbl_name, idx_list in indexes_by_table.items():
         if tbl_name in tables:
             tables[tbl_name].indexes = idx_list
-
     return tables
 
 
@@ -363,120 +414,143 @@ def parse_sql_schema(sql_files: list[Path]) -> dict[str, TableSchema]:
 # ---------------------------------------------------------------------
 
 
-def build_tree_lines(roots: list[Path]) -> list[str]:
-    """Genera el árbol como lista de líneas Markdown.
+def build_tree_from_files(files: list[Path]) -> list[str]:
+    """Construye el árbol de directorios a partir de la lista de archivos."""
+    # Agrupar por carpeta padre (relativa al ROOT).
+    tree: dict[str, list[Path]] = {}
+    for f in files:
+        rel = relative(f)
+        parts = rel.split("/")
+        # Indexar bajo cada prefijo de directorio.
+        for i in range(len(parts)):
+            parent = "/".join(parts[:i]) if i > 0 else ""
+            tree.setdefault(parent, [])
+        # Asignar el archivo a su carpeta inmediata.
+        parent = "/".join(parts[:-1]) if len(parts) > 1 else ""
+        tree.setdefault(parent, []).append(f)
 
-    Cada archivo `.py` es un link relativo a su path. Los directorios
-    se muestran como bullets sin link.
-    """
     lines: list[str] = []
+    seen_dirs: set[str] = set()
 
-    def walk(node: Path, depth: int) -> None:
-        rel = relative(node)
-        indent = "  " * depth
-        if node.is_dir():
-            lines.append(f"{indent}- **{node.name}/**")
-            children = sorted(
-                [p for p in node.iterdir() if not is_ignored(p)],
-                key=lambda p: (not p.is_dir(), p.name.lower()),
-            )
-            for child in children:
-                walk(child, depth + 1)
-        else:
-            lines.append(f"{indent}- [{node.name}]({rel})")
+    def emit(parent: str, depth: int) -> None:
+        # Carpetas hijas inmediatas + archivos hijos inmediatos en la misma vista.
+        children_dirs: set[str] = set()
+        children_files: list[Path] = []
+        for f in files:
+            rel = relative(f)
+            parts = rel.split("/")
+            file_parent = "/".join(parts[:-1]) if len(parts) > 1 else ""
+            if file_parent == parent:
+                children_files.append(f)
+            elif file_parent.startswith(parent + "/" if parent else ""):
+                # Inmediato: la siguiente componente.
+                tail = file_parent[len(parent) + 1 :] if parent else file_parent
+                next_dir = tail.split("/")[0]
+                if next_dir:
+                    children_dirs.add(next_dir)
+        for d in sorted(children_dirs):
+            full = f"{parent}/{d}" if parent else d
+            if full in seen_dirs:
+                continue
+            seen_dirs.add(full)
+            indent = "  " * depth
+            lines.append(f"{indent}- **{d}/**")
+            emit(full, depth + 1)
+        for f in sorted(children_files, key=lambda p: p.name.lower()):
+            indent = "  " * depth
+            lines.append(f"{indent}- [{f.name}]({relative(f)})")
 
-    for root in roots:
-        if root.exists():
-            walk(root, 0)
-
-    # Archivos sueltos en la raíz (pyproject.toml, .gitignore, README, etc.)
-    root_files = sorted(
-        [
-            p
-            for p in ROOT.iterdir()
-            if p.is_file() and not is_ignored(p) and p.suffix not in {".py", ".md"}
-        ],
-        key=lambda p: p.name.lower(),
-    )
-    if root_files:
-        lines.append("")
-        lines.append("**Archivos sueltos en raíz:**")
-        for p in root_files:
-            lines.append(f"- [{p.name}]({relative(p)})")
-
+    emit("", 0)
     return lines
 
 
 # ---------------------------------------------------------------------
-# Renderers
+# Per-file rendering
 # ---------------------------------------------------------------------
 
 
-def render_function(fn: FunctionSummary, indent: str = "  ") -> str:
+def render_python_outline(summary: ModuleSummary) -> list[str]:
+    """Outline de un .py: docstring + clases con sus métodos públicos + funciones top-level."""
+    out: list[str] = []
+    if summary.error:
+        out.append(f"> _Error parseando AST_: `{summary.error}`")
+        out.append("")
+        return out
+    if summary.docstring_first_line:
+        out.append(f"> {summary.docstring_first_line}")
+        out.append("")
+    if summary.classes or summary.functions:
+        out.append("**Estructura:**")
+        out.append("")
+        for cls in summary.classes:
+            bases = f"({', '.join(cls.bases)})" if cls.bases else ""
+            tag = " [@dataclass]" if cls.is_dataclass else ""
+            line = f"- `class {cls.name}{bases}`{tag}"
+            if cls.docstring_first_line:
+                line += f" — {cls.docstring_first_line}"
+            out.append(line)
+            if cls.is_dataclass and cls.fields:
+                for f in cls.fields:
+                    out.append(f"    - `{f}`")
+            for m in cls.methods:
+                method_line = f"    - `{m.name}{m.signature}`"
+                if m.docstring_first_line:
+                    method_line += f" — {m.docstring_first_line}"
+                out.append(method_line)
+        for fn in summary.functions:
+            line = f"- `def {fn.name}{fn.signature}`"
+            if fn.docstring_first_line:
+                line += f" — {fn.docstring_first_line}"
+            out.append(line)
+        out.append("")
+    return out
+
+
+def render_file_section(path: Path) -> list[str]:
+    rel = relative(path)
+    out: list[str] = [f"### [{rel}]({rel})", ""]
+
+    if not is_text_file(path):
+        out.append(f"_(binario: {path.suffix or '<sin extensión>'} — contenido omitido)_")
+        out.append("")
+        return out
+
+    # Outline solo para .py
+    if path.suffix == ".py":
+        summary = summarize_module(path)
+        out.extend(render_python_outline(summary))
+
+    # Contenido completo
+    try:
+        source = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        out.append(f"> **Error leyendo archivo**: {exc}")
+        out.append("")
+        return out
+    if not source.strip():
+        out.append("_(archivo vacío)_")
+        out.append("")
+        return out
+    lang = language_for(path)
+    fence_open = f"```{lang}" if lang else "```"
+    safe_source = source.replace("```", "ʼʼʼ")
+    out.append(fence_open)
+    out.append(safe_source.rstrip())
+    out.append("```")
+    out.append("")
+    return out
+
+
+# ---------------------------------------------------------------------
+# Section renderers (same spirit as before)
+# ---------------------------------------------------------------------
+
+
+def render_function(fn: FunctionSummary, indent: str = "") -> str:
     line = f"{indent}- `{fn.name}{fn.signature}`"
     if fn.docstring_first_line:
         line += f" — {fn.docstring_first_line}"
     return line
-
-
-def render_class(cls: ClassSummary) -> list[str]:
-    out: list[str] = []
-    bases = f"({', '.join(cls.bases)})" if cls.bases else ""
-    tag = " [@dataclass]" if cls.is_dataclass else ""
-    line = f"- **`class {cls.name}{bases}`**{tag}"
-    if cls.docstring_first_line:
-        line += f" — {cls.docstring_first_line}"
-    out.append(line)
-    if cls.is_dataclass and cls.fields:
-        out.append("  - Campos:")
-        for f in cls.fields:
-            out.append(f"    - `{f}`")
-    if cls.methods:
-        out.append("  - Métodos:")
-        for m in cls.methods:
-            out.append(render_function(m, indent="    "))
-    return out
-
-
-def render_module_full_source(path: Path) -> list[str]:
-    """Devuelve el path como header + el contenido completo del archivo en un code block."""
-    rel = relative(path)
-    out: list[str] = [f"### [{rel}]({rel})", ""]
-    try:
-        source = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        out.append(f"> **Error leyendo archivo**: {exc}")
-        return out
-    if not source.strip():
-        out.append("_(archivo vacío)_")
-        return out
-    out.append("```python")
-    # Reemplazar fences ``` que pudieran estar dentro del código (raro pero posible)
-    # para no romper el bloque markdown.
-    safe_source = source.replace("```", "ʼʼʼ")
-    out.append(safe_source.rstrip())
-    out.append("```")
-    return out
-
-
-def render_tree_section() -> list[str]:
-    out: list[str] = ["# 1. Estructura del proyecto", ""]
-    out.extend(build_tree_lines(list(INCLUDE_ROOTS)))
-    out.append("")
-    return out
-
-
-def render_source_section(py_files: list[Path]) -> list[str]:
-    out: list[str] = ["# 2. Código fuente por archivo `.py`", ""]
-    out.append(
-        "El path de cada sección es un link al archivo real. El bloque de "
-        "código contiene el contenido completo del módulo."
-    )
-    out.append("")
-    for path in py_files:
-        out.extend(render_module_full_source(path))
-        out.append("")
-    return out
 
 
 def render_context_section(
@@ -492,7 +566,6 @@ def render_context_section(
     )
     out.append("")
 
-    # Schema SQL
     out.append("## Schema SQL")
     out.append("")
     if not tables:
@@ -517,7 +590,6 @@ def render_context_section(
                 out.append("**Índices:** " + ", ".join(f"`{i}`" for i in tbl.indexes))
             out.append("")
 
-    # Modelos
     out.append("## Modelos (dataclasses en `core/models/`)")
     out.append("")
     found_dataclasses = False
@@ -538,13 +610,12 @@ def render_context_section(
                 out.append("")
                 out.append("**Métodos:**")
                 for m in cls.methods:
-                    out.append(render_function(m, indent=""))
+                    out.append(render_function(m))
             out.append("")
     if not found_dataclasses:
         out.append("_(sin dataclasses encontrados.)_")
         out.append("")
 
-    # Repositorios
     out.append("## Repositorios (`core/repositories/`)")
     out.append("")
     out.append(
@@ -564,22 +635,35 @@ def render_context_section(
                 out.append("")
             out.append("**API pública:**")
             for m in cls.methods:
-                out.append(render_function(m, indent=""))
+                out.append(render_function(m))
             out.append("")
 
     return out
 
 
-def write_project_context(
-    py_files: list[Path],
-    tables: dict[str, TableSchema],
-    model_modules: list[ModuleSummary],
-    repo_modules: list[ModuleSummary],
-) -> Path:
-    """Escribe `docs/project_structure.md` con estructura + código + contexto."""
-    DOCS_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = DOCS_DIR / "project_structure.md"
+# ---------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------
 
+
+def main() -> int:
+    print(f"ROOT: {ROOT}")
+
+    files = list_repo_files()
+    print(f"Archivos detectados (gitignore-aware): {len(files)}")
+
+    # Partición por categoría para la sección 3 (contexto).
+    py_files = [p for p in files if p.suffix == ".py"]
+    model_files = [p for p in py_files if MODELS_DIR in p.parents]
+    repo_files = [p for p in py_files if REPOS_DIR in p.parents]
+    sql_files = sorted(p for p in files if p.suffix == ".sql" and SCHEMA_DIR in p.parents)
+
+    model_modules = [summarize_module(p) for p in model_files]
+    repo_modules = [summarize_module(p) for p in repo_files]
+    tables = parse_sql_schema(sql_files)
+    print(f"Tablas detectadas: {sorted(tables)}")
+
+    # Build sections.
     sections: list[str] = []
     sections.append("# Contexto del Proyecto Collections")
     sections.append("")
@@ -590,47 +674,32 @@ def write_project_context(
     )
     sections.append("")
     sections.append(
-        "Contenido en orden: **(1)** árbol del proyecto, **(2)** código "
-        "completo de cada `.py`, **(3)** contexto (schema SQL, modelos, "
-        "repositorios)."
+        "Contenido en orden: **(1)** árbol del proyecto, **(2)** estructura + "
+        "contenido de cada archivo (filtrado vía `.gitignore`), **(3)** contexto "
+        "(schema SQL, modelos, repositorios)."
     )
     sections.append("")
 
-    sections.extend(render_tree_section())
-    sections.extend(render_source_section(py_files))
+    sections.append("# 1. Estructura del proyecto")
+    sections.append("")
+    sections.extend(build_tree_from_files(files))
+    sections.append("")
+
+    sections.append("# 2. Archivos del proyecto")
+    sections.append("")
+    sections.append(
+        "Por cada archivo: estructura (clases/funciones públicas en `.py`) + "
+        "contenido completo. Binarios se listan con nota."
+    )
+    sections.append("")
+    for path in files:
+        sections.extend(render_file_section(path))
+
     sections.extend(render_context_section(tables, model_modules, repo_modules))
 
-    out_path.write_text("\n".join(sections), encoding="utf-8")
-    return out_path
-
-
-# ---------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------
-
-
-def main() -> int:
-    print(f"ROOT: {ROOT}")
-    py_files: list[Path] = []
-    for root in INCLUDE_ROOTS:
-        for path in walk_relevant_files(root):
-            if path.suffix == ".py":
-                py_files.append(path)
-    print(f"Encontrados {len(py_files)} archivos .py")
-
-    # Para el data_dictionary necesitamos parsear los .py de models/repos.
-    model_files = [p for p in py_files if MODELS_DIR in p.parents]
-    repo_files = [p for p in py_files if REPOS_DIR in p.parents]
-    model_modules = [summarize_module(p) for p in model_files]
-    repo_modules = [summarize_module(p) for p in repo_files]
-
-    sql_files = sorted(SCHEMA_DIR.glob("*.sql"))
-    print(f"Migraciones SQL: {[p.name for p in sql_files]}")
-    tables = parse_sql_schema(sql_files)
-    print(f"Tablas detectadas: {sorted(tables)}")
-
-    out_path = write_project_context(py_files, tables, model_modules, repo_modules)
-    print(f"OK: {out_path}")
+    DOCS_DIR.mkdir(parents=True, exist_ok=True)
+    OUTPUT_PATH.write_text("\n".join(sections), encoding="utf-8")
+    print(f"OK: {OUTPUT_PATH}")
     return 0
 
 
