@@ -46,12 +46,25 @@ class CardsRepository(BaseRepository):
         return _row_to_card(row) if row else None
 
     def list_by_collection(self: CardsRepository, collection_id: int) -> list[Card]:
-        """Cards de la colección ordenadas por (code_id, card_number)."""
+        """Cards de la colección ordenadas por code_order del header.
+
+        Usa LEFT JOIN con `codes_lines` filtrado por el header de la
+        colección. Para colecciones con `requires_code=False` (sin
+        entradas en `codes_lines`) el JOIN devuelve `code_order=NULL`
+        y `COALESCE(...,0)` colapsa todo al mismo bucket → ordena por
+        `card_number` solamente.
+        """
         rows = self.conn.execute(
-            "SELECT card_id, collection_id, code_id, card_number, card_name "
-            "FROM cards WHERE collection_id = ? "
-            "ORDER BY code_id, card_number",
-            (collection_id,),
+            "SELECT c.card_id, c.collection_id, c.code_id, c.card_number, c.card_name "
+            "FROM cards c "
+            "LEFT JOIN codes_lines cl "
+            "  ON cl.code_id = c.code_id "
+            " AND cl.code_header_id = ("
+            "       SELECT code_header_id FROM collections WHERE collection_id = ?"
+            "    ) "
+            "WHERE c.collection_id = ? "
+            "ORDER BY COALESCE(cl.code_order, 0), c.code_id, c.card_number",
+            (collection_id, collection_id),
         ).fetchall()
         return [_row_to_card(r) for r in rows]
 

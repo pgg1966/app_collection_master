@@ -43,65 +43,108 @@ class InventoryRepository(BaseRepository):
         return _row_to_item(row) if row else None
 
     def list_by_collection(self: InventoryRepository, collection_id: int) -> list[InventoryItem]:
-        """Inventory de todas las cards de la colección (incluye qty=0)."""
+        """Inventory de todas las cards de la colección (incluye qty=0).
+
+        Ordena por `codes_lines.code_order` (LEFT JOIN, COALESCE para
+        colecciones sin código). Sesión 5.5 / D1.
+        """
         rows = self.conn.execute(
             "SELECT i.inventory_id, i.card_id, i.quantity "
             "FROM inventory i "
             "INNER JOIN cards c ON c.card_id = i.card_id "
+            "LEFT JOIN codes_lines cl "
+            "  ON cl.code_id = c.code_id "
+            " AND cl.code_header_id = ("
+            "       SELECT code_header_id FROM collections WHERE collection_id = ?"
+            "    ) "
             "WHERE c.collection_id = ? "
-            "ORDER BY c.code_id, c.card_number",
-            (collection_id,),
+            "ORDER BY COALESCE(cl.code_order, 0), c.code_id, c.card_number",
+            (collection_id, collection_id),
         ).fetchall()
         return [_row_to_item(r) for r in rows]
 
     def list_owned(self: InventoryRepository, collection_id: int) -> list[InventoryItem]:
-        """Inventory items con quantity > 0 de la colección."""
+        """Inventory items con quantity > 0 de la colección.
+
+        Ordena por `codes_lines.code_order` (Sesión 5.5 / D1).
+        """
         rows = self.conn.execute(
             "SELECT i.inventory_id, i.card_id, i.quantity "
             "FROM inventory i "
             "INNER JOIN cards c ON c.card_id = i.card_id "
+            "LEFT JOIN codes_lines cl "
+            "  ON cl.code_id = c.code_id "
+            " AND cl.code_header_id = ("
+            "       SELECT code_header_id FROM collections WHERE collection_id = ?"
+            "    ) "
             "WHERE c.collection_id = ? AND i.quantity > 0 "
-            "ORDER BY c.code_id, c.card_number",
-            (collection_id,),
+            "ORDER BY COALESCE(cl.code_order, 0), c.code_id, c.card_number",
+            (collection_id, collection_id),
         ).fetchall()
         return [_row_to_item(r) for r in rows]
 
     def list_duplicates(self: InventoryRepository, collection_id: int) -> list[InventoryItem]:
-        """Inventory items con quantity > 1 de la colección."""
+        """Inventory items con quantity > 1 de la colección.
+
+        Ordena por `codes_lines.code_order` (Sesión 5.5 / D1).
+        """
         rows = self.conn.execute(
             "SELECT i.inventory_id, i.card_id, i.quantity "
             "FROM inventory i "
             "INNER JOIN cards c ON c.card_id = i.card_id "
+            "LEFT JOIN codes_lines cl "
+            "  ON cl.code_id = c.code_id "
+            " AND cl.code_header_id = ("
+            "       SELECT code_header_id FROM collections WHERE collection_id = ?"
+            "    ) "
             "WHERE c.collection_id = ? AND i.quantity > 1 "
-            "ORDER BY c.code_id, c.card_number",
-            (collection_id,),
+            "ORDER BY COALESCE(cl.code_order, 0), c.code_id, c.card_number",
+            (collection_id, collection_id),
         ).fetchall()
         return [_row_to_item(r) for r in rows]
 
     def get_top_duplicates(
         self: InventoryRepository, collection_id: int, limit: int = 10
     ) -> list[InventoryItem]:
-        """Las cards con mayor cantidad (quantity > 1), descendente."""
+        """Las cards con mayor cantidad (quantity > 1), descendente.
+
+        Sesión 5.5 / D1: dejamos `quantity DESC` como criterio principal
+        (es el sentido de "top"); como tiebreak agregamos `code_order`
+        en lugar del alfabético.
+        """
         rows = self.conn.execute(
             "SELECT i.inventory_id, i.card_id, i.quantity "
             "FROM inventory i "
             "INNER JOIN cards c ON c.card_id = i.card_id "
+            "LEFT JOIN codes_lines cl "
+            "  ON cl.code_id = c.code_id "
+            " AND cl.code_header_id = ("
+            "       SELECT code_header_id FROM collections WHERE collection_id = ?"
+            "    ) "
             "WHERE c.collection_id = ? AND i.quantity > 1 "
-            "ORDER BY i.quantity DESC, c.code_id, c.card_number "
+            "ORDER BY i.quantity DESC, COALESCE(cl.code_order, 0), c.code_id, c.card_number "
             "LIMIT ?",
-            (collection_id, limit),
+            (collection_id, collection_id, limit),
         ).fetchall()
         return [_row_to_item(r) for r in rows]
 
     def list_missing(self: InventoryRepository, collection_id: int) -> list[Card]:
-        """Cards que el usuario aún no tiene (sin inventory o quantity=0)."""
+        """Cards que el usuario aún no tiene (sin inventory o quantity=0).
+
+        Ordena por `codes_lines.code_order` (Sesión 5.5 / D1).
+        """
         rows = self.conn.execute(
             "SELECT c.card_id, c.collection_id, c.code_id, c.card_number, c.card_name "
             "FROM cards c "
             "LEFT JOIN inventory i ON i.card_id = c.card_id "
+            "LEFT JOIN codes_lines cl "
+            "  ON cl.code_id = c.code_id "
+            " AND cl.code_header_id = ("
+            "       SELECT code_header_id FROM collections WHERE collection_id = ?"
+            "    ) "
             "WHERE c.collection_id = ? AND COALESCE(i.quantity, 0) = 0 "
-            "ORDER BY c.code_id, c.card_number",
-            (collection_id,),
+            "ORDER BY COALESCE(cl.code_order, 0), c.code_id, c.card_number",
+            (collection_id, collection_id),
         ).fetchall()
         return [_row_to_card(r) for r in rows]
 
