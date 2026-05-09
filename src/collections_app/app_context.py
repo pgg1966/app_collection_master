@@ -21,6 +21,7 @@ import contextlib
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from collections_app.core.db.connection import create_connection
 from collections_app.core.db.migrator import run_migrations
@@ -29,14 +30,20 @@ from collections_app.services.code_headers_service import CodeHeadersService
 from collections_app.services.code_lines_service import CodeLinesService
 from collections_app.services.collections_service import CollectionsService
 from collections_app.services.csv_import_service import CsvImportService
+from collections_app.services.exceptions import OcrError
 from collections_app.services.exchange_apply_service import ExchangeApplyService
 from collections_app.services.exchange_export_service import ExchangeExportService
 from collections_app.services.exchange_import_service import ExchangeImportService
 from collections_app.services.inventory_import_service import InventoryImportService
 from collections_app.services.inventory_service import InventoryService
 from collections_app.services.inventory_snapshot_service import InventorySnapshotService
+from collections_app.services.ocr_install_service import OcrInstallService
 from collections_app.services.settings_service import SettingsService
 from collections_app.services.transactions_service import TransactionsService
+
+if TYPE_CHECKING:
+    from collections_app.core.models.collection import Collection
+    from collections_app.services.ocr_service import OcrService
 
 
 @dataclass(slots=True)
@@ -57,12 +64,45 @@ class AppContext:
     exchange_export: ExchangeExportService
     exchange_import: ExchangeImportService
     exchange_apply: ExchangeApplyService
+    ocr_install: OcrInstallService
 
     def close(self: AppContext) -> None:
         """Cierra la conexión SQLite. Idempotente."""
         # Conexión ya cerrada o inválida → nada que hacer.
         with contextlib.suppress(sqlite3.Error):
             self.conn.close()
+
+    def get_ocr_service(self: AppContext, collection: Collection) -> OcrService | None:
+        """Factory de `OcrService` para una colección específica.
+
+        Devuelve `None` si:
+        - Las dependencias (torch / ultralytics) no están instaladas.
+        - La colección no tiene modelo configurado.
+        - El archivo del modelo no existe en `get_models_dir()`.
+        - El modelo existe pero no se pudo cargar (versión incompatible,
+          archivo corrupto, etc.) → captura `OcrError` y devuelve None
+          para que la UI caiga al Estado 2 sin crashear.
+
+        El `OcrService` no se cachea: cada llamada re-evalúa el estado y
+        re-intenta cargar. La construcción es barata cuando todo está OK
+        (importa YOLO + carga el modelo) y la UI llama esto una vez por
+        colección al cambiar de tab.
+        """
+        if not OcrInstallService.is_installed():
+            return None
+        if not collection.ocr_model_filename:
+            return None
+        # Import lazy: solo si llegamos hasta acá.
+        from collections_app.core.utils.paths import get_models_dir  # noqa: PLC0415
+        from collections_app.services.ocr_service import OcrService  # noqa: PLC0415
+
+        path = get_models_dir() / collection.ocr_model_filename
+        if not path.is_file():
+            return None
+        try:
+            return OcrService(path)
+        except OcrError:
+            return None
 
 
 def create_app_context(db_path: Path | str) -> AppContext:
@@ -88,4 +128,5 @@ def create_app_context(db_path: Path | str) -> AppContext:
         exchange_export=ExchangeExportService(conn),
         exchange_import=ExchangeImportService(conn),
         exchange_apply=ExchangeApplyService(conn),
+        ocr_install=OcrInstallService(),
     )

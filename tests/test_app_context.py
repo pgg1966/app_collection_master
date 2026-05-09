@@ -6,6 +6,8 @@ import contextlib
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from collections_app.app_context import AppContext, create_app_context
 from collections_app.services.cards_service import CardsService
 from collections_app.services.code_headers_service import CodeHeadersService
@@ -19,6 +21,7 @@ from collections_app.services.inventory_service import InventoryService
 from collections_app.services.inventory_snapshot_service import (
     InventorySnapshotService,
 )
+from collections_app.services.ocr_install_service import OcrInstallService
 from collections_app.services.settings_service import SettingsService
 from collections_app.services.transactions_service import TransactionsService
 
@@ -48,6 +51,7 @@ def test_app_context_exposes_all_services() -> None:
         assert isinstance(ctx.exchange_export, ExchangeExportService)
         assert isinstance(ctx.exchange_import, ExchangeImportService)
         assert isinstance(ctx.exchange_apply, ExchangeApplyService)
+        assert isinstance(ctx.ocr_install, OcrInstallService)
     finally:
         ctx.close()
 
@@ -104,3 +108,115 @@ def test_close_after_native_close_does_not_raise() -> None:
         ctx.conn.close()
     # close() debe ser tolerante.
     ctx.close()
+
+
+# ---------------------------------------------------------------------
+# get_ocr_service factory (Sesión 5d)
+# ---------------------------------------------------------------------
+
+
+def test_get_ocr_service_returns_none_when_deps_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sin torch/ultralytics → factory devuelve None sin tocar el modelo."""
+    from collections_app.core.models.code_header import CodeHeader
+    from collections_app.core.models.collection import Collection
+
+    monkeypatch.setattr(
+        "collections_app.app_context.OcrInstallService.is_installed",
+        staticmethod(lambda: False),
+    )
+    ctx = create_app_context(":memory:")
+    try:
+        h = ctx.code_headers.create(
+            CodeHeader(code_header_id=None, code_header_name="WC", code_max_length=3)
+        )
+        assert h.code_header_id is not None
+        coll = ctx.collections.create(
+            Collection(
+                collection_id=None,
+                collection_name="X",
+                card_count=0,
+                requires_code=True,
+                code_field_name="País",
+                code_header_id=h.code_header_id,
+                ocr_model_filename="ocr_99.pt",  # daría igual
+            )
+        )
+        assert ctx.get_ocr_service(coll) is None
+    finally:
+        ctx.close()
+
+
+def test_get_ocr_service_returns_none_when_no_model_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deps OK pero collection.ocr_model_filename = None → None."""
+    from collections_app.core.models.code_header import CodeHeader
+    from collections_app.core.models.collection import Collection
+
+    monkeypatch.setattr(
+        "collections_app.app_context.OcrInstallService.is_installed",
+        staticmethod(lambda: True),
+    )
+    ctx = create_app_context(":memory:")
+    try:
+        h = ctx.code_headers.create(
+            CodeHeader(code_header_id=None, code_header_name="WC", code_max_length=3)
+        )
+        assert h.code_header_id is not None
+        coll = ctx.collections.create(
+            Collection(
+                collection_id=None,
+                collection_name="X",
+                card_count=0,
+                requires_code=True,
+                code_field_name="País",
+                code_header_id=h.code_header_id,
+            )
+        )
+        assert coll.ocr_model_filename is None
+        assert ctx.get_ocr_service(coll) is None
+    finally:
+        ctx.close()
+
+
+def test_get_ocr_service_returns_none_when_model_file_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Filename configurado pero el archivo no existe → None."""
+    import sys
+
+    from collections_app.core.models.code_header import CodeHeader
+    from collections_app.core.models.collection import Collection
+
+    fake_base = tmp_path / "FakeBase"
+    if sys.platform == "win32":
+        monkeypatch.setenv("APPDATA", str(fake_base))
+    else:
+        monkeypatch.setenv("XDG_DATA_HOME", str(fake_base))
+
+    monkeypatch.setattr(
+        "collections_app.app_context.OcrInstallService.is_installed",
+        staticmethod(lambda: True),
+    )
+    ctx = create_app_context(":memory:")
+    try:
+        h = ctx.code_headers.create(
+            CodeHeader(code_header_id=None, code_header_name="WC", code_max_length=3)
+        )
+        assert h.code_header_id is not None
+        coll = ctx.collections.create(
+            Collection(
+                collection_id=None,
+                collection_name="X",
+                card_count=0,
+                requires_code=True,
+                code_field_name="País",
+                code_header_id=h.code_header_id,
+                ocr_model_filename="ocr_inexistente.pt",
+            )
+        )
+        assert ctx.get_ocr_service(coll) is None
+    finally:
+        ctx.close()
