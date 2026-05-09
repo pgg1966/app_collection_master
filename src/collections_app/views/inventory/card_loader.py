@@ -395,8 +395,15 @@ class CardLoaderView(QWidget):
         self._set_completer_items(items)
 
     def _set_completer_items(self, items: list[tuple[str, str]]) -> None:
-        """Setea las opciones del completer + el set de validación."""
+        """Setea las opciones del completer + el set de validación.
+
+        Sesión 5.5 / E1: además del modelo del completer, guardamos la
+        lista original de items en `_all_completer_items` para que la
+        priorización code_id → code_name pueda re-construir el modelo
+        en cada keystroke.
+        """
         self._valid_code_ids = {code_id.upper() for code_id, _ in items}
+        self._all_completer_items: list[tuple[str, str]] = list(items)
         completion_strings = [f"{code_id} - {name}" for code_id, name in items]
         model = QStringListModel(completion_strings, self)
         self._completer.setModel(model)
@@ -404,15 +411,18 @@ class CardLoaderView(QWidget):
         self._code_edit.clear()
         self._code_edit.blockSignals(False)
         self._selected_code_id = None
+        self._previous_code_text = ""
 
     def _clear_completer(self) -> None:
         """Vacía el completer y la selección (al cambiar a requires_code=False)."""
         self._valid_code_ids = set()
+        self._all_completer_items = []
         self._completer.setModel(QStringListModel([], self))
         self._code_edit.blockSignals(True)
         self._code_edit.clear()
         self._code_edit.blockSignals(False)
         self._selected_code_id = None
+        self._previous_code_text = ""
 
     def _set_code_visible(self, visible: bool) -> None:
         self._code_label.setVisible(visible)
@@ -439,17 +449,79 @@ class CardLoaderView(QWidget):
         if self.collection.requires_code or self._has_ambiguity:
             self._validate_card()
 
-    def _on_code_text_edited(self, _text: str) -> None:
-        """Solo input del usuario: invalida `_set_confirmed` y refresca highlight.
+    def _on_code_text_edited(self, text: str) -> None:
+        """Slot del input del usuario: priorización + auto-tab + highlight.
 
         `textEdited` (a diferencia de `textChanged`) NO se dispara con
         `setText()` programático, así que el `selectAll()` de
-        `_after_successful_load` no rompe el flag.
+        `_after_successful_load` no rompe el flag `_set_confirmed`.
+
+        Sesión 5.5 / E1: la búsqueda matchea PRIMERO por `code_id`
+        (starts-with case-insensitive). Si hay matches, el modelo del
+        completer se reduce a SOLO esos. Si no hay, se intenta por
+        `code_name` (contains case-insensitive). Si tampoco, modelo
+        vacío.
+
+        Sesión 5.5 / E2: si el usuario está escribiendo (texto crece)
+        Y queda exactamente 1 match por `code_id`, mover foco al campo
+        número. Solo dispara cuando crece — borrar caracteres no auto-
+        avanza para no romper la corrección de typos.
         """
         self._set_confirmed = False
-        # El completer recién filtra el modelo después de que terminemos
-        # con este slot — el QTimer.singleShot(0) garantiza que el
-        # highlight se aplique sobre la lista ya filtrada.
+
+        upper = text.strip().upper()
+        previous = getattr(self, "_previous_code_text", "")
+        is_growing = len(text) > len(previous)
+        self._previous_code_text = text
+
+        # Filtrado priorizando code_id; nunca mezclar con code_name.
+        if not upper:
+            filtered = list(self._all_completer_items)
+        else:
+            by_code = [
+                (cid, name)
+                for cid, name in self._all_completer_items
+                if cid.upper().startswith(upper)
+            ]
+            if by_code:
+                filtered = by_code
+            else:
+                filtered = [
+                    (cid, name) for cid, name in self._all_completer_items if upper in name.upper()
+                ]
+
+        completion_strings = [f"{cid} - {name}" for cid, name in filtered]
+        new_model = QStringListModel(completion_strings, self)
+        self._completer.setModel(new_model)
+        # Setear el prefijo activo del completer al texto vigente para que
+        # `complete()` (cuando se invoque) muestre el set ya filtrado.
+        self._completer.setCompletionPrefix(text)
+
+        # E2: auto-tab al campo número si el usuario está creciendo el
+        # texto y hay un único match por code_id.
+        if is_growing and upper:
+            by_code_only = [
+                cid for cid, _ in self._all_completer_items if cid.upper().startswith(upper)
+            ]
+            if len(by_code_only) == 1:
+                code = by_code_only[0]
+                self._selected_code_id = code.upper()
+                # Reemplazo del texto por el code_id canónico (uppercase) +
+                # mover foco. Bloqueamos signals para no recursar.
+                self._code_edit.blockSignals(True)
+                self._code_edit.setText(code)
+                self._code_edit.blockSignals(False)
+                self._previous_code_text = code
+                self._number_input.setFocus()
+                self._number_input.selectAll()
+                # Si estamos en modo `requires_code` revalidar la card con
+                # el código resuelto + el número actual (si lo hay).
+                if self.collection.requires_code or self._has_ambiguity:
+                    self._validate_card()
+                return
+
+        # Highlight diferido: el completer aplica el filtro al popup
+        # después de que termine este slot.
         QTimer.singleShot(0, self._highlight_first_completion)
 
     def _highlight_first_completion(self) -> None:
