@@ -659,3 +659,108 @@ def test_import_unsupported_format_raises(
             collection_id=collection_with_codes.collection_id,
             mode="replace",
         )
+
+
+# ---------------------------------------------------------------------
+# Colección sin código (requires_code=False) — bug A1 de Sesión 5.5
+# ---------------------------------------------------------------------
+
+
+def test_import_inventory_collection_without_code(
+    tmp_path: Path,
+    service: InventoryImportService,
+    db_conn: sqlite3.Connection,
+    collection_without_codes: Collection,
+) -> None:
+    """Sin columna `código` en el CSV; el lookup se resuelve por número.
+
+    Las cards de la DB tienen `code_id="-"` (placeholder cualquier-cosa,
+    NO necesariamente vacío). Pre-fix el importer usaba `code_id=""` en
+    el lookup y fallaba con "('', N) no existe".
+    """
+    cards_repo = CardsRepository(db_conn)
+    assert collection_without_codes.collection_id is not None
+    cid = collection_without_codes.collection_id
+    cards: dict[int, int] = {}
+    for num, name in [(1, "Card uno"), (2, "Card dos"), (3, "Card tres")]:
+        card = cards_repo.create(
+            Card(
+                card_id=None,
+                collection_id=cid,
+                code_id="-",  # placeholder, no es ""
+                card_number=num,
+                card_name=name,
+            )
+        )
+        assert card.card_id is not None
+        cards[num] = card.card_id
+    db_conn.commit()
+
+    file_path = tmp_path / "inv.csv"
+    _write_csv(file_path, ["número", "cantidad"], [[1, 5], [2, 3], [3, 1]])
+
+    report = service.import_inventory(
+        file_path=file_path,
+        collection_id=cid,
+        mode="replace",
+    )
+    assert report.rows_total == 3
+    assert report.rows_applied == 3
+    assert report.rows_skipped == 0
+    assert report.errors == []
+    assert _qty_for(db_conn, cards[1]) == 5
+    assert _qty_for(db_conn, cards[2]) == 3
+    assert _qty_for(db_conn, cards[3]) == 1
+
+
+def test_import_inventory_no_code_unknown_number_errors(
+    tmp_path: Path,
+    service: InventoryImportService,
+    db_conn: sqlite3.Connection,
+    collection_without_codes: Collection,
+) -> None:
+    """Número que no existe en el catálogo → error claro, fila ignorada."""
+    cards_repo = CardsRepository(db_conn)
+    assert collection_without_codes.collection_id is not None
+    cid = collection_without_codes.collection_id
+    cards_repo.create(
+        Card(card_id=None, collection_id=cid, code_id="-", card_number=1, card_name="A")
+    )
+    db_conn.commit()
+
+    file_path = tmp_path / "inv.csv"
+    _write_csv(file_path, ["número", "cantidad"], [[99, 1]])
+
+    report = service.import_inventory(file_path=file_path, collection_id=cid, mode="replace")
+    assert report.rows_applied == 0
+    assert len(report.errors) == 1
+    assert "99" in report.errors[0].message
+
+
+def test_import_inventory_no_code_ambiguous_number_errors(
+    tmp_path: Path,
+    service: InventoryImportService,
+    db_conn: sqlite3.Connection,
+    collection_without_codes: Collection,
+) -> None:
+    """Misma colección sin código pero con dos cards de igual número
+    (data inconsistente) → error claro, fila no importada."""
+    cards_repo = CardsRepository(db_conn)
+    assert collection_without_codes.collection_id is not None
+    cid = collection_without_codes.collection_id
+    # Dos cards con el mismo card_number=1 pero distinto code_id.
+    cards_repo.create(
+        Card(card_id=None, collection_id=cid, code_id="A", card_number=1, card_name="dup-A")
+    )
+    cards_repo.create(
+        Card(card_id=None, collection_id=cid, code_id="B", card_number=1, card_name="dup-B")
+    )
+    db_conn.commit()
+
+    file_path = tmp_path / "inv.csv"
+    _write_csv(file_path, ["número", "cantidad"], [[1, 5]])
+
+    report = service.import_inventory(file_path=file_path, collection_id=cid, mode="replace")
+    assert report.rows_applied == 0
+    assert len(report.errors) == 1
+    assert "más de una vez" in report.errors[0].message

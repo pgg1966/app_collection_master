@@ -205,11 +205,19 @@ class InventoryImportService:
                 line.code_id for line in self._code_lines.list_by_header(collection.code_header_id)
             }
 
-        # Mapa (code_id, card_number) -> card_id para lookup eficiente.
+        # Mapa (code_id, card_number) -> card_id para lookup eficiente cuando
+        # `requires_code=True`. Cuando es False usamos `cards_by_number` para
+        # resolver por número solo (las cards no necesariamente tienen
+        # `code_id=""` en la DB; el caller de admin puede haber usado un
+        # placeholder distinto).
         cards = self._cards.list_by_collection(collection_id)
         cards_index: dict[tuple[str, int], int] = {
             (c.code_id, c.card_number): c.card_id for c in cards if c.card_id is not None
         }
+        cards_by_number: dict[int, list[int]] = {}
+        for c in cards:
+            if c.card_id is not None:
+                cards_by_number.setdefault(c.card_number, []).append(c.card_id)
 
         errors: list[InventoryImportError] = []
         warnings_: list[InventoryImportWarning] = []
@@ -223,6 +231,7 @@ class InventoryImportService:
                 requires_code=collection.requires_code,
                 valid_codes=valid_codes,
                 cards_index=cards_index,
+                cards_by_number=cards_by_number,
                 errors=errors,
                 warnings_=warnings_,
                 pending=pending,
@@ -317,6 +326,7 @@ class InventoryImportService:
         requires_code: bool,
         valid_codes: set[str],
         cards_index: dict[tuple[str, int], int],
+        cards_by_number: dict[int, list[int]],
         errors: list[InventoryImportError],
         warnings_: list[InventoryImportWarning],
         pending: list[_PendingChange],
@@ -354,15 +364,43 @@ class InventoryImportService:
             errors.append(InventoryImportError(row_index, f"cantidad {qty} no puede ser negativa"))
             return
 
-        card_id = cards_index.get((code_id, number))
-        if card_id is None:
-            errors.append(
-                InventoryImportError(
-                    row_index,
-                    f"card ({code_id!r}, {number}) no existe en el catálogo",
+        # Resolución de card_id:
+        # - requires_code=True: lookup exacto (code_id, number).
+        # - requires_code=False: lookup solo por número. Si hay >1 match
+        #   (la colección está mal modelada), reportar error claro y
+        #   no importar la fila.
+        if requires_code:
+            card_id = cards_index.get((code_id, number))
+            if card_id is None:
+                errors.append(
+                    InventoryImportError(
+                        row_index,
+                        f"card ({code_id!r}, {number}) no existe en el catálogo",
+                    )
                 )
-            )
-            return
+                return
+        else:
+            matches = cards_by_number.get(number, [])
+            if not matches:
+                errors.append(
+                    InventoryImportError(
+                        row_index,
+                        f"card con número {number} no existe en el catálogo",
+                    )
+                )
+                return
+            if len(matches) > 1:
+                errors.append(
+                    InventoryImportError(
+                        row_index,
+                        (
+                            f"el número {number} existe más de una vez en esta "
+                            f"colección. Revisá los datos."
+                        ),
+                    )
+                )
+                return
+            card_id = matches[0]
 
         if qty == 0:
             warnings_.append(
