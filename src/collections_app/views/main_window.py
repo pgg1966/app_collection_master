@@ -122,13 +122,6 @@ class MainWindow(QMainWindow):
         self.resize(1024, 720)
 
     def _build_menus(self: MainWindow) -> None:
-        archivo = self.menuBar().addMenu(self.tr("&Archivo"))
-        nueva = archivo.addAction(self.tr("&Nueva colección desde CSV..."))
-        nueva.triggered.connect(self._open_csv_import_dialog)
-        archivo.addSeparator()
-        salir = archivo.addAction(self.tr("&Salir"))
-        salir.triggered.connect(self.close)
-
         # Modo admin condicional (ver docs/admin_mode.md). Las ABM
         # administrativas se mantienen deshabilitadas por defecto: la
         # separación admin/usuario es decisión arquitectónica para
@@ -142,6 +135,19 @@ class MainWindow(QMainWindow):
             "Modo admin deshabilitado. Setear COLLECTIONS_ADMIN=1 para "
             "activar. Ver docs/admin_mode.md."
         )
+
+        archivo = self.menuBar().addMenu(self.tr("&Archivo"))
+        # Sesión 5.5 / G1: el item de carga desde CSV es admin-only
+        # (los usuarios finales no crean colecciones). Lo ocultamos
+        # junto con su separador para no dejar un separador huérfano
+        # antes de "Salir".
+        nueva = archivo.addAction(self.tr("&Nueva colección desde CSV..."))
+        nueva.triggered.connect(self._open_csv_import_dialog)
+        nueva.setVisible(admin_enabled)
+        nueva_separator = archivo.addSeparator()
+        nueva_separator.setVisible(admin_enabled)
+        salir = archivo.addAction(self.tr("&Salir"))
+        salir.triggered.connect(self.close)
         admin = self.menuBar().addMenu(self.tr("A&dministración"))
         cards_action = admin.addAction(self.tr("&Cards..."))
         cards_action.triggered.connect(self._open_cards_abm)
