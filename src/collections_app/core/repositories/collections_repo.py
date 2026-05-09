@@ -13,7 +13,7 @@ from collections_app.core.repositories.base import BaseRepository
 _SELECT_COLUMNS = (
     "collection_id, collection_name, card_count, requires_code, "
     "code_field_name, code_header_id, is_premium, license_key_required, "
-    "album_columns, album_rows, album_orientation"
+    "album_columns, album_rows, album_orientation, ocr_model_filename"
 )
 
 
@@ -30,6 +30,7 @@ def _row_to_collection(row: sqlite3.Row) -> Collection:
         album_columns=row["album_columns"],
         album_rows=row["album_rows"],
         album_orientation=row["album_orientation"],
+        ocr_model_filename=row["ocr_model_filename"],
     )
 
 
@@ -65,8 +66,8 @@ class CollectionsRepository(BaseRepository):
             "INSERT INTO collections "
             "(collection_name, card_count, requires_code, code_field_name, "
             "code_header_id, is_premium, license_key_required, "
-            "album_columns, album_rows, album_orientation) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "album_columns, album_rows, album_orientation, ocr_model_filename) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 collection.collection_name,
                 collection.card_count,
@@ -78,6 +79,7 @@ class CollectionsRepository(BaseRepository):
                 collection.album_columns,
                 collection.album_rows,
                 collection.album_orientation,
+                collection.ocr_model_filename,
             ),
         )
         return Collection(
@@ -92,6 +94,7 @@ class CollectionsRepository(BaseRepository):
             album_columns=collection.album_columns,
             album_rows=collection.album_rows,
             album_orientation=collection.album_orientation,
+            ocr_model_filename=collection.ocr_model_filename,
         )
 
     def update(self: CollectionsRepository, collection: Collection) -> Collection:
@@ -103,7 +106,7 @@ class CollectionsRepository(BaseRepository):
             "collection_name = ?, card_count = ?, requires_code = ?, "
             "code_field_name = ?, code_header_id = ?, is_premium = ?, "
             "license_key_required = ?, album_columns = ?, album_rows = ?, "
-            "album_orientation = ? "
+            "album_orientation = ?, ocr_model_filename = ? "
             "WHERE collection_id = ?",
             (
                 collection.collection_name,
@@ -116,6 +119,7 @@ class CollectionsRepository(BaseRepository):
                 collection.album_columns,
                 collection.album_rows,
                 collection.album_orientation,
+                collection.ocr_model_filename,
                 collection.collection_id,
             ),
         )

@@ -24,6 +24,10 @@ class Collection:
         album_rows: filas por página en el PDF álbum (default 4).
         album_orientation: 'portrait' o 'landscape' — algunas colecciones
             tienen cards horizontales y necesitan landscape.
+        ocr_model_filename: nombre del archivo del modelo YOLO entrenado
+            para detectar las cards de esta colección (Sesión 5d). None
+            si no hay modelo configurado. El path completo se reconstruye
+            con `get_models_dir() / ocr_model_filename`.
     """
 
     collection_id: int | None
@@ -37,3 +41,4 @@ class Collection:
     album_columns: int = 3
     album_rows: int = 4
     album_orientation: str = "portrait"
+    ocr_model_filename: str | None = None
