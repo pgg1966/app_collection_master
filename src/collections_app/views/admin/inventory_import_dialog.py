@@ -44,7 +44,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from collections_app.core.utils.paths import get_downloads_dir
 from collections_app.services.exceptions import ServiceError
+from collections_app.views.reports._success_dialog import ReportSavedDialog
 
 if TYPE_CHECKING:
     from collections_app.app_context import AppContext
@@ -172,7 +174,7 @@ class InventoryImportPanel(QWidget):
             path, _ = QFileDialog.getOpenFileName(
                 self,
                 self.tr("Seleccionar archivo de inventario"),
-                "",
+                str(get_downloads_dir()),
                 self.tr("Excel/CSV (*.xlsx *.csv)"),
             )
             if path:
@@ -225,15 +227,23 @@ class InventoryImportPanel(QWidget):
         return f"inventario_{slug}_{date}.xlsx"
 
     def _on_download_template(self: InventoryImportPanel) -> None:
-        path_str, _ = QFileDialog.getSaveFileName(
-            self,
-            self.tr("Guardar modelo"),
-            self._default_template_filename(),
-            self.tr("Excel (*.xlsx)"),
-        )
-        if not path_str:
+        """Genera el modelo Excel directamente en Descargas.
+
+        Antes pedía destino con `QFileDialog.getSaveFileName`. Ahora
+        guarda automáticamente en `get_downloads_dir()` con el nombre
+        canónico — mismo patrón que los reportes (B1).
+        """
+        dest_dir = get_downloads_dir()
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            QMessageBox.critical(
+                self,
+                self.tr("Error al guardar"),
+                self.tr("No se pudo crear la carpeta de destino: {msg}").format(msg=exc),
+            )
             return
-        path = Path(path_str)
+        path = dest_dir / self._default_template_filename()
         try:
             assert self._collection.collection_id is not None
             self._ctx.inventory_import.generate_template(
@@ -249,11 +259,7 @@ class InventoryImportPanel(QWidget):
                 self.tr("No se pudo escribir el archivo: {msg}").format(msg=exc),
             )
             return
-        QMessageBox.information(
-            self,
-            self.tr("Modelo descargado"),
-            self.tr("Modelo guardado en:\n{path}").format(path=path),
-        )
+        ReportSavedDialog(path=path, parent=self).exec()
 
     def _on_import(self: InventoryImportPanel) -> None:
         file_path = Path(self._file_edit.text().strip())

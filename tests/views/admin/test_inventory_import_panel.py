@@ -99,29 +99,33 @@ def test_import_button_disabled_without_file(
     assert panel._import_btn.isEnabled() is True
 
 
-def test_download_template_invokes_service(
+def test_download_template_writes_to_downloads(
     qtbot,  # type: ignore[no-untyped-def]
     tmp_path: Path,
     ctx_with_collection: tuple[AppContext, Collection],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Botón Descargar modelo abre file dialog y crea el archivo."""
+    """Sin diálogo de "dónde guardar": el modelo va auto a Descargas."""
     ctx, coll = ctx_with_collection
     panel = InventoryImportPanel(ctx=ctx, collection=coll)
     qtbot.addWidget(panel)
 
-    dest = tmp_path / "modelo.xlsx"
+    fake_downloads = tmp_path / "Downloads"
+    fake_downloads.mkdir()
     monkeypatch.setattr(
-        "collections_app.views.admin.inventory_import_dialog.QFileDialog.getSaveFileName",
-        lambda *_a, **_k: (str(dest), "Excel (*.xlsx)"),
+        "collections_app.views.admin.inventory_import_dialog.get_downloads_dir",
+        lambda: fake_downloads,
     )
+    # Evitar que el success dialog bloquee.
     monkeypatch.setattr(
-        "collections_app.views.admin.inventory_import_dialog.QMessageBox.information",
-        lambda *_a, **_k: None,
+        "collections_app.views.admin.inventory_import_dialog.ReportSavedDialog.exec",
+        lambda self: 0,
     )
 
     panel._on_download_template()
-    assert dest.exists()
+    files = list(fake_downloads.glob("*.xlsx"))
+    assert len(files) == 1
+    assert files[0].name.startswith("inventario_")
 
 
 def test_import_invokes_service_and_emits_signal(

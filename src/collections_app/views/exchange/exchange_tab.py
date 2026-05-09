@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from collections_app.core.utils.paths import get_downloads_dir
 from collections_app.services.exchange_errors import (
     CollectionNotFound,
     InvalidExchangeFile,
@@ -126,7 +127,7 @@ class ExchangeTab(QWidget):
         path_str, _ = QFileDialog.getOpenFileName(
             self,
             self.tr("Importar archivo de intercambio"),
-            "",
+            str(get_downloads_dir()),
             self.tr("Archivos de intercambio (*.colexchange);;Todos los archivos (*)"),
         )
         if not path_str:
