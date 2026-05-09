@@ -24,16 +24,17 @@ def test_detail_view_constructs_with_six_tabs(
     ctx_with_demo: AppContext,
     demo_collection: Collection,
 ) -> None:
+    """Orden de tabs (Sesión 5.5 / F1): Cargas, Reportes, Intercambio,
+    Estadísticas, Mis cards, Historial."""
     view = CollectionDetailView(ctx=ctx_with_demo, collection=demo_collection)
     qtbot.addWidget(view)
     assert view._tabs.count() == 6
-    # Orden y tipos esperados.
-    assert isinstance(view._tabs.widget(0), InventoryTab)
-    assert isinstance(view._tabs.widget(1), CardLoaderView)
-    assert isinstance(view._tabs.widget(2), HistoryTab)
+    assert isinstance(view._tabs.widget(0), CardLoaderView)
+    assert isinstance(view._tabs.widget(1), ReportsView)
+    assert isinstance(view._tabs.widget(2), ExchangeTab)
     assert isinstance(view._tabs.widget(3), StatsView)
-    assert isinstance(view._tabs.widget(4), ReportsView)
-    assert isinstance(view._tabs.widget(5), ExchangeTab)
+    assert isinstance(view._tabs.widget(4), InventoryTab)
+    assert isinstance(view._tabs.widget(5), HistoryTab)
 
 
 def test_detail_view_tab_titles_in_spanish(
@@ -45,12 +46,12 @@ def test_detail_view_tab_titles_in_spanish(
     qtbot.addWidget(view)
     titles = [view._tabs.tabText(i) for i in range(view._tabs.count())]
     assert titles == [
-        "Mis cards",
-        "Cargar stock",
-        "Historial",
-        "Estadísticas",
+        "Cargas",
         "Reportes",
         "Intercambio",
+        "Estadísticas",
+        "Mis cards",
+        "Historial",
     ]
 
 

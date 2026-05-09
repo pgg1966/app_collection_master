@@ -1,11 +1,13 @@
 """Vista de detalle de una colección — orquesta los 6 tabs.
 
-- "Mis cards"     → InventoryTab
-- "Cargar stock"  → CardLoaderView (vista preservada de v0.1, embebida)
-- "Historial"     → HistoryTab
-- "Estadísticas"  → StatsView (Prompt 4b)
-- "Reportes"      → ReportsView (Prompt 4b)
-- "Intercambio"   → ExchangeTab (Prompt 5b)
+Orden visible (Sesión 5.5 / F1):
+
+1. "Cargas"       → CardLoaderView (renombrado desde "Cargar stock")
+2. "Reportes"     → ReportsView
+3. "Intercambio"  → ExchangeTab
+4. "Estadísticas" → StatsView
+5. "Mis cards"    → InventoryTab
+6. "Historial"    → HistoryTab
 
 Cableado de refresh:
 - `CardLoaderView.card_changed` → refresh de los 4 tabs lectores.
@@ -61,12 +63,16 @@ class CollectionDetailView(QWidget):
         self._reports_tab = ReportsView(ctx=self._ctx, collection=self._collection)
         self._exchange_tab = ExchangeTab(ctx=self._ctx, collection=self._collection)
 
-        self._tabs.addTab(self._inventory_tab, self.tr("Mis cards"))
-        self._tabs.addTab(self._loader_tab, self.tr("Cargar stock"))
-        self._tabs.addTab(self._history_tab, self.tr("Historial"))
-        self._tabs.addTab(self._stats_tab, self.tr("Estadísticas"))
+        # Sesión 5.5 / F1: orden Cargas → Reportes → Intercambio →
+        # Estadísticas → Mis cards → Historial. "Cargar stock" se
+        # renombró a "Cargas" para alinear con la terminología del
+        # usuario final.
+        self._tabs.addTab(self._loader_tab, self.tr("Cargas"))
         self._tabs.addTab(self._reports_tab, self.tr("Reportes"))
         self._tabs.addTab(self._exchange_tab, self.tr("Intercambio"))
+        self._tabs.addTab(self._stats_tab, self.tr("Estadísticas"))
+        self._tabs.addTab(self._inventory_tab, self.tr("Mis cards"))
+        self._tabs.addTab(self._history_tab, self.tr("Historial"))
 
         outer.addWidget(self._tabs)
 
