@@ -80,3 +80,25 @@ class TransactionsError(ServiceError):
 
 class SettingsError(ServiceError):
     """Violación de regla de negocio de `SettingsService`."""
+
+
+class OcrError(ServiceError):
+    """Base de errores del flow de OCR (Sesión 5d)."""
+
+
+class OcrModelError(OcrError):
+    """No se pudo cargar el modelo `.pt`.
+
+    Casos:
+    - El path no apunta a un archivo válido.
+    - Las dependencias (torch / ultralytics) no están instaladas.
+    - El modelo es incompatible con la versión de torch instalada.
+    """
+
+
+class OcrInstallError(OcrError):
+    """La instalación de las dependencias de OCR falló.
+
+    Encapsula el `stderr` del `pip install` para que la UI lo muestre
+    al usuario con un botón "Reintentar".
+    """
