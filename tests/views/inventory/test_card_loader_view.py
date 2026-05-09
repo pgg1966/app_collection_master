@@ -14,7 +14,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 import pytest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from collections_app.app_context import AppContext, create_app_context
 from collections_app.core.models.card import Card
@@ -173,13 +173,23 @@ def test_save_unknown_card_does_not_emit_signal(
 
 def test_remove_card_below_zero_shows_error(
     qtbot,  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
     app_ctx: AppContext,
     collection: Collection,
 ) -> None:
-    """Una baja sin stock debe mostrar error de domain (InventoryError)."""
+    """Una baja sin stock debe mostrar error de domain (InventoryError).
+
+    La confirmación de baja (5.5/E4) se mockea con Yes para que el flow
+    llegue al `_dispatch_save` y ahí pegue contra el límite de stock.
+    """
     # Estado inicial: stock = 1.
     app_ctx.inventory.add_card(collection.collection_id or 0, "ARG", 10, 1)
     app_ctx.conn.commit()
+
+    monkeypatch.setattr(
+        "collections_app.views.inventory.card_loader.QMessageBox.question",
+        lambda *a, **k: QMessageBox.StandardButton.Yes,
+    )
 
     view = CardLoaderView(ctx=app_ctx, collection=collection)
     qtbot.addWidget(view)
@@ -196,6 +206,38 @@ def test_remove_card_below_zero_shows_error(
     item = app_ctx.inventory.get_inventory_for_card(collection.collection_id or 0, "ARG", 10)
     assert item is not None
     assert item.quantity == 1
+
+
+def test_baja_confirmation_cancel_does_not_emit_signal(
+    qtbot,  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+    app_ctx: AppContext,
+    collection: Collection,
+) -> None:
+    """5.5/E4: si el user cancela el confirm de baja, no se aplica."""
+    app_ctx.inventory.add_card(collection.collection_id or 0, "ARG", 10, 5)
+    app_ctx.conn.commit()
+
+    monkeypatch.setattr(
+        "collections_app.views.inventory.card_loader.QMessageBox.question",
+        lambda *a, **k: QMessageBox.StandardButton.No,
+    )
+
+    view = CardLoaderView(ctx=app_ctx, collection=collection)
+    qtbot.addWidget(view)
+    view._baja_radio.setChecked(True)
+    view._selected_code_id = "ARG"
+    view._code_edit.setText("ARG")
+    view._number_input.setText("10")
+    view._qty_input.setText("1")
+
+    with qtbot.assertNotEmitted(view.card_changed):
+        view._save_card()
+
+    # Stock intacto.
+    item = app_ctx.inventory.get_inventory_for_card(collection.collection_id or 0, "ARG", 10)
+    assert item is not None
+    assert item.quantity == 5
 
 
 @pytest.fixture(autouse=True)

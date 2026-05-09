@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QRadioButton,
     QVBoxLayout,
     QWidget,
@@ -629,14 +630,19 @@ class CardLoaderView(QWidget):
     def _on_operation_changed(self, checked: bool) -> None:
         """Slot del toggled de los radios Alta/Baja.
 
-        Hace dos cosas: actualiza colores y mueve el foco al primer
-        campo de entrada. El guard `if not checked` evita ejecutar dos
-        veces (toggled emite False para el radio que se desmarca y True
-        para el que se marca — solo nos interesa la transición a True).
+        Hace tres cosas: actualiza colores, revalida el preview (5.5/E3:
+        el status de "Nueva/Repetida" depende del modo) y mueve el foco
+        al primer campo de entrada. El guard `if not checked` evita
+        ejecutar dos veces (toggled emite False para el radio que se
+        desmarca y True para el que se marca — solo nos interesa la
+        transición a True).
         """
         if not checked:
             return
         self._apply_input_mode_styling()
+        # Si ya hay una card en pantalla, repintar el status según el
+        # nuevo modo (no solo los colores de los inputs).
+        self._validate_card()
         # Foco al primer campo activo + selectAll para que la próxima
         # tecla reemplace lo que haya (UX de carga rápida).
         target = self._first_active_input()
@@ -847,18 +853,39 @@ class CardLoaderView(QWidget):
         self._code_edit.setFocus()
 
     def _show_card_info(self, card: Card) -> None:
+        """Carga info y status según el modo activo.
+
+        Sesión 5.5 / E3: en modo baja el indicador "Nueva/Repetida" no
+        aplica — un alta es lo único donde "Nueva" tiene sentido.
+        Mostramos en cambio el conteo crudo ("Tenés N" / "No tenés esta
+        card") sin tinte semántico de alta.
+        """
         assert self.collection.collection_id is not None
         cid: int = self.collection.collection_id
         self._country_input.setText(self._lookup_code_name(card.code_id))
         self._name_input.setText(card.card_name)
         item = self._service.get_inventory_for_card(cid, card.code_id, card.card_number)
-        if item is None or item.quantity == 0:
-            self._set_status(self.tr("Nueva"), StatusColor.SUCCESS)
+        current_qty = item.quantity if item is not None else 0
+        is_alta = self._alta_radio.isChecked()
+        if is_alta:
+            if current_qty == 0:
+                self._set_status(self.tr("Nueva"), StatusColor.SUCCESS)
+            else:
+                self._set_status(
+                    self.tr("Repetida · tenés {n}").format(n=current_qty),
+                    StatusColor.REPEATED,
+                )
         else:
-            self._set_status(
-                self.tr("Repetida · tenés {n}").format(n=item.quantity),
-                StatusColor.REPEATED,
-            )
+            if current_qty == 0:
+                self._set_status(
+                    self.tr("No tenés esta card"),
+                    StatusColor.WARNING,
+                )
+            else:
+                self._set_status(
+                    self.tr("Tenés {n}").format(n=current_qty),
+                    "",
+                )
 
     def _clear_info(self) -> None:
         self._country_input.setText("")
@@ -909,6 +936,20 @@ class CardLoaderView(QWidget):
             self._flash_invalid_code()
             self._set_status(self.tr("Falta código"), StatusColor.WARNING)
             return
+
+        # Sesión 5.5 / E4: confirmación explícita antes de aplicar una
+        # baja. Las altas no piden confirmación porque son la operación
+        # común y reversibles trivialmente con una baja.
+        if not is_alta:
+            card_label = self._name_input.text().strip() or self.tr("la card seleccionada")
+            confirm = QMessageBox.question(
+                self,
+                self.tr("Confirmar baja"),
+                self.tr("¿Dar de baja {name}?").format(name=card_label),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if confirm != QMessageBox.StandardButton.Yes:
+                return
 
         try:
             updated = self._dispatch_save(cid, number, qty, is_alta, user_specified_code)
