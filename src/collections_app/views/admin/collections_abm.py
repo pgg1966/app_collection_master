@@ -12,12 +12,17 @@ Operaciones:
 
 from __future__ import annotations
 
+import os
+import shutil
+from pathlib import Path
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QFormLayout,
     QHBoxLayout,
     QLabel,
@@ -33,6 +38,7 @@ from PySide6.QtWidgets import (
 
 from collections_app.app_context import AppContext
 from collections_app.core.models.collection import Collection
+from collections_app.core.utils.paths import get_models_dir
 from collections_app.services.exceptions import CollectionsError
 from collections_app.views.admin.csv_import_dialog import CsvImportDialog
 
@@ -114,6 +120,23 @@ class CollectionEditDialog(QDialog):
         self._album_orient_combo.setCurrentText(self._original.album_orientation)
         form.addRow(self.tr("Álbum: orientación"), self._album_orient_combo)
 
+        # Sesión 5d / I — Modelo OCR. Se muestra el filename canónico
+        # (o "No configurado") y un botón visible solo en modo admin
+        # (`COLLECTIONS_ADMIN=1`) para reemplazar el archivo. La nueva
+        # selección se persiste en `_on_accept` junto con el resto.
+        admin_enabled = os.environ.get("COLLECTIONS_ADMIN") == "1"
+        self._pending_ocr_filename: str | None = self._original.ocr_model_filename
+        self._ocr_status_label = QLabel(
+            self._original.ocr_model_filename or self.tr("No configurado")
+        )
+        self._ocr_config_btn = QPushButton(self.tr("Configurar modelo..."))
+        self._ocr_config_btn.setVisible(admin_enabled)
+        self._ocr_config_btn.clicked.connect(self._on_configure_ocr_model)
+        ocr_row = QHBoxLayout()
+        ocr_row.addWidget(self._ocr_status_label, 1)
+        ocr_row.addWidget(self._ocr_config_btn)
+        form.addRow(self.tr("Modelo OCR"), ocr_row)
+
         # Read-only en MVP.
         premium_label = QLabel(
             self.tr("Sí (con licencia)") if self._original.is_premium else self.tr("No")
@@ -166,6 +189,7 @@ class CollectionEditDialog(QDialog):
             album_columns=self._album_cols.value(),
             album_rows=self._album_rows.value(),
             album_orientation=self._album_orient_combo.currentText(),
+            ocr_model_filename=self._pending_ocr_filename,
         )
         try:
             self._ctx.collections.update(updated)
@@ -174,6 +198,47 @@ class CollectionEditDialog(QDialog):
             QMessageBox.critical(self, self.tr("Error"), str(exc))
             return
         self.accept()
+
+    def _on_configure_ocr_model(self: CollectionEditDialog) -> None:
+        """Sesión 5d: copia un `.pt` elegido por admin a `models_dir`.
+
+        El archivo se renombra a `ocr_<collection_id>.pt` para
+        garantizar que cada colección tenga uno solo, y reemplaza el
+        anterior si existía.
+        """
+        coll_id = self._original.collection_id
+        if coll_id is None:
+            QMessageBox.warning(
+                self,
+                self.tr("Modelo OCR"),
+                self.tr("Guardá la colección primero antes de configurar el modelo."),
+            )
+            return
+
+        path_str, _ = QFileDialog.getOpenFileName(
+            self,
+            self.tr("Seleccionar modelo OCR"),
+            str(get_models_dir()),
+            self.tr("Modelos PyTorch (*.pt);;Todos los archivos (*)"),
+        )
+        if not path_str:
+            return
+
+        source = Path(path_str)
+        target_filename = f"ocr_{coll_id}.pt"
+        target_path = get_models_dir() / target_filename
+        try:
+            shutil.copyfile(source, target_path)
+        except OSError as exc:
+            QMessageBox.critical(
+                self,
+                self.tr("Error al copiar el modelo"),
+                self.tr("No se pudo copiar el archivo:\n{msg}").format(msg=exc),
+            )
+            return
+
+        self._pending_ocr_filename = target_filename
+        self._ocr_status_label.setText(target_filename)
 
 
 class CollectionsAbmView(QDialog):

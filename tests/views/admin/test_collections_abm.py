@@ -59,6 +59,119 @@ def test_view_constructs_and_lists_collections(
     assert view._list.count() == 2
 
 
+# ---------------------------------------------------------------------
+# Botón "Configurar modelo OCR" (Sesión 5d / G1+I)
+# ---------------------------------------------------------------------
+
+
+def test_ocr_config_button_hidden_without_admin_env(
+    qtbot,  # type: ignore[no-untyped-def]
+    ctx_with_collections: AppContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sin COLLECTIONS_ADMIN=1 el botón existe pero NO se muestra."""
+    monkeypatch.delenv("COLLECTIONS_ADMIN", raising=False)
+    coll = ctx_with_collections.collections.list_all()[0]
+    dlg = CollectionEditDialog(ctx=ctx_with_collections, collection=coll)
+    qtbot.addWidget(dlg)
+    assert dlg._ocr_config_btn.isHidden() is True
+
+
+def test_ocr_config_button_visible_with_admin_env(
+    qtbot,  # type: ignore[no-untyped-def]
+    ctx_with_collections: AppContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Con COLLECTIONS_ADMIN=1 el botón se muestra (no escondido)."""
+    monkeypatch.setenv("COLLECTIONS_ADMIN", "1")
+    coll = ctx_with_collections.collections.list_all()[0]
+    dlg = CollectionEditDialog(ctx=ctx_with_collections, collection=coll)
+    qtbot.addWidget(dlg)
+    assert dlg._ocr_config_btn.isHidden() is False
+
+
+def test_ocr_status_label_shows_no_configurado_when_none(
+    qtbot,  # type: ignore[no-untyped-def]
+    ctx_with_collections: AppContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("COLLECTIONS_ADMIN", "1")
+    coll = ctx_with_collections.collections.list_all()[0]
+    assert coll.ocr_model_filename is None
+    dlg = CollectionEditDialog(ctx=ctx_with_collections, collection=coll)
+    qtbot.addWidget(dlg)
+    assert "No configurado" in dlg._ocr_status_label.text()
+
+
+def test_configure_ocr_copies_file_and_updates_label(
+    qtbot,  # type: ignore[no-untyped-def]
+    ctx_with_collections: AppContext,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,  # type: ignore[no-untyped-def]
+) -> None:
+    """Click "Configurar modelo..." → file picker → copia + renombra a ocr_<id>.pt."""
+    monkeypatch.setenv("COLLECTIONS_ADMIN", "1")
+    # Aislar models_dir vía APPDATA (igual que tests de paths.py).
+    fake_base = tmp_path / "FakeBase"
+    monkeypatch.setenv("APPDATA", str(fake_base))
+
+    src_model = tmp_path / "modelo_descargado.pt"
+    src_model.write_bytes(b"\x00" * 16)
+
+    coll = ctx_with_collections.collections.list_all()[0]
+    cid = coll.collection_id
+
+    monkeypatch.setattr(
+        "collections_app.views.admin.collections_abm.QFileDialog.getOpenFileName",
+        lambda *_a, **_k: (str(src_model), "Modelos PyTorch (*.pt)"),
+    )
+
+    dlg = CollectionEditDialog(ctx=ctx_with_collections, collection=coll)
+    qtbot.addWidget(dlg)
+    dlg._on_configure_ocr_model()
+
+    expected_filename = f"ocr_{cid}.pt"
+    assert dlg._pending_ocr_filename == expected_filename
+    assert expected_filename in dlg._ocr_status_label.text()
+
+    # El archivo se copió al models_dir canónico.
+    from collections_app.core.utils.paths import get_models_dir
+
+    assert (get_models_dir() / expected_filename).is_file()
+
+
+def test_configure_ocr_persists_on_accept(
+    qtbot,  # type: ignore[no-untyped-def]
+    ctx_with_collections: AppContext,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,  # type: ignore[no-untyped-def]
+) -> None:
+    """Tras configurar + accept, la collection en DB tiene el filename."""
+    monkeypatch.setenv("COLLECTIONS_ADMIN", "1")
+    fake_base = tmp_path / "FakeBase"
+    monkeypatch.setenv("APPDATA", str(fake_base))
+
+    src_model = tmp_path / "modelo.pt"
+    src_model.write_bytes(b"\x00" * 16)
+
+    coll = ctx_with_collections.collections.list_all()[0]
+    cid = coll.collection_id
+
+    monkeypatch.setattr(
+        "collections_app.views.admin.collections_abm.QFileDialog.getOpenFileName",
+        lambda *_a, **_k: (str(src_model), ""),
+    )
+
+    dlg = CollectionEditDialog(ctx=ctx_with_collections, collection=coll)
+    qtbot.addWidget(dlg)
+    dlg._on_configure_ocr_model()
+    dlg._on_accept()
+
+    fetched = ctx_with_collections.collections.get_by_id(cid or 0)
+    assert fetched is not None
+    assert fetched.ocr_model_filename == f"ocr_{cid}.pt"
+
+
 def test_edit_dialog_updates_name(
     qtbot,  # type: ignore[no-untyped-def]
     ctx_with_collections: AppContext,
