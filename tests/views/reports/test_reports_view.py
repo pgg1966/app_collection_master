@@ -177,42 +177,36 @@ def test_copy_button_writes_to_clipboard(
 # ---------------------------------------------------------------------
 
 
-def test_save_button_writes_utf8_file(
+def test_save_button_writes_utf8_file_to_downloads(
     qtbot,  # type: ignore[no-untyped-def]
     ctx_and_collection: tuple[AppContext, Collection],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Sin diálogo de "dónde guardar": va auto a Downloads con el filename canónico."""
     ctx, coll = ctx_and_collection
     view = ReportsView(ctx=ctx, collection=coll)
     qtbot.addWidget(view)
-    target = tmp_path / "test.txt"
 
+    fake_downloads = tmp_path / "Downloads"
+    fake_downloads.mkdir()
     monkeypatch.setattr(
-        "collections_app.views.reports.reports_view.QFileDialog.getSaveFileName",
-        lambda *a, **k: (str(target), ""),
+        "collections_app.views.reports.reports_view.get_downloads_dir",
+        lambda: fake_downloads,
+    )
+    # El success dialog se construye y se llama exec(); evitamos bloquear.
+    monkeypatch.setattr(
+        "collections_app.views.reports.reports_view.ReportSavedDialog.exec",
+        lambda self: 0,
     )
     view._missing_section._on_save()
-    assert target.exists()
-    content = target.read_text(encoding="utf-8")
+    files = list(fake_downloads.glob("*.txt"))
+    assert len(files) == 1
+    content = files[0].read_text(encoding="utf-8")
     assert "ARGENTINA" in content
-
-
-def test_save_button_cancel_does_nothing(
-    qtbot,  # type: ignore[no-untyped-def]
-    ctx_and_collection: tuple[AppContext, Collection],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    ctx, coll = ctx_and_collection
-    view = ReportsView(ctx=ctx, collection=coll)
-    qtbot.addWidget(view)
-
-    monkeypatch.setattr(
-        "collections_app.views.reports.reports_view.QFileDialog.getSaveFileName",
-        lambda *a, **k: ("", ""),  # usuario canceló
-    )
-    # No debe crashear.
-    view._missing_section._on_save()
+    # Filename canónico: "faltantes_<slug>_YYYY-MM-DD.txt".
+    assert files[0].name.startswith("faltantes_")
+    assert files[0].name.endswith(".txt")
 
 
 # ---------------------------------------------------------------------

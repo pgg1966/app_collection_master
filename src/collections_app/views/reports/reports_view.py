@@ -42,7 +42,6 @@ from PySide6.QtGui import QDesktopServices, QFont, QTextDocument
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from PySide6.QtWidgets import (
     QApplication,
-    QFileDialog,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -56,12 +55,14 @@ from PySide6.QtWidgets import (
 
 from collections_app.app_context import AppContext
 from collections_app.core.models.collection import Collection
+from collections_app.core.utils.paths import get_downloads_dir
 from collections_app.views.reports._formatters import (
     URL_SAFE_LIMIT,
     format_duplicates_report,
     format_missing_report,
     text_fits_in_url,
 )
+from collections_app.views.reports._success_dialog import ReportSavedDialog
 
 _DATE_SLUG_FORMAT = "%Y-%m-%d"
 
@@ -182,15 +183,33 @@ class _ReportSectionWidget(QWidget):
         )
 
     def _on_save(self: _ReportSectionWidget) -> None:
-        path_str, _ = QFileDialog.getSaveFileName(
-            self,
-            self.tr("Guardar reporte"),
-            self._default_filename(),
-            self.tr("Texto (*.txt);;Todos (*.*)"),
-        )
-        if not path_str:
+        """Guarda el reporte en la carpeta Descargas y muestra dialog de éxito.
+
+        Reemplaza el `QFileDialog` previo por guardado automático con
+        nombre canónico (`_default_filename`). El usuario puede abrir
+        la carpeta desde el dialog post-guardado.
+        """
+        dest_dir = get_downloads_dir()
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            QMessageBox.critical(
+                self,
+                self.tr("Error al guardar"),
+                self.tr("No se pudo crear la carpeta de destino: {msg}").format(msg=exc),
+            )
             return
-        Path(path_str).write_text(self.text(), encoding="utf-8")
+        dest_path = dest_dir / self._default_filename()
+        try:
+            dest_path.write_text(self.text(), encoding="utf-8")
+        except OSError as exc:
+            QMessageBox.critical(
+                self,
+                self.tr("Error al guardar"),
+                self.tr("No se pudo escribir el archivo: {msg}").format(msg=exc),
+            )
+            return
+        ReportSavedDialog(path=dest_path, parent=self).exec()
 
     def _on_print(self: _ReportSectionWidget) -> None:
         printer = QPrinter()
