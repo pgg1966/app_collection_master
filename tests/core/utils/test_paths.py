@@ -153,6 +153,32 @@ def test_get_generated_cards_dir_rejects_invalid_profile() -> None:
 
 
 # ---------------------------------------------------------------------
+# get_models_dir (Sesión 5d)
+# ---------------------------------------------------------------------
+
+
+def test_get_models_dir_creates_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`<app_data>/models/`, creado si no existe."""
+    from collections_app.core.utils.paths import get_models_dir
+
+    _isolate_app_data(tmp_path, monkeypatch)
+    target = get_models_dir()
+    assert target.is_dir()
+    assert target.name == "models"
+    assert target.parent == get_app_data_dir()
+
+
+def test_get_models_dir_is_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from collections_app.core.utils.paths import get_models_dir
+
+    _isolate_app_data(tmp_path, monkeypatch)
+    a = get_models_dir()
+    b = get_models_dir()
+    assert a == b
+    assert a.is_dir()
+
+
+# ---------------------------------------------------------------------
 # get_downloads_dir
 # ---------------------------------------------------------------------
 

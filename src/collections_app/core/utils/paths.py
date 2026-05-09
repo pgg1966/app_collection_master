@@ -130,6 +130,24 @@ def get_downloads_dir() -> Path:
     return Path(tempfile.gettempdir())
 
 
+def get_models_dir() -> Path:
+    """Directorio para modelos OCR (Sesión 5d).
+
+    `<app_data>/models/`. Se crea si no existe. Cada colección con OCR
+    configurado tiene un archivo acá (ej. `ocr_1.pt`); el filename se
+    persiste en `collections.ocr_model_filename` y el path completo se
+    reconstruye con `get_models_dir() / filename`.
+
+    No se segrega por profile: los modelos pesan ~100 MB y son los
+    mismos para todas las DBs que usan la misma colección. El filename
+    canónico (`ocr_<collection_id>.pt`) ya garantiza unicidad por
+    colección dentro del mismo directorio.
+    """
+    target = get_app_data_dir() / "models"
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
 def get_generated_cards_dir_for_profile(profile: str | None) -> Path:
     """Directorio para imágenes generadas, segregado por profile.
 
