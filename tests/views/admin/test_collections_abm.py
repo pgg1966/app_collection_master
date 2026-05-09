@@ -177,3 +177,49 @@ def test_delete_collection_cancelled_keeps_data(
     view._list.setCurrentRow(0)
     view._on_delete()
     assert view._list.count() == 2  # nada borrado
+
+
+def test_delete_emits_collections_changed_signal(
+    qtbot,  # type: ignore[no-untyped-def]
+    ctx_with_collections: AppContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tras delete exitoso se emite `collections_changed` (Sesión 5.5 / C1)."""
+    monkeypatch.setattr(
+        "collections_app.views.admin.collections_abm.QMessageBox.question",
+        lambda *_a, **_k: QMessageBox.StandardButton.Yes,
+    )
+    view = CollectionsAbmView(ctx=ctx_with_collections)
+    qtbot.addWidget(view)
+    view._list.setCurrentRow(0)
+    received: list[bool] = []
+    view.collections_changed.connect(lambda: received.append(True))
+    view._on_delete()
+    assert received == [True]
+
+
+def test_edit_emits_collections_changed_signal(
+    qtbot,  # type: ignore[no-untyped-def]
+    ctx_with_collections: AppContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Edit exitoso emite el signal."""
+    view = CollectionsAbmView(ctx=ctx_with_collections)
+    qtbot.addWidget(view)
+    view._list.setCurrentRow(0)
+    received: list[bool] = []
+    view.collections_changed.connect(lambda: received.append(True))
+
+    # Stub del CollectionEditDialog: aceptar inmediatamente.
+    from collections_app.views.admin import collections_abm as mod
+
+    class _StubDialog:
+        def __init__(self, **_k):  # type: ignore[no-untyped-def]
+            pass
+
+        def exec(self):  # type: ignore[no-untyped-def]
+            return mod.QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(mod, "CollectionEditDialog", _StubDialog)
+    view._on_edit()
+    assert received == [True]

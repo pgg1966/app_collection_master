@@ -223,6 +223,10 @@ class MainWindow(QMainWindow):
 
     def _open_collections_abm(self: MainWindow) -> None:
         dialog = CollectionsAbmView(ctx=self._ctx, parent=self)
+        # Refrescar el sidebar mientras el ABM sigue abierto (la red secundaria
+        # de `_after_collections_abm_close` se mantiene por si el signal no
+        # llega por algún motivo).
+        dialog.collections_changed.connect(self._selector.refresh)
         dialog.exec()
         # Capturamos el id activo ahora (snapshot, no después del timer)
         # para que un cambio sincrónico al active_detail entre tanto no

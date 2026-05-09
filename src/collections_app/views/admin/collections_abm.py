@@ -12,7 +12,7 @@ Operaciones:
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -177,7 +177,15 @@ class CollectionEditDialog(QDialog):
 
 
 class CollectionsAbmView(QDialog):
-    """ABM modal de colecciones."""
+    """ABM modal de colecciones.
+
+    Emite `collections_changed` después de cualquier alta, edit o delete
+    exitoso para que el caller (típicamente `MainWindow`) refresque el
+    sidebar mientras el ABM sigue abierto. El refresh post-cierre del
+    `MainWindow` queda como red secundaria.
+    """
+
+    collections_changed = Signal()
 
     def __init__(
         self: CollectionsAbmView,
@@ -232,6 +240,7 @@ class CollectionsAbmView(QDialog):
         dialog = CsvImportDialog(ctx=self._ctx, parent=self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._refresh()
+            self.collections_changed.emit()
 
     def _on_edit(self: CollectionsAbmView) -> None:
         coll = self._selected()
@@ -245,6 +254,7 @@ class CollectionsAbmView(QDialog):
         dialog = CollectionEditDialog(ctx=self._ctx, collection=coll, parent=self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._refresh()
+            self.collections_changed.emit()
 
     def _on_delete(self: CollectionsAbmView) -> None:
         coll = self._selected()
@@ -278,3 +288,4 @@ class CollectionsAbmView(QDialog):
             )
             return
         self._refresh()
+        self.collections_changed.emit()
