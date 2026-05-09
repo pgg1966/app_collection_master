@@ -2,7 +2,7 @@
 
 Orden visible (Sesión 5.5 / F1):
 
-1. "Cargas"       → CardLoaderView (renombrado desde "Cargar stock")
+1. "Cargas"       → LoaderTab (Manual + Por foto, Sesión 5d)
 2. "Reportes"     → ReportsView
 3. "Intercambio"  → ExchangeTab
 4. "Estadísticas" → StatsView
@@ -10,7 +10,8 @@ Orden visible (Sesión 5.5 / F1):
 6. "Historial"    → HistoryTab
 
 Cableado de refresh:
-- `CardLoaderView.card_changed` → refresh de los 4 tabs lectores.
+- `LoaderTab.card_changed` → refresh de los 4 tabs lectores.
+  Re-emitida desde sus dos sub-tabs (alta manual + apply de OCR).
 - `ExchangeTab.inventory_changed` (post-apply de un intercambio) →
   mismo refresh.
 
@@ -27,7 +28,7 @@ from collections_app.core.models.collection import Collection
 from collections_app.views.collections.history_tab import HistoryTab
 from collections_app.views.collections.inventory_tab import InventoryTab
 from collections_app.views.exchange.exchange_tab import ExchangeTab
-from collections_app.views.inventory.card_loader import CardLoaderView
+from collections_app.views.inventory.loader_tab import LoaderTab
 from collections_app.views.reports.reports_view import ReportsView
 from collections_app.views.stats.stats_view import StatsView
 
@@ -57,7 +58,10 @@ class CollectionDetailView(QWidget):
 
         self._tabs = QTabWidget()
         self._inventory_tab = InventoryTab(ctx=self._ctx, collection=self._collection)
-        self._loader_tab = CardLoaderView(ctx=self._ctx, collection=self._collection)
+        # Sesión 5d: la tab "Cargas" pasa de ser `CardLoaderView` directo a un
+        # `LoaderTab` que envuelve sub-tabs Manual + Por foto. La signal
+        # `card_changed` que el wrapper re-emite preserva la refresh chain.
+        self._loader_tab = LoaderTab(ctx=self._ctx, collection=self._collection)
         self._history_tab = HistoryTab(ctx=self._ctx, collection=self._collection)
         self._stats_tab = StatsView(ctx=self._ctx, collection=self._collection)
         self._reports_tab = ReportsView(ctx=self._ctx, collection=self._collection)
@@ -146,7 +150,7 @@ class CollectionDetailView(QWidget):
         return self._history_tab
 
     @property
-    def loader_tab(self: CollectionDetailView) -> CardLoaderView:
+    def loader_tab(self: CollectionDetailView) -> LoaderTab:
         return self._loader_tab
 
     @property
