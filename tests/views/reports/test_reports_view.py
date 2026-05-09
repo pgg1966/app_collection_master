@@ -177,13 +177,13 @@ def test_copy_button_writes_to_clipboard(
 # ---------------------------------------------------------------------
 
 
-def test_save_button_writes_utf8_file_to_downloads(
+def test_save_button_pre_fills_dialog_with_downloads_and_canonical_name(
     qtbot,  # type: ignore[no-untyped-def]
     ctx_and_collection: tuple[AppContext, Collection],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Sin diálogo de "dónde guardar": va auto a Downloads con el filename canónico."""
+    """5.5 / B1 revisión: el dialog abre con Descargas + nombre canónico."""
     ctx, coll = ctx_and_collection
     view = ReportsView(ctx=ctx, collection=coll)
     qtbot.addWidget(view)
@@ -194,19 +194,55 @@ def test_save_button_writes_utf8_file_to_downloads(
         "collections_app.views.reports.reports_view.get_downloads_dir",
         lambda: fake_downloads,
     )
-    # El success dialog se construye y se llama exec(); evitamos bloquear.
+
+    # Capturamos el `dir` con el que se abre el QFileDialog y devolvemos
+    # un path concreto para que el flow se complete.
+    captured: dict[str, str] = {}
+    target = tmp_path / "elegido_por_el_usuario.txt"
+
+    def fake_dialog(_self, _title, suggested, _filter):  # type: ignore[no-untyped-def]
+        captured["suggested"] = suggested
+        return (str(target), "Archivos de texto (*.txt)")
+
     monkeypatch.setattr(
-        "collections_app.views.reports.reports_view.ReportSavedDialog.exec",
-        lambda self: 0,
+        "collections_app.views.reports.reports_view.QFileDialog.getSaveFileName",
+        fake_dialog,
     )
     view._missing_section._on_save()
-    files = list(fake_downloads.glob("*.txt"))
-    assert len(files) == 1
-    content = files[0].read_text(encoding="utf-8")
-    assert "ARGENTINA" in content
-    # Filename canónico: "faltantes_<slug>_YYYY-MM-DD.txt".
-    assert files[0].name.startswith("faltantes_")
-    assert files[0].name.endswith(".txt")
+
+    # El "suggested" del dialog incluye Descargas + filename canónico.
+    assert str(fake_downloads) in captured["suggested"]
+    assert "faltantes_" in captured["suggested"]
+    assert captured["suggested"].endswith(".txt")
+    # El archivo se escribe donde el user eligió.
+    assert target.exists()
+    assert "ARGENTINA" in target.read_text(encoding="utf-8")
+
+
+def test_save_button_cancel_does_nothing(
+    qtbot,  # type: ignore[no-untyped-def]
+    ctx_and_collection: tuple[AppContext, Collection],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Si el user cancela el dialog (path vacío), no se escribe nada."""
+    ctx, coll = ctx_and_collection
+    view = ReportsView(ctx=ctx, collection=coll)
+    qtbot.addWidget(view)
+
+    fake_downloads = tmp_path / "Downloads"
+    fake_downloads.mkdir()
+    monkeypatch.setattr(
+        "collections_app.views.reports.reports_view.get_downloads_dir",
+        lambda: fake_downloads,
+    )
+    monkeypatch.setattr(
+        "collections_app.views.reports.reports_view.QFileDialog.getSaveFileName",
+        lambda *_a, **_k: ("", ""),
+    )
+    view._missing_section._on_save()
+    # Nada quedó en Descargas.
+    assert list(fake_downloads.glob("*")) == []
 
 
 # ---------------------------------------------------------------------

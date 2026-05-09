@@ -42,6 +42,7 @@ from PySide6.QtGui import QDesktopServices, QFont, QTextDocument
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from PySide6.QtWidgets import (
     QApplication,
+    QFileDialog,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -62,7 +63,6 @@ from collections_app.views.reports._formatters import (
     format_missing_report,
     text_fits_in_url,
 )
-from collections_app.views.reports._success_dialog import ReportSavedDialog
 
 _DATE_SLUG_FORMAT = "%Y-%m-%d"
 
@@ -183,33 +183,31 @@ class _ReportSectionWidget(QWidget):
         )
 
     def _on_save(self: _ReportSectionWidget) -> None:
-        """Guarda el reporte en la carpeta Descargas y muestra dialog de éxito.
+        """Guarda el reporte vía `QFileDialog` pre-apuntado a Descargas.
 
-        Reemplaza el `QFileDialog` previo por guardado automático con
-        nombre canónico (`_default_filename`). El usuario puede abrir
-        la carpeta desde el dialog post-guardado.
+        Sesión 5.5 / B1 (revisión): el reporte es un documento personal,
+        el usuario decide dónde guardarlo. Le abrimos el diálogo nativo
+        con la carpeta Descargas seleccionada y el nombre canónico
+        pre-llenado, pero puede aceptar tal cual, renombrar o navegar
+        a otra carpeta.
         """
-        dest_dir = get_downloads_dir()
-        try:
-            dest_dir.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            QMessageBox.critical(
-                self,
-                self.tr("Error al guardar"),
-                self.tr("No se pudo crear la carpeta de destino: {msg}").format(msg=exc),
-            )
+        suggested_path = str(get_downloads_dir() / self._default_filename())
+        path_str, _ = QFileDialog.getSaveFileName(
+            self,
+            self.tr("Guardar reporte"),
+            suggested_path,
+            self.tr("Archivos de texto (*.txt);;Todos los archivos (*)"),
+        )
+        if not path_str:
             return
-        dest_path = dest_dir / self._default_filename()
         try:
-            dest_path.write_text(self.text(), encoding="utf-8")
+            Path(path_str).write_text(self.text(), encoding="utf-8")
         except OSError as exc:
             QMessageBox.critical(
                 self,
                 self.tr("Error al guardar"),
                 self.tr("No se pudo escribir el archivo: {msg}").format(msg=exc),
             )
-            return
-        ReportSavedDialog(path=dest_path, parent=self).exec()
 
     def _on_print(self: _ReportSectionWidget) -> None:
         printer = QPrinter()
