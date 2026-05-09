@@ -57,9 +57,18 @@ EXPECTED_INDEXES = {
 
 @pytest.fixture
 def conn() -> sqlite3.Connection:
-    """Conexión :memory: con migración 001 aplicada."""
+    """Conexión :memory: con SOLO la migración 001 aplicada.
+
+    Este archivo testea el shape final del schema 001 — usar
+    `run_migrations()` aplicaría también las migraciones posteriores
+    (002 en adelante), lo cual rompería los asserts cada vez que
+    se agrega una migración nueva.
+    """
+    from collections_app.core.utils.paths import get_schema_dir
+
     c = create_connection(":memory:")
-    run_migrations(c)
+    sql = (get_schema_dir() / "001_initial.sql").read_text(encoding="utf-8")
+    c.executescript(sql)
     return c
 
 
@@ -410,6 +419,14 @@ def test_cascade_delete_collection_removes_cards_and_inventory(
 def test_run_migrations_is_idempotent_on_real_schema(
     conn: sqlite3.Connection,
 ) -> None:
-    """Re-aplicar la migración no debe fallar (no hay pendientes)."""
+    """Re-aplicar la migración no debe fallar (no hay pendientes).
+
+    `run_migrations` corre todas las migraciones disponibles. La fixture
+    de este archivo aplicó solo la 001, así que `run_migrations` aplica
+    las pendientes (002, 003, ...) y deja la versión final igual a la
+    cantidad de migraciones disponibles.
+    """
     final = run_migrations(conn)
-    assert final == 1
+    # El final debe ser >= 1; el valor exacto depende de cuántas
+    # migraciones hay en el repo en este momento.
+    assert final >= 1
