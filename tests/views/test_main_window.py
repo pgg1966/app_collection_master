@@ -262,13 +262,17 @@ def test_main_window_refreshes_sidebar_on_import_completed(
     assert win.active_detail is not None
 
 
-def test_main_window_file_menu_has_only_csv_and_exit(
+def test_main_window_admin_file_menu_has_csv_and_exit(
     qtbot,  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
     empty_ctx: AppContext,
 ) -> None:
-    """Tras el embed del importer (Prompt 5b), el menú Archivo ya no
-    incluye "Importar inventario..." — solo "Nueva colección desde CSV"
-    y "Salir" (con separator)."""
+    """En modo admin: "Archivo" tiene "Nueva colección desde CSV" + "Salir".
+
+    En modo no-admin el menú "Archivo" directamente no existe (test
+    `test_non_admin_has_no_file_menu`).
+    """
+    monkeypatch.setenv("COLLECTIONS_ADMIN", "1")
     win = MainWindow(ctx=empty_ctx)
     qtbot.addWidget(win)
     archivo_menu = next(
@@ -278,6 +282,23 @@ def test_main_window_file_menu_has_only_csv_and_exit(
         a.text().replace("&", "") for a in archivo_menu.actions() if not a.isSeparator()
     ]
     assert visible_actions == ["Nueva colección desde CSV...", "Salir"]
+
+
+def test_non_admin_has_no_file_menu_and_inline_exit(
+    qtbot,  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+    empty_ctx: AppContext,
+) -> None:
+    """Prompt 6: sin COLLECTIONS_ADMIN, no hay menú "Archivo" — solo
+    una acción "Salir" directa en la barra de menús."""
+    monkeypatch.delenv("COLLECTIONS_ADMIN", raising=False)
+    win = MainWindow(ctx=empty_ctx)
+    qtbot.addWidget(win)
+    menu_titles = {m.title().replace("&", "") for m in win.menuBar().findChildren(QMenu)}
+    assert "Archivo" not in menu_titles
+    # "Salir" aparece como acción directa de la barra (no como submenú).
+    bar_actions = [a.text().replace("&", "") for a in win.menuBar().actions()]
+    assert "Salir" in bar_actions
 
 
 def test_main_window_admin_cards_menu_opens_dialog(
@@ -378,18 +399,18 @@ def test_main_window_collections_abm_discards_active_detail_if_collection_delete
 # ---------------------------------------------------------------------
 
 
-def test_admin_menu_disabled_without_env_var(
+def test_admin_menu_absent_without_env_var(
     qtbot,  # type: ignore[no-untyped-def]
     monkeypatch: pytest.MonkeyPatch,
     empty_ctx: AppContext,
 ) -> None:
-    """Sin COLLECTIONS_ADMIN seteado, las 3 acciones admin quedan disabled."""
+    """Prompt 6: sin COLLECTIONS_ADMIN, el menú "Administración" no se
+    crea — no items grises tampoco."""
     monkeypatch.delenv("COLLECTIONS_ADMIN", raising=False)
     win = MainWindow(ctx=empty_ctx)
     qtbot.addWidget(win)
-    for action in _admin_actions(win):
-        assert action.isEnabled() is False
-        assert "COLLECTIONS_ADMIN" in action.toolTip()
+    menu_titles = {m.title().replace("&", "") for m in win.menuBar().findChildren(QMenu)}
+    assert "Administración" not in menu_titles
 
 
 def test_admin_menu_enabled_with_env_var(
@@ -397,7 +418,7 @@ def test_admin_menu_enabled_with_env_var(
     monkeypatch: pytest.MonkeyPatch,
     empty_ctx: AppContext,
 ) -> None:
-    """Con COLLECTIONS_ADMIN=1, las 3 acciones admin quedan enabled."""
+    """Con COLLECTIONS_ADMIN=1, las 3 acciones admin existen y están enabled."""
     monkeypatch.setenv("COLLECTIONS_ADMIN", "1")
     win = MainWindow(ctx=empty_ctx)
     qtbot.addWidget(win)

@@ -122,48 +122,38 @@ class MainWindow(QMainWindow):
         self.resize(1024, 720)
 
     def _build_menus(self: MainWindow) -> None:
-        # Modo admin condicional (ver docs/admin_mode.md). Las ABM
-        # administrativas se mantienen deshabilitadas por defecto: la
-        # separación admin/usuario es decisión arquitectónica para
-        # Camino C (distribución a comunidad amplia post-Mundial). El
-        # bug del issue #002 que motivó el workaround original está
-        # resuelto en raíz tras el refactor a QTableView +
-        # QAbstractTableModel (commits fdb2c2c y 441f8ac). Para activar
-        # el menú admin, setear COLLECTIONS_ADMIN=1 antes de ejecutar.
+        """Construye la barra de menús según el modo admin.
+
+        Modo no-admin (Prompt 6): solo aparece "Salir" como acción
+        directa en la barra de menús. No hay menú "Archivo" con un
+        único item, no hay menú "Administración" con items grises.
+
+        Modo admin (`COLLECTIONS_ADMIN=1`): aparecen "Archivo" (con
+        "Nueva colección desde CSV..." + "Salir") y "Administración"
+        (Cards, Colecciones, Códigos). Los items admin siempre quedan
+        enabled — la rama no-admin no los crea.
+        """
         admin_enabled = os.environ.get("COLLECTIONS_ADMIN") == "1"
-        disabled_tooltip = self.tr(
-            "Modo admin deshabilitado. Setear COLLECTIONS_ADMIN=1 para "
-            "activar. Ver docs/admin_mode.md."
-        )
+
+        if not admin_enabled:
+            salir = self.menuBar().addAction(self.tr("&Salir"))
+            salir.triggered.connect(self.close)
+            return
 
         archivo = self.menuBar().addMenu(self.tr("&Archivo"))
-        # Sesión 5.5 / G1: el item de carga desde CSV es admin-only
-        # (los usuarios finales no crean colecciones). Lo ocultamos
-        # junto con su separador para no dejar un separador huérfano
-        # antes de "Salir".
         nueva = archivo.addAction(self.tr("&Nueva colección desde CSV..."))
         nueva.triggered.connect(self._open_csv_import_dialog)
-        nueva.setVisible(admin_enabled)
-        nueva_separator = archivo.addSeparator()
-        nueva_separator.setVisible(admin_enabled)
+        archivo.addSeparator()
         salir = archivo.addAction(self.tr("&Salir"))
         salir.triggered.connect(self.close)
+
         admin = self.menuBar().addMenu(self.tr("A&dministración"))
         cards_action = admin.addAction(self.tr("&Cards..."))
         cards_action.triggered.connect(self._open_cards_abm)
-        cards_action.setEnabled(admin_enabled)
-        if not admin_enabled:
-            cards_action.setToolTip(disabled_tooltip)
         collections_action = admin.addAction(self.tr("C&olecciones..."))
         collections_action.triggered.connect(self._open_collections_abm)
-        collections_action.setEnabled(admin_enabled)
-        if not admin_enabled:
-            collections_action.setToolTip(disabled_tooltip)
         codes_action = admin.addAction(self.tr("C&ódigos..."))
         codes_action.triggered.connect(self._open_codes_master_detail)
-        codes_action.setEnabled(admin_enabled)
-        if not admin_enabled:
-            codes_action.setToolTip(disabled_tooltip)
 
     def _wire_signals(self: MainWindow) -> None:
         self._selector.collection_selected.connect(self._on_collection_selected)
