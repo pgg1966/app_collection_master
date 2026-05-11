@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QObject, Qt, QThread, Signal
+from PySide6.QtGui import QBrush, QColor, QFont
 from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
@@ -62,7 +63,12 @@ if TYPE_CHECKING:
     from collections_app.services.ocr_service import OcrService
 
 
-_CONFIDENCE_THRESHOLD = 0.70
+# Color naranja para resaltar detecciones que pasaron el validador
+# pero no matchean ninguna card del catálogo local (card_id=None).
+# El usuario las ve igual y puede dejarlas tildadas, pero al aplicar
+# `_on_load_photo_clicked` las salta — el color avisa que no van a
+# afectar inventario.
+_UNKNOWN_CARD_COLOR = "#D97706"  # naranja oscuro, legible sobre fondo claro
 
 # Sentinels que indican que pip falló por archivos bloqueados. El
 # patrón aparece tal cual en Windows (CPython traduce automáticamente
@@ -502,31 +508,41 @@ class OcrLoaderTab(QWidget):
         self._on_skip_photo_clicked()
 
     def _populate_results_table(self: OcrLoaderTab, detections: list[OcrDetection]) -> None:
+        """Llena la tabla con las detecciones.
+
+        Post-smoke 5d: TODOS los checkboxes vienen marcados por default
+        — el validador ya filtró los falsos positivos antes de llegar
+        acá. El usuario destilda lo que no quiera. Las filas con
+        `card_id=None` (código válido pero no en el catálogo local)
+        se renderizan en naranja + itálica para que el usuario sepa
+        que esa fila no va a tocar inventario aunque la deje tildada.
+        """
         self._results_table.setRowCount(len(detections))
+        unknown_brush = QBrush(QColor(_UNKNOWN_CARD_COLOR))
+        italic_font = QFont()
+        italic_font.setItalic(True)
+
         for row, d in enumerate(detections):
             check = QTableWidgetItem("")
             check.setFlags(check.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            # Pre-marcado si confidence ≥ threshold AND card existe en DB.
-            initial = (
-                Qt.CheckState.Checked
-                if d.confidence >= _CONFIDENCE_THRESHOLD and d.card_id is not None
-                else Qt.CheckState.Unchecked
-            )
-            check.setCheckState(initial)
+            check.setCheckState(Qt.CheckState.Checked)
             self._results_table.setItem(row, _COL_CHECK, check)
 
             code_text = f"{d.code_id}-{d.card_number}" if d.code_id else str(d.card_number)
-            self._results_table.setItem(row, _COL_CODE, QTableWidgetItem(code_text))
-            self._results_table.setItem(
-                row,
-                _COL_NAME,
-                QTableWidgetItem(d.card_name or self.tr("(no encontrada)")),
-            )
-            self._results_table.setItem(
-                row,
-                _COL_CONF,
-                QTableWidgetItem(f"{int(d.confidence * 100)}%"),
-            )
+            code_item = QTableWidgetItem(code_text)
+            name_item = QTableWidgetItem(d.card_name or self.tr("(no encontrada)"))
+            conf_item = QTableWidgetItem(f"{int(d.confidence * 100)}%")
+
+            # Indicación visual para cards que el validador resolvió pero
+            # no están en el catálogo local.
+            if d.card_id is None:
+                for item in (code_item, name_item, conf_item):
+                    item.setForeground(unknown_brush)
+                    item.setFont(italic_font)
+
+            self._results_table.setItem(row, _COL_CODE, code_item)
+            self._results_table.setItem(row, _COL_NAME, name_item)
+            self._results_table.setItem(row, _COL_CONF, conf_item)
         self._results_table.setVisible(True)
 
     def _on_load_photo_clicked(self: OcrLoaderTab) -> None:

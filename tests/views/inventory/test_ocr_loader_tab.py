@@ -260,3 +260,105 @@ def test_format_install_error_translates_acceso_denegado_es() -> None:
     out = _format_install_error(raw)
     assert "Cerrar la app" in out
     assert "Acceso denegado" in out
+
+
+# ---------------------------------------------------------------------
+# _populate_results_table — defaults post-smoke 5d
+# ---------------------------------------------------------------------
+
+
+def _make_detection(
+    *,
+    code_id: str = "KOR",
+    card_number: int = 6,
+    confidence: float = 0.5,
+    card_id: int | None = 42,
+    card_name: str = "Park",
+):  # type: ignore[no-untyped-def]
+    from collections_app.core.models.ocr_detection import OcrDetection
+
+    return OcrDetection(
+        raw_label=f"{code_id} {card_number}",
+        code_id=code_id,
+        card_number=card_number,
+        confidence=confidence,
+        card_name=card_name,
+        card_id=card_id,
+    )
+
+
+def test_populate_marks_all_rows_checked_by_default(
+    qtbot,  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+    ctx_and_collection: tuple[AppContext, Collection],
+) -> None:
+    """Todas las filas vienen Checked por default, sin importar confidence."""
+    from PySide6.QtCore import Qt
+
+    monkeypatch.setattr(
+        "collections_app.views.inventory.ocr_loader_tab.OcrInstallService.is_installed",
+        staticmethod(lambda: True),
+    )
+    monkeypatch.setattr(
+        ctx_and_collection[0].__class__,
+        "get_ocr_service",
+        lambda self, _coll: object(),
+        raising=False,
+    )
+    ctx, coll = ctx_and_collection
+    tab = OcrLoaderTab(ctx=ctx, collection=coll)
+    qtbot.addWidget(tab)
+
+    detections = [
+        _make_detection(confidence=0.92),  # alta
+        _make_detection(confidence=0.50),  # baja (antes hubiera quedado destildada)
+        _make_detection(confidence=0.27, card_id=None, card_name=""),  # no en catálogo
+    ]
+    tab._populate_results_table(detections)
+
+    for row in range(tab._results_table.rowCount()):
+        item = tab._results_table.item(row, 0)
+        assert item is not None
+        assert item.checkState() == Qt.CheckState.Checked
+
+
+def test_populate_unknown_card_rows_styled_in_orange(
+    qtbot,  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+    ctx_and_collection: tuple[AppContext, Collection],
+) -> None:
+    """Filas con card_id=None se renderizan en naranja + itálica."""
+    from collections_app.views.inventory.ocr_loader_tab import _UNKNOWN_CARD_COLOR
+
+    monkeypatch.setattr(
+        "collections_app.views.inventory.ocr_loader_tab.OcrInstallService.is_installed",
+        staticmethod(lambda: True),
+    )
+    monkeypatch.setattr(
+        ctx_and_collection[0].__class__,
+        "get_ocr_service",
+        lambda self, _coll: object(),
+        raising=False,
+    )
+    ctx, coll = ctx_and_collection
+    tab = OcrLoaderTab(ctx=ctx, collection=coll)
+    qtbot.addWidget(tab)
+
+    detections = [
+        _make_detection(card_id=99, card_name="Real"),  # en catálogo
+        _make_detection(card_id=None, card_name=""),  # NO en catálogo
+    ]
+    tab._populate_results_table(detections)
+
+    # Fila 0 (en catálogo): texto sin tinte naranja, no itálica.
+    code_known = tab._results_table.item(0, 1)
+    assert code_known is not None
+    assert code_known.foreground().color().name().upper() != _UNKNOWN_CARD_COLOR.upper()
+    assert code_known.font().italic() is False
+
+    # Fila 1 (NO en catálogo): naranja + itálica en las 3 columnas de texto.
+    for col in (1, 2, 3):
+        item = tab._results_table.item(1, col)
+        assert item is not None
+        assert item.foreground().color().name().upper() == _UNKNOWN_CARD_COLOR.upper()
+        assert item.font().italic() is True
