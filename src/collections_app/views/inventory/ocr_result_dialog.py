@@ -196,6 +196,12 @@ class OcrResultDialog(QDialog):
         else:
             self._image_label = QLabel(self.tr("(no se pudo cargar la imagen)"))
             self._image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            # Sin Expanding policy el label colapsa al ancho del texto
+            # y el splitter le asigna ~0px, dejando el panel izquierdo
+            # esencialmente invisible.
+            self._image_label.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+            )
         splitter.addWidget(self._image_label)
 
         # Derecha: header + tabla + botones del flow. Los botones viven
@@ -348,7 +354,23 @@ class OcrResultDialog(QDialog):
 
         img = cv2.imread(str(self._image_path))
         if img is None:
-            return None
+            # En Windows, `cv2.imread` devuelve None silenciosamente
+            # cuando el path contiene caracteres fuera del code page
+            # del sistema (ej. acentos en una ruta de OneDrive:
+            # "C:\\Users\\X\\OneDrive\\Imágenes\\..."). Fallback:
+            # leer los bytes con numpy (que sí soporta Unicode) y
+            # decodificar en memoria.
+            import numpy as np  # noqa: PLC0415
+
+            try:
+                data = np.fromfile(str(self._image_path), dtype=np.uint8)
+            except OSError:
+                return None
+            if data.size == 0:
+                return None
+            img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+            if img is None:
+                return None
 
         for d in self._detections:
             x1, y1, x2, y2 = d.bbox
@@ -372,9 +394,17 @@ class OcrResultDialog(QDialog):
         # disponible vía PySide6.QtGui — el lazy es solo conceptual.)
         from PySide6.QtGui import QImage  # noqa: PLC0415
 
+        # CRÍTICO: mantener el bytes en un local mientras QImage existe.
+        # Si pasamos `img_rgb.tobytes()` inline, Python descarta el
+        # bytes anonimo en cuanto QImage(...) retorna; QPixmap.fromImage
+        # entonces lee memoria liberada y devuelve un pixmap null sin
+        # avisar. Asignandolo a una variable nombrada el bytes vive
+        # hasta el final del metodo, y QPixmap copia los datos a una
+        # estructura propia antes de retornar.
+        bytes_data = img_rgb.tobytes()
         # bytesPerLine = ancho * channels (3 para RGB888).
         qimg = QImage(
-            img_rgb.tobytes(),
+            bytes_data,
             w,
             h,
             3 * w,
