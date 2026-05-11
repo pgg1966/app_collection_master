@@ -157,44 +157,27 @@ def test_card_changed_signal_exists(
 # ---------------------------------------------------------------------
 
 
-def test_inference_worker_opens_its_own_connection(
-    monkeypatch: pytest.MonkeyPatch,
+def test_inference_worker_passes_db_path_to_run_inference(
     ctx_and_collection: tuple[AppContext, Collection],
     tmp_path,  # type: ignore[no-untyped-def]
 ) -> None:
-    """El worker pide una conn propia al ctx (NO usa la del hilo principal).
+    """El worker pasa `db_path` (no Connection) a `OcrService.run_inference`.
 
-    Verifica el patrón:
-    1. `ctx.create_worker_connection()` se llama dentro de `run()`.
-    2. El `OcrService.run_inference` recibe la conn nueva, NO `ctx.conn`.
-    3. La conexión se cierra al final.
+    `run_inference` abre su propia conn internamente — el worker solo
+    tiene que pasarle el path del ctx. Esto evita el cross-thread
+    error de SQLite.
     """
     from collections_app.views.inventory.ocr_loader_tab import _InferenceWorker
 
     ctx, coll = ctx_and_collection
     assert coll.collection_id is not None
 
-    # Stub del factory del ctx + un fake conn que registramos.
-    opens: list[bool] = []
-    closes: list[object] = []
-
-    class _FakeConn:
-        def close(self) -> None:  # type: ignore[no-untyped-def]
-            closes.append(self)
-
-    def fake_factory(_self):  # type: ignore[no-untyped-def]
-        opens.append(True)
-        return _FakeConn()
-
-    monkeypatch.setattr(ctx.__class__, "create_worker_connection", fake_factory, raising=False)
-
-    # Stub del OcrService: capturamos qué conn le llegó.
-    received_conn: dict[str, object] = {}
+    received: dict[str, object] = {}
 
     class _FakeOcr:
-        def run_inference(self, _img, *, conn, collection_id):  # type: ignore[no-untyped-def]
-            received_conn["conn"] = conn
-            received_conn["cid"] = collection_id
+        def run_inference(self, _img, *, db_path, collection_id):  # type: ignore[no-untyped-def]
+            received["db_path"] = db_path
+            received["cid"] = collection_id
             return ([], [])
 
     image = tmp_path / "x.jpg"
@@ -202,7 +185,7 @@ def test_inference_worker_opens_its_own_connection(
     worker = _InferenceWorker(
         ocr_service=_FakeOcr(),  # type: ignore[arg-type]
         image_path=image,
-        ctx=ctx,
+        db_path=ctx.db_path,
         collection_id=coll.collection_id,
     )
 
@@ -211,41 +194,21 @@ def test_inference_worker_opens_its_own_connection(
 
     worker.run()
 
-    # 1. Pidió una conn al ctx exactamente una vez.
-    assert opens == [True]
-    # 2. La conn que llegó al run_inference NO es la del hilo principal.
-    assert isinstance(received_conn["conn"], _FakeConn)
-    assert received_conn["conn"] is not ctx.conn
-    # 3. La cerró.
-    assert len(closes) == 1
-    # 4. Emitió `finished` con listas vacías.
+    assert received["db_path"] == ctx.db_path
+    assert received["cid"] == coll.collection_id
     assert finished_payloads == [([], [])]
 
 
-def test_inference_worker_closes_connection_on_error(
-    monkeypatch: pytest.MonkeyPatch,
+def test_inference_worker_emits_failed_on_ocr_error(
     ctx_and_collection: tuple[AppContext, Collection],
     tmp_path,  # type: ignore[no-untyped-def]
 ) -> None:
-    """Si `run_inference` levanta OcrError, la conexión se cierra igual."""
+    """Si `run_inference` lanza OcrError, el worker emite `failed`."""
     from collections_app.services.exceptions import OcrModelError
     from collections_app.views.inventory.ocr_loader_tab import _InferenceWorker
 
     ctx, coll = ctx_and_collection
     assert coll.collection_id is not None
-
-    closes: list[object] = []
-
-    class _FakeConn:
-        def close(self) -> None:  # type: ignore[no-untyped-def]
-            closes.append(self)
-
-    monkeypatch.setattr(
-        ctx.__class__,
-        "create_worker_connection",
-        lambda _self: _FakeConn(),
-        raising=False,
-    )
 
     class _FakeOcr:
         def run_inference(self, *_a, **_k):  # type: ignore[no-untyped-def]
@@ -256,7 +219,7 @@ def test_inference_worker_closes_connection_on_error(
     worker = _InferenceWorker(
         ocr_service=_FakeOcr(),  # type: ignore[arg-type]
         image_path=image,
-        ctx=ctx,
+        db_path=ctx.db_path,
         collection_id=coll.collection_id,
     )
     failures: list[str] = []
@@ -265,5 +228,3 @@ def test_inference_worker_closes_connection_on_error(
     worker.run()
 
     assert failures == ["modelo roto"]
-    # Conn cerrada aunque la inferencia rompió.
-    assert len(closes) == 1
