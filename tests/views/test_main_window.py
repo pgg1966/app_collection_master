@@ -116,6 +116,41 @@ def test_main_window_shows_empty_state_when_no_collections(
     assert win.active_detail is None
 
 
+def test_empty_state_message_for_non_admin_directs_to_administrator(
+    qtbot,  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+    empty_ctx: AppContext,
+) -> None:
+    """No-admin: el mensaje del empty state pide contactar al admin
+    (no menciona el menú "Archivo" que para ese usuario no existe)."""
+    from PySide6.QtWidgets import QLabel
+
+    monkeypatch.delenv("COLLECTIONS_ADMIN", raising=False)
+    win = MainWindow(ctx=empty_ctx)
+    qtbot.addWidget(win)
+    label = win._empty_state.findChild(QLabel, "emptyStateLabel")
+    assert label is not None
+    assert "administrador" in label.text().lower()
+    assert "Archivo" not in label.text()
+
+
+def test_empty_state_message_for_admin_keeps_menu_instructions(
+    qtbot,  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+    empty_ctx: AppContext,
+) -> None:
+    """Admin: el mensaje sigue diciendo "Archivo → Nueva colección..."."""
+    from PySide6.QtWidgets import QLabel
+
+    monkeypatch.setenv("COLLECTIONS_ADMIN", "1")
+    win = MainWindow(ctx=empty_ctx)
+    qtbot.addWidget(win)
+    label = win._empty_state.findChild(QLabel, "emptyStateLabel")
+    assert label is not None
+    assert "Archivo" in label.text()
+    assert "Nueva colección" in label.text()
+
+
 def test_main_window_title_default_no_profile(
     qtbot,  # type: ignore[no-untyped-def]
     empty_ctx: AppContext,

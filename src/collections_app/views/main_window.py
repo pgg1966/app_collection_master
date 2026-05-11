@@ -60,19 +60,32 @@ if TYPE_CHECKING:
         CsvImportReport,
     )
 
-_EMPTY_STATE_MESSAGE = (
-    "No hay colecciones cargadas todavía.\n\n"
-    "Cargá una colección desde:\n"
-    "  Archivo → Nueva colección desde CSV..."
-)
+
+def _empty_state_message(admin_enabled: bool) -> str:
+    """Mensaje del empty state según el modo.
+
+    Para admin: instrucciones del menú. Para no-admin: instrucción
+    de contactar al administrador (el menú "Archivo → Nueva colección
+    desde CSV" ya no existe — Prompt 6).
+    """
+    if admin_enabled:
+        return (
+            "No hay colecciones cargadas todavía.\n\n"
+            "Cargá una colección desde:\n"
+            "  Archivo → Nueva colección desde CSV..."
+        )
+    return (
+        "No hay colecciones cargadas todavía.\n\n"
+        "Contactá al administrador para cargar una colección."
+    )
 
 
-def _make_empty_state_widget() -> QWidget:
+def _make_empty_state_widget(admin_enabled: bool) -> QWidget:
     """Placeholder amigable para cuando la DB del profile está sin colecciones."""
     widget = QWidget()
     layout = QVBoxLayout(widget)
     layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    label = QLabel(_EMPTY_STATE_MESSAGE)
+    label = QLabel(_empty_state_message(admin_enabled))
     label.setAlignment(Qt.AlignmentFlag.AlignCenter)
     label.setObjectName("emptyStateLabel")
     layout.addWidget(label)
@@ -92,6 +105,11 @@ class MainWindow(QMainWindow):
         self._ctx = ctx
         self.setWindowTitle(f"Collections{title_suffix}")
         self._active_detail: CollectionDetailView | None = None
+        # Snapshot del flag admin al construir — `_build_ui` y
+        # `_build_menus` lo leen. Si el usuario cambia la env var
+        # después de arrancar la app, hay que reiniciar (no la
+        # re-leemos en runtime).
+        self._admin_enabled = os.environ.get("COLLECTIONS_ADMIN") == "1"
         self._build_ui()
         self._build_menus()
         self._wire_signals()
@@ -108,7 +126,7 @@ class MainWindow(QMainWindow):
     def _build_ui(self: MainWindow) -> None:
         self._selector = CollectionSelectorView(collections_service=self._ctx.collections)
         self._content_stack = QStackedWidget()
-        self._empty_state = _make_empty_state_widget()
+        self._empty_state = _make_empty_state_widget(self._admin_enabled)
         self._content_stack.addWidget(self._empty_state)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -133,7 +151,7 @@ class MainWindow(QMainWindow):
         (Cards, Colecciones, Códigos). Los items admin siempre quedan
         enabled — la rama no-admin no los crea.
         """
-        admin_enabled = os.environ.get("COLLECTIONS_ADMIN") == "1"
+        admin_enabled = self._admin_enabled
 
         if not admin_enabled:
             salir = self.menuBar().addAction(self.tr("&Salir"))
