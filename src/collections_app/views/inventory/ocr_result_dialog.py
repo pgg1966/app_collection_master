@@ -181,13 +181,20 @@ class OcrResultDialog(QDialog):
         self._build_ui()
 
     def _resize_to_screen(self: OcrResultDialog) -> None:
-        """Tamaño inicial = 85% ancho × 80% alto de la pantalla principal."""
+        """Tamaño inicial = pantalla completa disponible.
+
+        El dialog necesita espacio para mostrar la foto en grande +
+        tabla de detecciones a la derecha. Antes era 85%×80%, pero la
+        foto seguía quedando chica; ahora arranca con el tamaño
+        máximo y el usuario puede desmaximizar si quiere.
+        """
         screen = QApplication.primaryScreen()
         if screen is None:  # defensive — entornos sin display
             self.resize(1200, 800)
             return
         geo = screen.availableGeometry()
-        self.resize(int(geo.width() * 0.85), int(geo.height() * 0.80))
+        self.resize(geo.width(), geo.height())
+        self.move(geo.topLeft())
 
     def _build_ui(self: OcrResultDialog) -> None:
         outer = QVBoxLayout(self)
@@ -199,14 +206,6 @@ class OcrResultDialog(QDialog):
         # panel. Si la imagen no se pudo leer, fallback a un QLabel
         # con texto explicativo.
         annotated = self._annotate_image()
-        # TEMP DIAG (Prompt 6 / iteración B5): pendiente confirmar
-        # con el usuario por qué el panel izquierdo aparece colapsado.
-        logger.warning(
-            "annotated pixmap: null=%s size=%sx%s",
-            annotated.isNull(),
-            annotated.width(),
-            annotated.height(),
-        )
         if not annotated.isNull():
             self._image_label: QLabel = _ScaledImageLabel(annotated)
         else:
@@ -224,8 +223,12 @@ class OcrResultDialog(QDialog):
 
         # Derecha: header + tabla + botones del flow. Los botones viven
         # en este panel (asociados visualmente a la tabla) en lugar del
-        # outer layout del dialog.
+        # outer layout del dialog. `setMaximumWidth` + Preferred/Expanding
+        # acotan el ancho de la lista a ~420px; el sobrante horizontal
+        # se lo lleva la foto.
         right = QWidget()
+        right.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+        right.setMaximumWidth(420)
         right_layout = QVBoxLayout(right)
         n_with_card = sum(1 for d in self._detections if d.card_id is not None)
         n_total = len(self._detections)
@@ -274,14 +277,10 @@ class OcrResultDialog(QDialog):
         right_layout.addLayout(btn_row)
 
         splitter.addWidget(right)
-        # 50/50 entre foto y tabla. Qt escala estos valores
-        # proporcionalmente al ancho real del splitter; con stretch
-        # factor 1:1 cualquier resize mantiene la proporción.
-        splitter.setSizes([1, 1])
+        # La foto absorbe todo el espacio extra; la lista queda en
+        # su ancho preferido (acotado por `setMaximumWidth(420)` arriba).
         splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 1)
-        # TEMP DIAG (Prompt 6 / iteración B5).
-        logger.warning("splitter sizes after setSizes: %s", splitter.sizes())
+        splitter.setStretchFactor(1, 0)
         outer.addWidget(splitter, 1)
 
         outer.addWidget(
