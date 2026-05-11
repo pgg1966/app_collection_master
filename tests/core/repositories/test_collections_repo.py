@@ -122,6 +122,35 @@ def test_update_persists_ocr_model_filename(repo: CollectionsRepository, header_
     assert fetched.ocr_model_filename == "ocr_99.pt"
 
 
+def test_create_default_ocr_guide_filename_is_none(
+    repo: CollectionsRepository, header_id: int
+) -> None:
+    """Sin pasar `ocr_guide_filename` queda None (sin imagen de guía)."""
+    saved = repo.create(_make(header_id, collection_name="NoGuide"))
+    fetched = repo.get_by_id(saved.collection_id or 0)
+    assert fetched is not None
+    assert fetched.ocr_guide_filename is None
+
+
+def test_create_persists_ocr_guide_filename(repo: CollectionsRepository, header_id: int) -> None:
+    saved = repo.create(
+        _make(header_id, collection_name="WithGuide", ocr_guide_filename="ocr_guide_42.jpg")
+    )
+    fetched = repo.get_by_id(saved.collection_id or 0)
+    assert fetched is not None
+    assert fetched.ocr_guide_filename == "ocr_guide_42.jpg"
+
+
+def test_update_persists_ocr_guide_filename(repo: CollectionsRepository, header_id: int) -> None:
+    """Setear la imagen después de crear debe persistir tras `update`."""
+    saved = repo.create(_make(header_id, collection_name="LateGuide"))
+    saved.ocr_guide_filename = "ocr_guide_99.png"
+    repo.update(saved)
+    fetched = repo.get_by_id(saved.collection_id or 0)
+    assert fetched is not None
+    assert fetched.ocr_guide_filename == "ocr_guide_99.png"
+
+
 def test_create_persists_requires_code_and_field_name(
     repo: CollectionsRepository, header_id: int
 ) -> None:

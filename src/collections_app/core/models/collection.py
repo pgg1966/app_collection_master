@@ -28,6 +28,11 @@ class Collection:
             para detectar las cards de esta colección (Sesión 5d). None
             si no hay modelo configurado. El path completo se reconstruye
             con `get_models_dir() / ocr_model_filename`.
+        ocr_guide_filename: imagen de instrucciones (jpg/png/...) que el
+            OcrLoaderTab muestra antes de cargar fotos (ej. cómo orientar
+            el celular). None si no hay guía configurada. El path
+            completo se reconstruye con
+            `get_images_dir() / ocr_guide_filename`.
     """
 
     collection_id: int | None
@@ -42,3 +47,4 @@ class Collection:
     album_rows: int = 4
     album_orientation: str = "portrait"
     ocr_model_filename: str | None = None
+    ocr_guide_filename: str | None = None
