@@ -1,14 +1,15 @@
-"""Architecture test — torch/ultralytics SOLO en imports lazy (Sesión 5d).
+"""Architecture test — dependencias OCR SOLO en imports lazy (Sesión 5d).
 
-Las dependencias pesadas del OCR (`torch`, `ultralytics`) NO van en el
-`.exe` base; se instalan bajo demanda desde la app. Si algún archivo
-de `src/` las importa a nivel de módulo, la app crashea al arrancar
-con `ModuleNotFoundError` cuando el usuario todavía no instaló nada.
+Las dependencias pesadas del OCR (`torch`, `torchvision`, `ultralytics`,
+`easyocr`, `cv2`) NO van en el `.exe` base; se instalan bajo demanda
+desde la app. Si algún archivo de `src/` las importa a nivel de módulo,
+la app crashea al arrancar con `ModuleNotFoundError` cuando el usuario
+todavía no instaló nada.
 
 Este test recorre todos los `.py` de `src/collections_app/` y verifica
-que ninguna línea que comience con `import torch`, `from torch`,
-`import ultralytics` o `from ultralytics` aparezca en el nivel de
-módulo (sin indentación).
+que ninguna línea que comience con `import <pkg>` o `from <pkg>`
+(para los packages prohibidos) aparezca en el nivel de módulo (sin
+indentación).
 
 Imports lazy dentro de funciones/métodos están permitidos (van con
 indentación → no matchean este check).
@@ -21,8 +22,12 @@ from pathlib import Path
 
 import pytest
 
+# Tupla de prefijos prohibidos a nivel de módulo. Cualquier línea que
+# arranque con `import X` o `from X.foo` para alguno de estos packages
+# rompe el test.
+_FORBIDDEN_PKGS = ("torch", "torchvision", "ultralytics", "easyocr", "cv2")
 _FORBIDDEN_TOP_LEVEL = re.compile(
-    r"^(import torch|from torch|import ultralytics|from ultralytics)\b",
+    r"^(?:import|from)\s+(?:" + "|".join(_FORBIDDEN_PKGS) + r")\b",
     re.MULTILINE,
 )
 
