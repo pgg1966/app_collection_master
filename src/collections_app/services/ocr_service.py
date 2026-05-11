@@ -1,34 +1,37 @@
-"""Service de reconocimiento óptico de cards (Sesión 5d).
+"""Service de reconocimiento óptico de cards (Sesión 5d / fix pipeline).
 
-Carga un modelo YOLO entrenado para una colección, corre inferencia
-sobre fotos, parsea cada label y resuelve cada detección contra el
-catálogo de cards de la colección.
+El pipeline completo, ejecutado por `run_inference`:
 
-**Imports lazy (regla crítica del prompt 5d):** ningún import de
-`torch` o `ultralytics` aparece a nivel de módulo. Solo dentro de los
-métodos que efectivamente los necesitan, marcados con `noqa: PLC0415`.
-Esto permite que la app arranque sin esas dependencias y muestre el
-Estado 1 (instalación) en la tab de OCR.
+1. `cv2.imread` carga la foto.
+2. YOLO detecta bounding boxes de badges (`self._model(img, conf=0.4)`).
+3. Para cada bbox: recortar con 4px de padding.
+4. `ocr_reader.leer_badge(crop)` lee texto crudo con EasyOCR.
+5. `ocr_validator.build_validator(...)` arma un validador desde la
+   DB de la colección activa; su `validar_codigo` corrige errores
+   típicos (G→6, O→0) y valida contra el catálogo.
+6. Para cada código válido, buscar la card en el catálogo y armar el
+   `OcrDetection` con `card_id` y `card_name` resueltos.
 
-`is_available()` es un staticmethod que se puede llamar sin instanciar
-el service: el caller la usa para decidir el estado de la UI antes de
-intentar construir un `OcrService`.
+**Imports lazy obligatorios:** ningún import de `torch`, `ultralytics`,
+`easyocr` o `cv2` aparece a nivel de módulo. Los 4 viven dentro de los
+métodos que los necesitan. El test
+`tests/architecture/test_no_top_level_torch_imports.py` lo enforcea.
 
-`run_inference` retorna una tupla `(detections, parse_errors)` para
-que la UI pueda mostrar tanto las cards reconocidas como los labels
-que no pudieron parsearse, sin que estos últimos rompan el flow.
+**SQLite cross-thread:** `run_inference` recibe `db_path` y abre su
+propia `sqlite3.Connection` adentro (el caller — un QThread —
+no puede usar la conn del hilo principal sin que SQLite proteste).
+La conn se cierra en `finally`.
 """
 
 from __future__ import annotations
 
-import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from collections_app.core.db.connection import create_connection
 from collections_app.core.models.ocr_detection import (
     OcrDetection,
     OcrParseError,
-    parse_label,
 )
 from collections_app.core.repositories.cards_repo import CardsRepository
 from collections_app.core.repositories.collections_repo import CollectionsRepository
@@ -38,8 +41,16 @@ if TYPE_CHECKING:
     from collections_app.core.models.card import Card
 
 
+# Confianza mínima que YOLO debe reportar para considerar una detección.
+# Igual que el detector standalone del usuario.
+_YOLO_CONF_THRESHOLD = 0.4
+# Padding (pixeles) alrededor del bbox antes del crop. Mejora la lectura
+# de EasyOCR — el bbox de YOLO suele recortar muy ajustado al texto.
+_CROP_PADDING = 4
+
+
 class OcrService:
-    """Inferencia YOLO + resolución contra el catálogo local."""
+    """Pipeline YOLO + EasyOCR + validador dinámico."""
 
     @staticmethod
     def is_available() -> bool:
@@ -77,7 +88,7 @@ class OcrService:
             ) from exc
         try:
             self._model = YOLO(str(model_path))
-        except Exception as exc:  # noqa: BLE001 — versión incompatible, archivo corrupto, etc.
+        except Exception as exc:  # noqa: BLE001 — versión incompatible, etc.
             raise OcrModelError(f"no se pudo cargar el modelo {model_path.name}: {exc}") from exc
         self._model_path = model_path
 
@@ -85,95 +96,122 @@ class OcrService:
         self: OcrService,
         image_path: Path,
         *,
-        conn: sqlite3.Connection,
+        db_path: str,
         collection_id: int,
     ) -> tuple[list[OcrDetection], list[OcrParseError]]:
-        """Corre YOLO sobre `image_path` y resuelve cada label.
+        """Corre el pipeline completo sobre `image_path`.
+
+        Pasos:
+        1. cv2.imread carga la imagen.
+        2. YOLO devuelve bounding boxes con su confianza.
+        3. Para cada bbox: crop con padding → EasyOCR lee texto crudo.
+        4. El validador (construido desde la DB en `build_validator`)
+           lo convierte en código canónico `"XXX N"` o `None`.
+        5. Cada `"XXX N"` se resuelve contra el catálogo local de
+           cards. Si la card existe, `card_id` y `card_name` se
+           rellenan; si no, queda con `card_id=None` y `card_name=""`
+           (la UI muestra warning).
+        6. Lecturas que el validador rechaza se reportan como
+           `OcrParseError` para que el user las vea como detección no
+           reconocida.
 
         Args:
             image_path: foto a procesar.
-            conn: conexión SQLite usada para resolver `card_id` /
-                `card_name` contra el catálogo local.
-            collection_id: collection sobre la que resolver. Determina
-                también el flag `requires_code` que rige el parser.
+            db_path: ruta a la DB de la app. El service abre su propia
+                conn (SQLite no permite conn cross-thread).
+            collection_id: collection contra la que validar/resolver.
 
         Returns:
-            Tupla `(detections, parse_errors)`:
-
-            - `detections`: cada label parseable se devuelve como
-              `OcrDetection`, con `card_id` y `card_name` resueltos
-              contra la DB (o `None` / `""` si no matcheó nada local).
-            - `parse_errors`: cada label no parseable se devuelve como
-              `OcrParseError` con el `reason` correspondiente.
+            `(detections, parse_errors)`.
         """
-        collections_repo = CollectionsRepository(conn)
-        collection = collections_repo.get_by_id(collection_id)
-        if collection is None:
-            raise OcrModelError(f"collection_id={collection_id} no existe en esta DB")
+        import cv2  # noqa: PLC0415
 
-        cards_repo = CardsRepository(conn)
-        cards_index: dict[tuple[str, int], Card] = {
-            (c.code_id, c.card_number): c
-            for c in cards_repo.list_by_collection(collection_id)
-            if c.card_id is not None
-        }
+        from collections_app.services.ocr_reader import leer_badge  # noqa: PLC0415
+        from collections_app.services.ocr_validator import build_validator  # noqa: PLC0415
 
-        detections: list[OcrDetection] = []
-        errors: list[OcrParseError] = []
+        img = cv2.imread(str(image_path))
+        if img is None:
+            raise OcrModelError(f"no se pudo leer la imagen: {image_path}")
 
-        for raw_label, confidence in self._raw_inference(image_path):
-            parsed = parse_label(raw_label, requires_code=collection.requires_code)
-            if parsed is None:
-                errors.append(
-                    OcrParseError(
-                        raw_label=raw_label,
-                        confidence=confidence,
-                        reason=(
-                            "formato no reconocido"
-                            if not collection.requires_code or "-" in raw_label
-                            else "falta código"
-                        ),
+        # `create_connection` configura `row_factory=sqlite3.Row` y los
+        # PRAGMA del proyecto. Igual queda en este hilo del worker, no
+        # se comparte con el hilo principal.
+        conn = create_connection(db_path)
+        try:
+            collection = CollectionsRepository(conn).get_by_id(collection_id)
+            if collection is None:
+                raise OcrModelError(f"collection_id={collection_id} no existe en esta DB")
+
+            validator = build_validator(collection_id, conn)
+
+            cards_repo = CardsRepository(conn)
+            cards_index: dict[tuple[str, int], Card] = {
+                (c.code_id, c.card_number): c
+                for c in cards_repo.list_by_collection(collection_id)
+                if c.card_id is not None
+            }
+
+            yolo_results = self._model(img, conf=_YOLO_CONF_THRESHOLD, verbose=False)
+
+            detections: list[OcrDetection] = []
+            errors: list[OcrParseError] = []
+            h_img, w_img = img.shape[:2]
+
+            for result in yolo_results:
+                boxes = getattr(result, "boxes", None)
+                if boxes is None:
+                    continue
+                for box in boxes:
+                    xyxy = box.xyxy[0].cpu().numpy().astype(int)
+                    confidence = float(box.conf[0])
+                    x1, y1, x2, y2 = xyxy
+                    # Padding clamped a la imagen.
+                    x1 = max(0, x1 - _CROP_PADDING)
+                    y1 = max(0, y1 - _CROP_PADDING)
+                    x2 = min(w_img, x2 + _CROP_PADDING)
+                    y2 = min(h_img, y2 + _CROP_PADDING)
+                    crop = img[y1:y2, x1:x2]
+
+                    texto_raw = leer_badge(crop)
+                    codigo = validator.validar_codigo(texto_raw)
+
+                    if codigo is None:
+                        errors.append(
+                            OcrParseError(
+                                raw_label=texto_raw or "",
+                                confidence=confidence,
+                                reason="no matchea ningún código válido",
+                            )
+                        )
+                        continue
+
+                    # `validar_codigo` siempre devuelve "CODE NUMBER" cuando no
+                    # es None. Defensivo: si el formato cambia, no crashear.
+                    parts = codigo.split(" ", 1)
+                    if len(parts) != 2 or not parts[1].isdigit():
+                        errors.append(
+                            OcrParseError(
+                                raw_label=texto_raw or "",
+                                confidence=confidence,
+                                reason=f"formato inesperado del validador: {codigo!r}",
+                            )
+                        )
+                        continue
+                    code_id = parts[0]
+                    card_number = int(parts[1])
+
+                    card = cards_index.get((code_id, card_number))
+                    detections.append(
+                        OcrDetection(
+                            raw_label=codigo,
+                            code_id=code_id,
+                            card_number=card_number,
+                            confidence=confidence,
+                            card_name=card.card_name if card else "",
+                            card_id=card.card_id if card else None,
+                        )
                     )
-                )
-                continue
-            code_id, card_number = parsed
-            # Resolución contra el catálogo. Si no matchea (ej. card del
-            # álbum equivocado), se incluye igual con card_id=None y
-            # card_name="" para que la UI pueda mostrarlo como warning.
-            card = cards_index.get((code_id, card_number))
-            detections.append(
-                OcrDetection(
-                    raw_label=raw_label,
-                    code_id=code_id,
-                    card_number=card_number,
-                    confidence=confidence,
-                    card_name=card.card_name if card else "",
-                    card_id=card.card_id if card else None,
-                )
-            )
 
-        return detections, errors
-
-    # ------------------------------------------------------------------
-    # Helpers internos
-    # ------------------------------------------------------------------
-
-    def _raw_inference(self: OcrService, image_path: Path) -> list[tuple[str, float]]:
-        """Corre YOLO y devuelve `[(label, confidence), ...]`.
-
-        Aislado en su propio método para que los tests puedan
-        mockearlo sin cargar torch.
-        """
-        results = self._model(str(image_path))
-        out: list[tuple[str, float]] = []
-        for result in results:
-            boxes = getattr(result, "boxes", None)
-            names = getattr(result, "names", None)
-            if boxes is None or names is None:
-                continue
-            for cls_tensor, conf_tensor in zip(boxes.cls, boxes.conf, strict=True):
-                cls_idx = int(cls_tensor.item())
-                conf = float(conf_tensor.item())
-                label = str(names.get(cls_idx, "") if isinstance(names, dict) else names[cls_idx])
-                out.append((label, conf))
-        return out
+            return detections, errors
+        finally:
+            conn.close()
