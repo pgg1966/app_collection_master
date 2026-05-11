@@ -233,6 +233,26 @@ def test_all_rows_checked_by_default(
         assert item.checkState() == Qt.CheckState.Checked
 
 
+def test_close_event_treated_as_cancel_all(
+    qtbot,  # type: ignore[no-untyped-def]
+    tmp_path: Path,
+    ctx_and_collection: tuple[AppContext, Collection],
+    _mock_annotate: None,
+) -> None:
+    """Cerrar con X (closeEvent) setea cancel_all=True y rechaza."""
+    from PySide6.QtGui import QCloseEvent
+
+    dialog = _build_dialog(ctx_and_collection, tmp_path, [_make_detection()])
+    qtbot.addWidget(dialog)
+
+    # Simular el closeEvent que dispararia el WM al clickear la X.
+    dialog.closeEvent(QCloseEvent())
+
+    assert dialog.cancel_all is True
+    assert dialog.skip is False
+    assert dialog.result() == QDialog.DialogCode.Rejected
+
+
 def test_add_manual_button_opens_manual_card_dialog(
     qtbot,  # type: ignore[no-untyped-def]
     monkeypatch: pytest.MonkeyPatch,

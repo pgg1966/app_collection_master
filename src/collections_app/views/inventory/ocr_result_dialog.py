@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QBrush, QColor, QFont, QPixmap, QResizeEvent
+from PySide6.QtGui import QBrush, QCloseEvent, QColor, QFont, QPixmap, QResizeEvent
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -332,6 +332,20 @@ class OcrResultDialog(QDialog):
 
     def _on_cancel_all(self: OcrResultDialog) -> None:
         self.cancel_all = True
+        self.reject()
+
+    def closeEvent(self: OcrResultDialog, event: QCloseEvent) -> None:  # noqa: N802
+        """Cerrar con la X de la ventana se trata como 'Cancelar todo'.
+
+        Sin este override, cerrar con X dispararía un `reject()` sin
+        flags y el caller interpretaría la salida como `skip` (avanzaría
+        a la siguiente foto sin cargar la actual). Asociar la X a
+        `cancel_all` es más alineado con la expectativa del usuario:
+        cerrar el modal aborta el batch.
+        """
+        self.cancel_all = True
+        self.skip = False
+        event.accept()
         self.reject()
 
     def _on_add_manual(self: OcrResultDialog) -> None:
