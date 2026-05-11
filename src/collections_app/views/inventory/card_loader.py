@@ -37,7 +37,6 @@ from PySide6.QtWidgets import (
     QCompleter,
     QFrame,
     QGridLayout,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -52,7 +51,13 @@ from collections_app.core.models.card import Card
 from collections_app.core.models.collection import Collection
 from collections_app.core.models.inventory_item import InventoryItem
 from collections_app.services.exceptions import AmbiguousCardError, InventoryError
-from collections_app.views.admin.inventory_import_dialog import InventoryImportPanel
+
+# Prompt 6: `InventoryImportPanel` ya NO se embebe acá — vive como
+# panel independiente en `CargasTab`. Antes el card_loader hacía
+# un split horizontal con el form a la izquierda y el importer a
+# la derecha (sec 7.1 política aplicada en commits 5b). Mover el
+# panel a `CargasTab` evita la duplicación y permite que el OCR
+# tab tenga su propio espacio en el mismo nivel.
 from collections_app.views.shared.theme import (
     INPUT_BG_ALTA,
     INPUT_BG_BAJA,
@@ -204,9 +209,6 @@ class CardLoaderView(QWidget):
             self._clear_completer()
             self._set_code_visible(False)
         self._reset_form()
-        # Propagar al panel embebido para que apunte a la nueva collection
-        # y limpie estado (file picker + resultado anterior).
-        self._import_panel.set_active_collection(collection)
 
     # ------------------------------------------------------------------
     # Construcción de la UI
@@ -215,21 +217,16 @@ class CardLoaderView(QWidget):
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
         outer.setContentsMargins(Spacing.LG, Spacing.LG, Spacing.LG, Spacing.LG)
+        outer.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
 
-        # Layout horizontal: a la izquierda el formulario manual (compacto,
-        # ~550px), a la derecha el panel de import (se estira al espacio
-        # restante). Stretch 0:1 para que el form no se infle.
-        split = QHBoxLayout()
-        split.setSpacing(Spacing.LG)
-
-        left_group = QGroupBox(self.tr("Carga manual"))
-        left_group.setMaximumWidth(550)
-        left_layout = QVBoxLayout(left_group)
-        left_layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
-
+        # Prompt 6: el split horizontal con el importer a la derecha
+        # se eliminó. El formulario manual ahora ocupa todo el ancho
+        # disponible del frame "Manual" del CargasTab, centrado y con
+        # `setMaximumWidth(500)` para que no se infle a anchos
+        # ilegibles.
         container = QWidget()
         container.setMaximumWidth(500)
-        left_layout.addWidget(container, alignment=Qt.AlignmentFlag.AlignHCenter)
+        outer.addWidget(container, alignment=Qt.AlignmentFlag.AlignHCenter)
 
         grid = QGridLayout(container)
         grid.setHorizontalSpacing(Spacing.MD)
@@ -307,33 +304,11 @@ class CardLoaderView(QWidget):
         self._status_label = QLabel("")
         self._status_label.setVisible(False)
         self._status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        left_layout.addWidget(self._status_label, alignment=Qt.AlignmentFlag.AlignHCenter)
-        left_layout.addStretch()
-
-        split.addWidget(left_group, 0)
-
-        # Lado derecho: panel de import embebido. Cuando termina un import
-        # exitoso, propagamos `card_changed` para que los demás tabs se
-        # refresquen igual que tras un alta manual.
-        right_group = QGroupBox(self.tr("Importar desde archivo"))
-        right_layout = QVBoxLayout(right_group)
-        self._import_panel = InventoryImportPanel(ctx=self._ctx, collection=self.collection)
-        self._import_panel.import_completed.connect(self._on_import_completed)
-        right_layout.addWidget(self._import_panel)
-        split.addWidget(right_group, 1)
-
-        outer.addLayout(split, 1)
+        outer.addWidget(self._status_label, alignment=Qt.AlignmentFlag.AlignHCenter)
+        outer.addStretch()
 
         # Tinte inicial del frame de operación según el modo activo (Alta).
         self._apply_input_mode_styling()
-
-    def _on_import_completed(self, _report: object) -> None:
-        """Propaga `card_changed` para refrescar inventory/history/etc.
-
-        El panel ya muestra el reporte internamente; acá solo notificamos
-        a los demás tabs vía el mismo signal que dispara una alta manual.
-        """
-        self.card_changed.emit()
 
     def _build_operation_row(self) -> QFrame:
         """Frame contenedor de los radios Alta/Baja, coloreable por modo.

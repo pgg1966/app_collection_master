@@ -247,43 +247,17 @@ def _qapp() -> Iterator[QApplication | None]:
     yield app  # type: ignore[misc]
 
 
-def test_card_loader_embeds_inventory_import_panel(
+def test_card_loader_no_longer_embeds_inventory_import_panel(
     qtbot,  # type: ignore[no-untyped-def]
     app_ctx: AppContext,
 ) -> None:
-    """CardLoaderView embebe un InventoryImportPanel lado a lado con el form."""
-    from collections_app.views.admin.inventory_import_dialog import (
-        InventoryImportPanel,
-    )
+    """Prompt 6: el panel se movió a `CargasTab` como frame independiente.
 
+    `CardLoaderView` ya no tiene `_import_panel` — el split horizontal
+    interno se eliminó y el form vive solo en el frame "Manual" del
+    `CargasTab`.
+    """
     coll = app_ctx.collections.list_all()[0]
     view = CardLoaderView(ctx=app_ctx, collection=coll)
     qtbot.addWidget(view)
-    assert isinstance(view._import_panel, InventoryImportPanel)
-
-
-def test_card_loader_set_active_collection_propagates_to_panel(
-    qtbot,  # type: ignore[no-untyped-def]
-    app_ctx: AppContext,
-) -> None:
-    """`set_active_collection` propaga la nueva collection al panel embebido."""
-    colls = app_ctx.collections.list_all()
-    first = colls[0]
-    other = app_ctx.collections.create(
-        Collection(
-            collection_id=None,
-            collection_name="Otra",
-            card_count=0,
-            requires_code=False,
-            code_field_name=None,
-            code_header_id=first.code_header_id,
-        )
-    )
-    app_ctx.conn.commit()
-
-    view = CardLoaderView(ctx=app_ctx, collection=first)
-    qtbot.addWidget(view)
-    assert view._import_panel._collection.collection_name == first.collection_name
-
-    view.set_active_collection(other)
-    assert view._import_panel._collection.collection_name == "Otra"
+    assert not hasattr(view, "_import_panel")

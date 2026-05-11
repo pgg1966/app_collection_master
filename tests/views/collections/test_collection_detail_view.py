@@ -13,7 +13,7 @@ from collections_app.views.collections.history_tab import HistoryTab
 from collections_app.views.collections.inventory_tab import InventoryTab
 from collections_app.views.exchange.exchange_tab import ExchangeTab
 from collections_app.views.inventory.card_loader import CardLoaderView
-from collections_app.views.inventory.loader_tab import LoaderTab
+from collections_app.views.inventory.loader_tab import CargasTab
 from collections_app.views.reports.reports_view import ReportsView
 from collections_app.views.stats.stats_view import StatsView
 
@@ -30,8 +30,8 @@ def test_detail_view_constructs_with_six_tabs(
     view = CollectionDetailView(ctx=ctx_with_demo, collection=demo_collection)
     qtbot.addWidget(view)
     assert view._tabs.count() == 6
-    assert isinstance(view._tabs.widget(0), LoaderTab)
-    # El sub-tab Manual sigue siendo la CardLoaderView preservada.
+    assert isinstance(view._tabs.widget(0), CargasTab)
+    # El frame Manual sigue siendo la CardLoaderView preservada.
     assert isinstance(view._tabs.widget(0).manual, CardLoaderView)
     assert isinstance(view._tabs.widget(1), ReportsView)
     assert isinstance(view._tabs.widget(2), ExchangeTab)
@@ -103,7 +103,7 @@ def test_loader_tab_uses_ctx_inventory_service(
     view = CollectionDetailView(ctx=ctx_with_demo, collection=demo_collection)
     qtbot.addWidget(view)
     # Acceso al atributo privado _service del CardLoaderView vía el sub-tab
-    # Manual del LoaderTab wrapper (Sesión 5d).
+    # Manual del CargasTab wrapper (Prompt 6 / Sesión 5d).
     assert view.loader_tab.manual._ctx is ctx_with_demo
     assert view.loader_tab.manual._service is ctx_with_demo.inventory
 
