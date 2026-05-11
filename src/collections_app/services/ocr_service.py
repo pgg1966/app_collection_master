@@ -42,8 +42,12 @@ if TYPE_CHECKING:
 
 
 # Confianza mínima que YOLO debe reportar para considerar una detección.
-# Igual que el detector standalone del usuario.
-_YOLO_CONF_THRESHOLD = 0.4
+# Bajamos a 0.25 (post-smoke 5d) porque el validador `ocr_validator`
+# filtra los falsos positivos: si el texto del crop no matchea ningún
+# código del catálogo, la "detección" va a `OcrParseError` y la UI
+# la marca como no reconocida. Bajar el umbral captura badges con
+# ángulos / iluminación marginales sin agregar ruido para el user.
+_YOLO_CONF_THRESHOLD = 0.25
 # Padding (pixeles) alrededor del bbox antes del crop. Mejora la lectura
 # de EasyOCR — el bbox de YOLO suele recortar muy ajustado al texto.
 _CROP_PADDING = 4
