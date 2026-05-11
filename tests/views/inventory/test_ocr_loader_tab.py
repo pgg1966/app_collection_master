@@ -263,7 +263,7 @@ def test_format_install_error_translates_acceso_denegado_es() -> None:
 
 
 # ---------------------------------------------------------------------
-# _populate_results_table — defaults post-smoke 5d
+# Flow Estado 3 — dispatching del diálogo (Prompt 6 / B4)
 # ---------------------------------------------------------------------
 
 
@@ -289,14 +289,12 @@ def _make_detection(
     )
 
 
-def test_populate_marks_all_rows_checked_by_default(
+def _ready_tab(
     qtbot,  # type: ignore[no-untyped-def]
     monkeypatch: pytest.MonkeyPatch,
     ctx_and_collection: tuple[AppContext, Collection],
-) -> None:
-    """Todas las filas vienen Checked por default, sin importar confidence."""
-    from PySide6.QtCore import Qt
-
+) -> tuple[OcrLoaderTab, AppContext, Collection]:
+    """Construye una tab en estado Ready para los tests del flow."""
     monkeypatch.setattr(
         "collections_app.views.inventory.ocr_loader_tab.OcrInstallService.is_installed",
         staticmethod(lambda: True),
@@ -310,57 +308,173 @@ def test_populate_marks_all_rows_checked_by_default(
     ctx, coll = ctx_and_collection
     tab = OcrLoaderTab(ctx=ctx, collection=coll)
     qtbot.addWidget(tab)
-
-    detections = [
-        _make_detection(confidence=0.92),  # alta
-        _make_detection(confidence=0.50),  # baja (antes hubiera quedado destildada)
-        _make_detection(confidence=0.27, card_id=None, card_name=""),  # no en catálogo
-    ]
-    tab._populate_results_table(detections)
-
-    for row in range(tab._results_table.rowCount()):
-        item = tab._results_table.item(row, 0)
-        assert item is not None
-        assert item.checkState() == Qt.CheckState.Checked
+    return tab, ctx, coll
 
 
-def test_populate_unknown_card_rows_styled_in_orange(
+def test_inference_finished_opens_dialog_and_applies_on_accept(
+    qtbot,  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+    ctx_and_collection: tuple[AppContext, Collection],
+    tmp_path,  # type: ignore[no-untyped-def]
+) -> None:
+    """Al terminar inferencia se abre el diálogo; si vuelve Accepted, aplica."""
+    from PySide6.QtWidgets import QDialog
+
+    tab, _, _ = _ready_tab(qtbot, monkeypatch, ctx_and_collection)
+
+    # Seteamos pending_paths para que _on_inference_finished encuentre la foto.
+    image = tmp_path / "foto.jpg"
+    image.write_bytes(b"\xff\xd8\xff")
+    tab._pending_paths = [image]
+    tab._current_index = 0
+
+    d_known = _make_detection(card_id=42)
+    captured: dict[str, object] = {}
+
+    class _FakeDialog:
+        def __init__(self, **kwargs):  # type: ignore[no-untyped-def]
+            captured["init_kwargs"] = kwargs
+            self.skip = False
+            self.cancel_all = False
+
+        def exec(self):  # type: ignore[no-untyped-def]
+            return QDialog.DialogCode.Accepted
+
+        def selected_detections(self):  # type: ignore[no-untyped-def]
+            return [d_known]
+
+    monkeypatch.setattr(
+        "collections_app.views.inventory.ocr_loader_tab.OcrResultDialog",
+        _FakeDialog,
+    )
+    applied: list[tuple[int, str, int, int]] = []
+    monkeypatch.setattr(
+        tab._ctx.inventory.__class__,
+        "add_card",
+        lambda self, cid, code, num, qty: applied.append((cid, code, num, qty)),
+    )
+    # `_process_next_photo` reentraría al flow real; lo neutralizamos —
+    # solo queremos verificar el dispatch del primer diálogo.
+    monkeypatch.setattr(tab, "_process_next_photo", lambda: None)
+
+    tab._on_inference_finished([d_known], [])
+
+    assert captured["init_kwargs"]["image_path"] == image  # type: ignore[index]
+    assert len(applied) == 1
+    assert tab._current_index == 1
+    assert tab._loaded_count == 1
+
+
+def test_inference_finished_skip_advances_without_applying(
+    qtbot,  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+    ctx_and_collection: tuple[AppContext, Collection],
+    tmp_path,  # type: ignore[no-untyped-def]
+) -> None:
+    """`skip=True`: avanza el índice, NO toca inventario."""
+    tab, _, _ = _ready_tab(qtbot, monkeypatch, ctx_and_collection)
+    image = tmp_path / "foto.jpg"
+    image.write_bytes(b"\xff\xd8\xff")
+    tab._pending_paths = [image]
+    tab._current_index = 0
+
+    class _FakeDialog:
+        def __init__(self, **_):  # type: ignore[no-untyped-def]
+            self.skip = True
+            self.cancel_all = False
+
+        def exec(self):  # type: ignore[no-untyped-def]
+            return 0
+
+        def selected_detections(self):  # type: ignore[no-untyped-def]
+            return []
+
+    monkeypatch.setattr(
+        "collections_app.views.inventory.ocr_loader_tab.OcrResultDialog",
+        _FakeDialog,
+    )
+    applied: list[object] = []
+    monkeypatch.setattr(
+        tab._ctx.inventory.__class__,
+        "add_card",
+        lambda *a, **k: applied.append((a, k)),
+    )
+    monkeypatch.setattr(tab, "_process_next_photo", lambda: None)
+
+    tab._on_inference_finished([_make_detection()], [])
+
+    assert applied == []
+    assert tab._current_index == 1
+
+
+def test_inference_finished_cancel_all_short_circuits_to_summary(
+    qtbot,  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+    ctx_and_collection: tuple[AppContext, Collection],
+    tmp_path,  # type: ignore[no-untyped-def]
+) -> None:
+    """`cancel_all=True`: llama directamente a `_show_final_summary`."""
+    tab, _, _ = _ready_tab(qtbot, monkeypatch, ctx_and_collection)
+    image = tmp_path / "foto.jpg"
+    image.write_bytes(b"\xff\xd8\xff")
+    tab._pending_paths = [image, image]  # 2 fotos pendientes
+    tab._current_index = 0
+
+    class _FakeDialog:
+        def __init__(self, **_):  # type: ignore[no-untyped-def]
+            self.skip = False
+            self.cancel_all = True
+
+        def exec(self):  # type: ignore[no-untyped-def]
+            return 0
+
+        def selected_detections(self):  # type: ignore[no-untyped-def]
+            return []
+
+    monkeypatch.setattr(
+        "collections_app.views.inventory.ocr_loader_tab.OcrResultDialog",
+        _FakeDialog,
+    )
+    summary_called = {"n": 0}
+    monkeypatch.setattr(
+        tab,
+        "_show_final_summary",
+        lambda: summary_called.__setitem__("n", summary_called["n"] + 1),
+    )
+    next_called = {"n": 0}
+    monkeypatch.setattr(
+        tab,
+        "_process_next_photo",
+        lambda: next_called.__setitem__("n", next_called["n"] + 1),
+    )
+
+    tab._on_inference_finished([_make_detection()], [])
+
+    assert summary_called["n"] == 1
+    assert next_called["n"] == 0  # no se procesa la siguiente foto
+    # _current_index queda en 0 — el short-circuit no avanza.
+    assert tab._current_index == 0
+
+
+def test_apply_detections_skips_unknown_card_id(
     qtbot,  # type: ignore[no-untyped-def]
     monkeypatch: pytest.MonkeyPatch,
     ctx_and_collection: tuple[AppContext, Collection],
 ) -> None:
-    """Filas con card_id=None se renderizan en naranja + itálica."""
-    from collections_app.views.inventory.ocr_loader_tab import _UNKNOWN_CARD_COLOR
-
+    """`card_id=None` no se imputa al inventario aunque venga seleccionada."""
+    tab, _, _ = _ready_tab(qtbot, monkeypatch, ctx_and_collection)
+    calls: list[tuple] = []
     monkeypatch.setattr(
-        "collections_app.views.inventory.ocr_loader_tab.OcrInstallService.is_installed",
-        staticmethod(lambda: True),
+        tab._ctx.inventory.__class__,
+        "add_card",
+        lambda self, cid, code, num, qty: calls.append((cid, code, num, qty)),
     )
-    monkeypatch.setattr(
-        ctx_and_collection[0].__class__,
-        "get_ocr_service",
-        lambda self, _coll: object(),
-        raising=False,
-    )
-    ctx, coll = ctx_and_collection
-    tab = OcrLoaderTab(ctx=ctx, collection=coll)
-    qtbot.addWidget(tab)
-
-    detections = [
-        _make_detection(card_id=99, card_name="Real"),  # en catálogo
-        _make_detection(card_id=None, card_name=""),  # NO en catálogo
+    selected = [
+        _make_detection(card_id=42),
+        _make_detection(card_id=None, card_name=""),
+        _make_detection(card_id=99, card_number=7),
     ]
-    tab._populate_results_table(detections)
+    tab._apply_detections(selected)
 
-    # Fila 0 (en catálogo): texto sin tinte naranja, no itálica.
-    code_known = tab._results_table.item(0, 1)
-    assert code_known is not None
-    assert code_known.foreground().color().name().upper() != _UNKNOWN_CARD_COLOR.upper()
-    assert code_known.font().italic() is False
-
-    # Fila 1 (NO en catálogo): naranja + itálica en las 3 columnas de texto.
-    for col in (1, 2, 3):
-        item = tab._results_table.item(1, col)
-        assert item is not None
-        assert item.foreground().color().name().upper() == _UNKNOWN_CARD_COLOR.upper()
-        assert item.font().italic() is True
+    # Solo las dos con card_id concreto se imputan.
+    assert len(calls) == 2

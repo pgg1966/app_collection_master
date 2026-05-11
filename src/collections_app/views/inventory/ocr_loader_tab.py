@@ -8,8 +8,9 @@ Tres estados, vivientes en un `QStackedWidget`:
 2. Dependencias OK pero la colección no tiene modelo configurado →
    mensaje "pedile al admin que configure el modelo".
 3. Listo → botón "Agregar fotos" que abre un file picker, lista de
-   fotos pendientes, panel de resultados foto-a-foto con tabla de
-   detecciones y los tres botones del flow (cargar / saltar / cancelar).
+   fotos pendientes y un progress bar. Después de cada inferencia se
+   abre `OcrResultDialog` (foto anotada + tabla); los 3 botones del
+   flow viven en el diálogo.
 
 Re-evaluación: en `__init__`, después de instalar exitosamente, y
 cuando cambia la collection vía `set_active_collection`.
@@ -19,10 +20,10 @@ UI. El service se obtiene del `AppContext` vía
 `ctx.get_ocr_service(collection)` (factory, devuelve `None` si no
 está disponible).
 
-Apply: las cards tildadas (≥70% pre-seleccionadas, el user puede
-ajustar) se aplican vía `inventory_service.add_card` por cada
-detección. Tras aplicar la última foto se emite `card_changed` para
-que el resto de los tabs se refresque.
+Apply: las cards tildadas en el diálogo se aplican vía
+`inventory_service.add_card` por cada detección. Tras aplicar la
+última foto se emite `card_changed` para que el resto de los tabs se
+refresque.
 """
 
 from __future__ import annotations
@@ -31,11 +32,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QObject, Qt, QThread, Signal
-from PySide6.QtGui import QBrush, QColor, QFont
 from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
-    QHeaderView,
     QLabel,
     QListWidget,
     QListWidgetItem,
@@ -43,8 +42,6 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QStackedWidget,
-    QTableWidget,
-    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -55,6 +52,7 @@ from collections_app.services.exceptions import (
     OcrInstallError,
 )
 from collections_app.services.ocr_install_service import OcrInstallService
+from collections_app.views.inventory.ocr_result_dialog import OcrResultDialog
 
 if TYPE_CHECKING:
     from collections_app.app_context import AppContext
@@ -62,13 +60,6 @@ if TYPE_CHECKING:
     from collections_app.core.models.ocr_detection import OcrDetection, OcrParseError
     from collections_app.services.ocr_service import OcrService
 
-
-# Color naranja para resaltar detecciones que pasaron el validador
-# pero no matchean ninguna card del catálogo local (card_id=None).
-# El usuario las ve igual y puede dejarlas tildadas, pero al aplicar
-# `_on_load_photo_clicked` las salta — el color avisa que no van a
-# afectar inventario.
-_UNKNOWN_CARD_COLOR = "#D97706"  # naranja oscuro, legible sobre fondo claro
 
 # Sentinels que indican que pip falló por archivos bloqueados. El
 # patrón aparece tal cual en Windows (CPython traduce automáticamente
@@ -99,12 +90,6 @@ def _format_install_error(raw_message: str) -> str:
 _PAGE_INSTALL = 0
 _PAGE_NO_MODEL = 1
 _PAGE_READY = 2
-
-_RESULT_HEADERS = ["", "Código", "Nombre", "Confianza"]
-_COL_CHECK = 0
-_COL_CODE = 1
-_COL_NAME = 2
-_COL_CONF = 3
 
 
 # ======================================================================
@@ -196,7 +181,6 @@ class OcrLoaderTab(QWidget):
         # Estado del flow de carga (Estado 3).
         self._pending_paths: list[Path] = []
         self._current_index: int = 0
-        self._current_detections: list[OcrDetection] = []
         self._loaded_count: int = 0
         self._build_ui()
         self._evaluate_state()
@@ -257,14 +241,13 @@ class OcrLoaderTab(QWidget):
         intro = QLabel(
             self.tr(
                 "Sacá fotos a los reversos de las figuritas y agregalas. "
-                "Te vamos a mostrar las detecciones de cada foto para que "
-                "confirmes antes de cargar."
+                "Después de procesar cada foto se va a abrir una ventana "
+                "con las detecciones para que las confirmes antes de cargar."
             )
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
-        # Botón "Agregar fotos" + lista de fotos pendientes
         top_row = QHBoxLayout()
         self._add_photos_btn = QPushButton(self.tr("Agregar fotos"))
         self._add_photos_btn.clicked.connect(self._on_add_photos_clicked)
@@ -276,40 +259,19 @@ class OcrLoaderTab(QWidget):
         self._photos_list.setMaximumHeight(80)
         layout.addWidget(self._photos_list)
 
-        # Panel de resultados (oculto al inicio)
-        self._results_label = QLabel("")
-        self._results_label.setVisible(False)
-        layout.addWidget(self._results_label)
-        self._results_table = QTableWidget(0, len(_RESULT_HEADERS))
-        self._results_table.setHorizontalHeaderLabels(_RESULT_HEADERS)
-        self._results_table.setVisible(False)
-        header = self._results_table.horizontalHeader()
-        header.setSectionResizeMode(_COL_CHECK, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(_COL_CODE, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(_COL_NAME, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(_COL_CONF, QHeaderView.ResizeMode.ResizeToContents)
-        layout.addWidget(self._results_table, 1)
+        # Estado del procesamiento (oculto cuando no hay flow activo).
+        self._status_label = QLabel("")
+        self._status_label.setVisible(False)
+        layout.addWidget(self._status_label)
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setVisible(False)
+        layout.addWidget(self._progress_bar)
 
         self._summary_label = QLabel("")
         self._summary_label.setVisible(False)
         layout.addWidget(self._summary_label)
 
-        # Botones del flow foto-a-foto
-        btn_row = QHBoxLayout()
-        self._load_photo_btn = QPushButton(self.tr("Cargar esta foto"))
-        self._load_photo_btn.clicked.connect(self._on_load_photo_clicked)
-        self._load_photo_btn.setVisible(False)
-        self._skip_photo_btn = QPushButton(self.tr("Saltar foto"))
-        self._skip_photo_btn.clicked.connect(self._on_skip_photo_clicked)
-        self._skip_photo_btn.setVisible(False)
-        self._cancel_all_btn = QPushButton(self.tr("Cancelar todo"))
-        self._cancel_all_btn.clicked.connect(self._on_cancel_all_clicked)
-        self._cancel_all_btn.setVisible(False)
-        btn_row.addWidget(self._load_photo_btn)
-        btn_row.addWidget(self._skip_photo_btn)
-        btn_row.addStretch()
-        btn_row.addWidget(self._cancel_all_btn)
-        layout.addLayout(btn_row)
+        layout.addStretch(1)
         return page
 
     # ------------------------------------------------------------------
@@ -428,7 +390,10 @@ class OcrLoaderTab(QWidget):
         for p in new_paths:
             QListWidgetItem(p.name, self._photos_list)
         self._add_photos_btn.setEnabled(False)
-        self._cancel_all_btn.setVisible(True)
+        self._summary_label.setVisible(False)
+        self._progress_bar.setRange(0, len(self._pending_paths))
+        self._progress_bar.setValue(0)
+        self._progress_bar.setVisible(True)
         self._loaded_count = 0
         self._current_index = 0
         self._process_next_photo()
@@ -450,19 +415,15 @@ class OcrLoaderTab(QWidget):
             self._evaluate_state()
             return
 
-        self._results_label.setText(
+        self._status_label.setText(
             self.tr("Procesando foto {n} de {total}: {name}").format(
                 n=self._current_index + 1,
                 total=len(self._pending_paths),
                 name=path.name,
             )
         )
-        self._results_label.setVisible(True)
-        self._results_table.setRowCount(0)
-        self._results_table.setVisible(False)
-        self._summary_label.setVisible(False)
-        self._load_photo_btn.setVisible(False)
-        self._skip_photo_btn.setVisible(False)
+        self._status_label.setVisible(True)
+        self._progress_bar.setValue(self._current_index)
 
         assert self._collection.collection_id is not None
         worker = _InferenceWorker(
@@ -489,70 +450,40 @@ class OcrLoaderTab(QWidget):
         detections: list[OcrDetection],
         parse_errors: list[OcrParseError],
     ) -> None:
-        self._current_detections = detections
-        self._populate_results_table(detections)
-        # Resumen (detectadas válidas vs labels no parseables / no en catálogo).
-        unrecognized = len(parse_errors) + sum(1 for d in detections if d.card_id is None)
-        self._summary_label.setText(
-            self.tr("Detectadas: {ok} | No reconocidas: ~{bad}").format(
-                ok=sum(1 for d in detections if d.card_id is not None),
-                bad=unrecognized,
-            )
+        """Abre el diálogo de verificación y despacha según la salida."""
+        path = self._pending_paths[self._current_index]
+        dialog = OcrResultDialog(
+            image_path=path,
+            detections=detections,
+            errors=parse_errors,
+            photo_index=self._current_index,
+            total_photos=len(self._pending_paths),
+            parent=self,
         )
-        self._summary_label.setVisible(True)
-        self._load_photo_btn.setVisible(True)
-        self._skip_photo_btn.setVisible(True)
+        dialog.exec()
+        if dialog.cancel_all:
+            self._show_final_summary()
+            return
+        if not dialog.skip:
+            self._apply_detections(dialog.selected_detections())
+        self._current_index += 1
+        self._progress_bar.setValue(self._current_index)
+        self._process_next_photo()
 
     def _on_inference_failed(self: OcrLoaderTab, message: str) -> None:
         QMessageBox.critical(self, self.tr("Error en inferencia"), message)
-        self._on_skip_photo_clicked()
+        # Saltar la foto fallida y seguir.
+        self._current_index += 1
+        self._progress_bar.setValue(self._current_index)
+        self._process_next_photo()
 
-    def _populate_results_table(self: OcrLoaderTab, detections: list[OcrDetection]) -> None:
-        """Llena la tabla con las detecciones.
-
-        Post-smoke 5d: TODOS los checkboxes vienen marcados por default
-        — el validador ya filtró los falsos positivos antes de llegar
-        acá. El usuario destilda lo que no quiera. Las filas con
-        `card_id=None` (código válido pero no en el catálogo local)
-        se renderizan en naranja + itálica para que el usuario sepa
-        que esa fila no va a tocar inventario aunque la deje tildada.
-        """
-        self._results_table.setRowCount(len(detections))
-        unknown_brush = QBrush(QColor(_UNKNOWN_CARD_COLOR))
-        italic_font = QFont()
-        italic_font.setItalic(True)
-
-        for row, d in enumerate(detections):
-            check = QTableWidgetItem("")
-            check.setFlags(check.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            check.setCheckState(Qt.CheckState.Checked)
-            self._results_table.setItem(row, _COL_CHECK, check)
-
-            code_text = f"{d.code_id}-{d.card_number}" if d.code_id else str(d.card_number)
-            code_item = QTableWidgetItem(code_text)
-            name_item = QTableWidgetItem(d.card_name or self.tr("(no encontrada)"))
-            conf_item = QTableWidgetItem(f"{int(d.confidence * 100)}%")
-
-            # Indicación visual para cards que el validador resolvió pero
-            # no están en el catálogo local.
-            if d.card_id is None:
-                for item in (code_item, name_item, conf_item):
-                    item.setForeground(unknown_brush)
-                    item.setFont(italic_font)
-
-            self._results_table.setItem(row, _COL_CODE, code_item)
-            self._results_table.setItem(row, _COL_NAME, name_item)
-            self._results_table.setItem(row, _COL_CONF, conf_item)
-        self._results_table.setVisible(True)
-
-    def _on_load_photo_clicked(self: OcrLoaderTab) -> None:
-        """Aplica las detecciones tildadas al inventario."""
+    def _apply_detections(self: OcrLoaderTab, detections: list[OcrDetection]) -> None:
+        """Aplica las detecciones marcadas en el diálogo al inventario."""
         applied = 0
-        for row, d in enumerate(self._current_detections):
-            check = self._results_table.item(row, _COL_CHECK)
-            if check is None or check.checkState() != Qt.CheckState.Checked:
-                continue
+        for d in detections:
             if d.card_id is None:
+                # Card no está en el catálogo local: no podemos imputar
+                # inventario aunque el user la haya dejado tildada.
                 continue
             try:
                 assert self._collection.collection_id is not None
@@ -573,46 +504,31 @@ class OcrLoaderTab(QWidget):
             self._ctx.conn.commit()
             self._loaded_count += applied
             self.card_changed.emit()
-        self._current_index += 1
-        self._process_next_photo()
-
-    def _on_skip_photo_clicked(self: OcrLoaderTab) -> None:
-        self._current_index += 1
-        self._process_next_photo()
-
-    def _on_cancel_all_clicked(self: OcrLoaderTab) -> None:
-        confirm = QMessageBox.question(
-            self,
-            self.tr("Cancelar carga"),
-            self.tr("¿Cancelar la carga? Las fotos ya cargadas se mantienen."),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if confirm != QMessageBox.StandardButton.Yes:
-            return
-        self._show_final_summary()
 
     def _show_final_summary(self: OcrLoaderTab) -> None:
         processed = self._current_index
+        self._status_label.setVisible(False)
+        self._progress_bar.setVisible(False)
+        self._summary_label.setText(
+            self.tr("Cargaste {n} cards de {p} fotos procesadas.").format(
+                n=self._loaded_count, p=processed
+            )
+        )
+        self._summary_label.setVisible(True)
         QMessageBox.information(
             self,
             self.tr("Carga terminada"),
-            self.tr("Cargaste {n} cards de {p} fotos procesadas.").format(
-                n=self._loaded_count, p=processed
-            ),
+            self._summary_label.text(),
         )
-        self._reset_loading_state()
+        self._reset_loading_state(keep_summary=True)
 
-    def _reset_loading_state(self: OcrLoaderTab) -> None:
+    def _reset_loading_state(self: OcrLoaderTab, *, keep_summary: bool = False) -> None:
         self._pending_paths.clear()
         self._photos_list.clear()
         self._current_index = 0
-        self._current_detections = []
         self._loaded_count = 0
-        self._results_label.setVisible(False)
-        self._results_table.setRowCount(0)
-        self._results_table.setVisible(False)
-        self._summary_label.setVisible(False)
-        self._load_photo_btn.setVisible(False)
-        self._skip_photo_btn.setVisible(False)
-        self._cancel_all_btn.setVisible(False)
+        self._status_label.setVisible(False)
+        self._progress_bar.setVisible(False)
+        if not keep_summary:
+            self._summary_label.setVisible(False)
         self._add_photos_btn.setEnabled(True)
