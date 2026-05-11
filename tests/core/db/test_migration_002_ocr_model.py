@@ -31,16 +31,11 @@ def _columns(conn: sqlite3.Connection, table: str) -> dict[str, sqlite3.Row]:
     return {row["name"]: row for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
 
 
-def test_schema_version_is_two(conn: sqlite3.Connection) -> None:
-    row = conn.execute("SELECT MAX(version) AS v FROM schema_version").fetchone()
-    assert row["v"] == 2
-
-
-def test_schema_version_keeps_history(conn: sqlite3.Connection) -> None:
-    """Cada migración inserta su propia fila — el historial queda."""
-    rows = conn.execute("SELECT version FROM schema_version ORDER BY version").fetchall()
-    versions = [r["version"] for r in rows]
-    assert versions == [1, 2]
+def test_schema_version_includes_two(conn: sqlite3.Connection) -> None:
+    """El historial incluye la 002. Las migraciones siguientes (003+)
+    pueden estar aplicadas — solo verificamos que 002 sigue ahí."""
+    versions = {r["version"] for r in conn.execute("SELECT version FROM schema_version").fetchall()}
+    assert 2 in versions
 
 
 def test_collections_has_ocr_model_filename_column(conn: sqlite3.Connection) -> None:
