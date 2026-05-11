@@ -274,6 +274,7 @@ def _make_detection(
     confidence: float = 0.5,
     card_id: int | None = 42,
     card_name: str = "Park",
+    bbox: tuple[int, int, int, int] = (0, 0, 10, 10),
 ):  # type: ignore[no-untyped-def]
     from collections_app.core.models.ocr_detection import OcrDetection
 
@@ -284,6 +285,7 @@ def _make_detection(
         confidence=confidence,
         card_name=card_name,
         card_id=card_id,
+        bbox=bbox,
     )
 
 

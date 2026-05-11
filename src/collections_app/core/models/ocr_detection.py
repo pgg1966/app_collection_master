@@ -74,6 +74,10 @@ class OcrDetection:
         card_id: PK de la card en la DB local, o `None` si la combinación
             (code_id, card_number) no existe en el catálogo de la
             colección activa.
+        bbox: coordenadas del bounding box detectado por YOLO, ya
+            ajustadas con el padding del crop. Formato `(x1, y1, x2, y2)`
+            en píxeles sobre la imagen original. Sirve para anotar la
+            foto en el dialog post-procesamiento.
     """
 
     raw_label: str
@@ -82,6 +86,7 @@ class OcrDetection:
     confidence: float
     card_name: str
     card_id: int | None
+    bbox: tuple[int, int, int, int]
 
 
 @dataclass(frozen=True, slots=True)

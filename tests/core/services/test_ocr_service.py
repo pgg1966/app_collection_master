@@ -258,6 +258,10 @@ def test_run_inference_full_pipeline_happy_path(
     assert d.card_name == "Park Ji-Sung"
     assert d.card_id is not None
     assert d.confidence == pytest.approx(0.92)
+    # bbox propagado desde el FakeBox (más el padding del crop, aplicado
+    # luego por el service). El test arranca con bbox [10,10,100,60];
+    # el service hace pad=4 clamped a la imagen → (6, 6, 104, 64).
+    assert d.bbox == (6, 6, 104, 64)
 
 
 def test_run_inference_unrecognized_label_goes_to_errors(

@@ -226,6 +226,7 @@ class OcrService:
                             confidence=confidence,
                             card_name=card.card_name if card else "",
                             card_id=card.card_id if card else None,
+                            bbox=(int(x1), int(y1), int(x2), int(y2)),
                         )
                     )
 

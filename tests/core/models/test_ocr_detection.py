@@ -96,6 +96,7 @@ def test_ocr_detection_equality_by_value() -> None:
         confidence=0.94,
         card_name="Lautaro",
         card_id=42,
+        bbox=(10, 20, 100, 60),
     )
     b = OcrDetection(
         raw_label="ARG-04",
@@ -104,6 +105,7 @@ def test_ocr_detection_equality_by_value() -> None:
         confidence=0.94,
         card_name="Lautaro",
         card_id=42,
+        bbox=(10, 20, 100, 60),
     )
     assert a == b
     assert hash(a) == hash(b)
@@ -117,9 +119,47 @@ def test_ocr_detection_is_frozen() -> None:
         confidence=0.0,
         card_name="x",
         card_id=None,
+        bbox=(0, 0, 0, 0),
     )
     with pytest.raises((AttributeError, TypeError)):
         d.confidence = 0.5  # type: ignore[misc]
+
+
+def test_ocr_detection_includes_bbox() -> None:
+    """`bbox` se guarda como tupla `(x1, y1, x2, y2)`."""
+    d = OcrDetection(
+        raw_label="KOR-6",
+        code_id="KOR",
+        card_number=6,
+        confidence=0.85,
+        card_name="Park",
+        card_id=10,
+        bbox=(15, 25, 120, 80),
+    )
+    assert d.bbox == (15, 25, 120, 80)
+
+
+def test_ocr_detection_bbox_distinguishes_equality() -> None:
+    """Dos detecciones idénticas con bbox distinto NO son iguales."""
+    a = OcrDetection(
+        raw_label="X",
+        code_id="X",
+        card_number=1,
+        confidence=0.5,
+        card_name="X",
+        card_id=None,
+        bbox=(0, 0, 10, 10),
+    )
+    b = OcrDetection(
+        raw_label="X",
+        code_id="X",
+        card_number=1,
+        confidence=0.5,
+        card_name="X",
+        card_id=None,
+        bbox=(100, 100, 110, 110),
+    )
+    assert a != b
 
 
 def test_ocr_parse_error_equality() -> None:
