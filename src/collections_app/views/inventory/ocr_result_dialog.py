@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QBrush, QColor, QFont, QPixmap, QResizeEvent
 from PySide6.QtWidgets import (
+    QApplication,
     QDialog,
     QHBoxLayout,
     QHeaderView,
@@ -123,9 +124,9 @@ class OcrResultDialog(QDialog):
         self._build_ui()
 
     def _resize_to_screen(self: OcrResultDialog) -> None:
-        """Tamaño inicial = 85% ancho × 80% alto de la pantalla disponible."""
-        screen = self.screen()
-        if screen is None:  # defensive — algunas configs raras
+        """Tamaño inicial = 85% ancho × 80% alto de la pantalla principal."""
+        screen = QApplication.primaryScreen()
+        if screen is None:  # defensive — entornos sin display
             self.resize(1200, 800)
             return
         geo = screen.availableGeometry()
@@ -135,6 +136,7 @@ class OcrResultDialog(QDialog):
         outer = QVBoxLayout(self)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
         # Izquierda: foto anotada en un widget que re-escala con el
         # panel. Si la imagen no se pudo leer, fallback a un QLabel
@@ -147,7 +149,10 @@ class OcrResultDialog(QDialog):
             self._image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         splitter.addWidget(self._image_label)
 
-        # Derecha: header + tabla + botones.
+        # Derecha: header + tabla. Los botones del flow viven en el
+        # QVBoxLayout principal (fuera del splitter) para que siempre
+        # sean visibles, sin importar qué tamaño tomen las dos
+        # secciones del splitter.
         right = QWidget()
         right_layout = QVBoxLayout(right)
         n_with_card = sum(1 for d in self._detections if d.card_id is not None)
@@ -171,6 +176,23 @@ class OcrResultDialog(QDialog):
         self._populate_table()
         right_layout.addWidget(self._table, 1)
 
+        splitter.addWidget(right)
+        # Proporciones iniciales: foto ~55%, tabla ~45%. Qt escala
+        # estos valores proporcionalmente al ancho real del splitter.
+        splitter.setSizes([55, 45])
+        outer.addWidget(splitter, 1)
+
+        outer.addWidget(
+            QLabel(
+                self.tr("Foto {n} de {total}: {name}").format(
+                    n=self._photo_index + 1,
+                    total=self._total_photos,
+                    name=self._image_path.name,
+                )
+            )
+        )
+
+        # Botones del flow — fuera del splitter, fixed height.
         btn_row = QHBoxLayout()
         self._cancel_all_btn = QPushButton(self.tr("Cancelar todo"))
         self._cancel_all_btn.clicked.connect(self._on_cancel_all)
@@ -183,22 +205,7 @@ class OcrResultDialog(QDialog):
         btn_row.addWidget(self._skip_btn)
         btn_row.addStretch()
         btn_row.addWidget(self._load_btn)
-        right_layout.addLayout(btn_row)
-
-        splitter.addWidget(right)
-        splitter.setStretchFactor(0, 2)
-        splitter.setStretchFactor(1, 1)
-
-        outer.addWidget(splitter, 1)
-        outer.addWidget(
-            QLabel(
-                self.tr("Foto {n} de {total}: {name}").format(
-                    n=self._photo_index + 1,
-                    total=self._total_photos,
-                    name=self._image_path.name,
-                )
-            )
-        )
+        outer.addLayout(btn_row)
 
     def _populate_table(self: OcrResultDialog) -> None:
         """Llena la tabla con las detecciones — checkboxes en Checked.
