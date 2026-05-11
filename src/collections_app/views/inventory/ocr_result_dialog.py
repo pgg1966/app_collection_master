@@ -21,6 +21,7 @@ test). En tests se mockea para evitar cargar cv2 real.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -45,6 +46,9 @@ if TYPE_CHECKING:
     from collections_app.app_context import AppContext
     from collections_app.core.models.collection import Collection
     from collections_app.core.models.ocr_detection import OcrDetection, OcrParseError
+
+
+logger = logging.getLogger(__name__)
 
 
 _CONFIDENCE_HIGH = 0.70
@@ -79,8 +83,12 @@ class _ScaledImageLabel(QLabel):
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Expanding,
         )
-        # Mínimo chico — el splitter define el tamaño real.
-        self.setMinimumSize(1, 1)
+        # Mínimo razonable. Antes era (1, 1) lo que permitía al splitter
+        # colapsar el panel a 0px de ancho cuando el QTableWidget vecino
+        # tenía un sizeHint horizontal mayor; ahora el panel siempre se
+        # ve.
+        self.setMinimumWidth(300)
+        self.setMinimumHeight(200)
         # Mostrar el pixmap antes del primer resize (si esperamos al
         # resizeEvent, el label queda vacío hasta que el dialog se
         # muestra; en tests no se llega a mostrar nunca).
@@ -191,7 +199,15 @@ class OcrResultDialog(QDialog):
         # panel. Si la imagen no se pudo leer, fallback a un QLabel
         # con texto explicativo.
         annotated = self._annotate_image()
-        if annotated is not None and not annotated.isNull():
+        # TEMP DIAG (Prompt 6 / iteración B5): pendiente confirmar
+        # con el usuario por qué el panel izquierdo aparece colapsado.
+        logger.warning(
+            "annotated pixmap: null=%s size=%sx%s",
+            annotated.isNull(),
+            annotated.width(),
+            annotated.height(),
+        )
+        if not annotated.isNull():
             self._image_label: QLabel = _ScaledImageLabel(annotated)
         else:
             self._image_label = QLabel(self.tr("(no se pudo cargar la imagen)"))
@@ -202,6 +218,8 @@ class OcrResultDialog(QDialog):
             self._image_label.setSizePolicy(
                 QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
             )
+            self._image_label.setMinimumWidth(300)
+            self._image_label.setMinimumHeight(200)
         splitter.addWidget(self._image_label)
 
         # Derecha: header + tabla + botones del flow. Los botones viven
@@ -262,6 +280,8 @@ class OcrResultDialog(QDialog):
         splitter.setSizes([1, 1])
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 1)
+        # TEMP DIAG (Prompt 6 / iteración B5).
+        logger.warning("splitter sizes after setSizes: %s", splitter.sizes())
         outer.addWidget(splitter, 1)
 
         outer.addWidget(
@@ -342,43 +362,58 @@ class OcrResultDialog(QDialog):
     # Foto anotada
     # ------------------------------------------------------------------
 
-    def _annotate_image(self: OcrResultDialog) -> QPixmap | None:
-        """Lee la foto, dibuja rectángulos sobre las detecciones y
-        devuelve un `QPixmap`.
+    def _annotate_image(self: OcrResultDialog) -> QPixmap:
+        """Lee la foto y dibuja rectángulos sobre las detecciones.
 
-        Devuelve `None` si la imagen no se puede leer (foto corrupta,
-        path inválido, etc.). El UI maneja ese caso mostrando un
-        placeholder de texto.
+        Pipeline robusto a tres modos de falla:
+
+        1. cv2 puede decodificar → dibuja bboxes y retorna `QPixmap`
+           anotado.
+        2. cv2 falla (path con caracteres especiales, JPG raro, etc.)
+           pero Qt sí puede leer la foto → retorna `QPixmap` sin
+           anotaciones (mejor mostrar la foto cruda que no mostrar
+           nada).
+        3. Ni cv2 ni Qt pueden leer → retorna `QPixmap()` vacío. El
+           UI muestra el placeholder de texto.
         """
         import cv2  # noqa: PLC0415
+        import numpy as np  # noqa: PLC0415
 
-        img = cv2.imread(str(self._image_path))
+        # `np.fromfile` soporta Unicode en Windows (cv2.imread no).
+        img = None
+        try:
+            raw = np.fromfile(str(self._image_path), dtype=np.uint8)
+            if raw.size > 0:
+                img = cv2.imdecode(raw, cv2.IMREAD_COLOR)
+        except OSError:
+            img = None
+
         if img is None:
-            # En Windows, `cv2.imread` devuelve None silenciosamente
-            # cuando el path contiene caracteres fuera del code page
-            # del sistema (ej. acentos en una ruta de OneDrive:
-            # "C:\\Users\\X\\OneDrive\\Imágenes\\..."). Fallback:
-            # leer los bytes con numpy (que sí soporta Unicode) y
-            # decodificar en memoria.
-            import numpy as np  # noqa: PLC0415
+            # Fallback: Qt sí soporta Unicode paths nativamente.
+            # Pierde las anotaciones de bboxes, pero al menos se ve la
+            # foto.
+            px = QPixmap(str(self._image_path))
+            if not px.isNull():
+                logger.warning(
+                    "cv2 no pudo decodificar; foto se muestra sin " "anotaciones: %s",
+                    self._image_path,
+                )
+                return px
+            logger.error("no se pudo cargar la imagen: %s", self._image_path)
+            return QPixmap()
 
-            try:
-                data = np.fromfile(str(self._image_path), dtype=np.uint8)
-            except OSError:
-                return None
-            if data.size == 0:
-                return None
-            img = cv2.imdecode(data, cv2.IMREAD_COLOR)
-            if img is None:
-                return None
-
+        # cv2 cargó OK → dibujar bboxes encima.
         for d in self._detections:
+            if d.bbox == (0, 0, 0, 0):
+                # Card sin bbox real (manual entry). No anotar.
+                continue
             x1, y1, x2, y2 = d.bbox
             color = _BBOX_COLOR_HIGH if d.confidence >= _CONFIDENCE_HIGH else _BBOX_COLOR_LOW
             cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
+            label = f"{d.raw_label} {int(d.confidence * 100)}%"
             cv2.putText(
                 img,
-                d.raw_label,
+                label,
                 (x1, max(0, y1 - 5)),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.5,
@@ -388,26 +423,22 @@ class OcrResultDialog(QDialog):
 
         # cv2 entrega BGR; Qt espera RGB.
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        h, w, _ch = img_rgb.shape
-        # Import lazy de QImage para no traer Qt al testear esta función
-        # con imágenes mockeadas. (En la práctica QImage ya está
-        # disponible vía PySide6.QtGui — el lazy es solo conceptual.)
+        h, w, ch = img_rgb.shape
         from PySide6.QtGui import QImage  # noqa: PLC0415
 
-        # CRÍTICO: mantener el bytes en un local mientras QImage existe.
+        # CRÍTICO: mantener `buf` en un local mientras QImage existe.
         # Si pasamos `img_rgb.tobytes()` inline, Python descarta el
-        # bytes anonimo en cuanto QImage(...) retorna; QPixmap.fromImage
-        # entonces lee memoria liberada y devuelve un pixmap null sin
-        # avisar. Asignandolo a una variable nombrada el bytes vive
-        # hasta el final del metodo, y QPixmap copia los datos a una
-        # estructura propia antes de retornar.
-        bytes_data = img_rgb.tobytes()
-        # bytesPerLine = ancho * channels (3 para RGB888).
+        # bytes anónimo en cuanto QImage(...) retorna y QPixmap.fromImage
+        # lee memoria liberada → devuelve pixmap null sin avisar.
+        buf = img_rgb.tobytes()
         qimg = QImage(
-            bytes_data,
+            buf,
             w,
             h,
-            3 * w,
+            ch * w,
             QImage.Format.Format_RGB888,
         )
-        return QPixmap.fromImage(qimg)
+        px = QPixmap.fromImage(qimg)
+        # `buf` sigue vivo hasta este return; QPixmap.fromImage ya
+        # copió los datos a una estructura platform-specific.
+        return px
