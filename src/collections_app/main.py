@@ -55,7 +55,11 @@ def _run(ctx: AppContext, app: QApplication, profile: str | None) -> int:
     """Ejecuta la app con `ctx` ya construido. Separado del `main()` para
     que sea testeable inyectando un context contra `:memory:`."""
     window = MainWindow(ctx=ctx, title_suffix=_title_suffix_for(profile))
-    window.show()
+    # Prompt 6: arrancar maximizado para que la app aproveche la
+    # pantalla completa sin que el usuario tenga que redimensionar.
+    # El `resize(1024, 720)` interno del MainWindow sigue siendo el
+    # tamaño "restored" si el usuario desmaximiza.
+    window.showMaximized()
     return app.exec()
 
 
