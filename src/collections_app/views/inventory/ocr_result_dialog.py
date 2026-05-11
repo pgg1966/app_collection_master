@@ -25,13 +25,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QBrush, QColor, QFont, QPixmap
+from PySide6.QtGui import QBrush, QColor, QFont, QPixmap, QResizeEvent
 from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QPushButton,
+    QSizePolicy,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -56,6 +57,42 @@ _COL_CHECK = 0
 _COL_CODE = 1
 _COL_NAME = 2
 _COL_CONF = 3
+
+
+class _ScaledImageLabel(QLabel):
+    """QLabel que re-escala su pixmap al tamaño disponible.
+
+    El QLabel default no re-escala el pixmap cuando el widget cambia de
+    tamaño; setScaledContents=True ignora el aspect ratio. Esta subclase
+    guarda el pixmap original y re-escala en cada resizeEvent preservando
+    proporción.
+    """
+
+    def __init__(self: _ScaledImageLabel, pixmap: QPixmap, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._original = pixmap
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
+        # Mínimo chico — el splitter define el tamaño real.
+        self.setMinimumSize(1, 1)
+        # Mostrar el pixmap antes del primer resize (si esperamos al
+        # resizeEvent, el label queda vacío hasta que el dialog se
+        # muestra; en tests no se llega a mostrar nunca).
+        if not pixmap.isNull():
+            super().setPixmap(pixmap)
+
+    def resizeEvent(self: _ScaledImageLabel, event: QResizeEvent) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if not self._original.isNull():
+            scaled = self._original.scaled(
+                self.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            super().setPixmap(scaled)
 
 
 class OcrResultDialog(QDialog):
@@ -99,28 +136,15 @@ class OcrResultDialog(QDialog):
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        # Izquierda: foto anotada en un QLabel con QPixmap.
-        self._image_label = QLabel()
-        self._image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._image_label.setMinimumWidth(400)
-        self._image_label.setScaledContents(False)
+        # Izquierda: foto anotada en un widget que re-escala con el
+        # panel. Si la imagen no se pudo leer, fallback a un QLabel
+        # con texto explicativo.
         annotated = self._annotate_image()
         if annotated is not None and not annotated.isNull():
-            # Escalado preservando aspect ratio. `setPixmap` re-escala
-            # automáticamente cuando el widget cambia de tamaño porque
-            # guardamos el pixmap original en self.
-            self._original_pixmap: QPixmap | None = annotated
-            self._image_label.setPixmap(
-                annotated.scaled(
-                    1600,
-                    1200,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-            )
+            self._image_label: QLabel = _ScaledImageLabel(annotated)
         else:
-            self._original_pixmap = None
-            self._image_label.setText(self.tr("(no se pudo cargar la imagen)"))
+            self._image_label = QLabel(self.tr("(no se pudo cargar la imagen)"))
+            self._image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         splitter.addWidget(self._image_label)
 
         # Derecha: header + tabla + botones.
