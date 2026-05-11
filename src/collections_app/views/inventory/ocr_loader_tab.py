@@ -102,10 +102,14 @@ class _InstallWorker(QObject):
 class _InferenceWorker(QObject):
     """Wrapper de `OcrService.run_inference` para correr en un QThread.
 
-    El `conn` que se le pasa es la conexión del `AppContext`. SQLite
-    permite leer desde un hilo distinto siempre que la conexión se haya
-    creado con `check_same_thread=False`. La connection del proyecto
-    cumple esa condición (ver `core/db/connection.py`).
+    SQLite no permite compartir `Connection` entre hilos — usar la del
+    `AppContext` desde un worker rompe con `sqlite3.ProgrammingError`.
+
+    El worker recibe el `ctx` (no la conn) y llama
+    `ctx.create_worker_connection()` adentro de `run()` (que corre en el
+    hilo del worker). La conexión propia se cierra en el `finally`
+    aunque la inferencia rompa. El método vive en `AppContext` porque
+    views no puede importar `core.db.connection` (CLAUDE.md sec 2.1).
     """
 
     finished = Signal(list, list)  # (detections, parse_errors)
@@ -115,23 +119,28 @@ class _InferenceWorker(QObject):
         self: _InferenceWorker,
         ocr_service: OcrService,
         image_path: Path,
-        conn: object,  # sqlite3.Connection — sin import (sec 2.1: views no toca sqlite)
+        ctx: AppContext,
         collection_id: int,
     ) -> None:
         super().__init__()
         self._ocr = ocr_service
         self._image = image_path
-        self._conn = conn
+        self._ctx = ctx
         self._cid = collection_id
 
     def run(self: _InferenceWorker) -> None:
+        conn = None
         try:
+            conn = self._ctx.create_worker_connection()
             detections, errors = self._ocr.run_inference(
-                self._image, conn=self._conn, collection_id=self._cid
+                self._image, conn=conn, collection_id=self._cid
             )
         except OcrError as exc:
             self.failed.emit(str(exc))
             return
+        finally:
+            if conn is not None:
+                conn.close()
         self.finished.emit(list(detections), list(errors))
 
 
@@ -434,7 +443,7 @@ class OcrLoaderTab(QWidget):
         worker = _InferenceWorker(
             ocr_service=ocr,
             image_path=path,
-            conn=self._ctx.conn,
+            ctx=self._ctx,
             collection_id=self._collection.collection_id,
         )
         thread = QThread(self)

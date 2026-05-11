@@ -150,3 +150,120 @@ def test_card_changed_signal_exists(
     tab = OcrLoaderTab(ctx=ctx, collection=coll)
     qtbot.addWidget(tab)
     assert hasattr(tab, "card_changed")
+
+
+# ---------------------------------------------------------------------
+# _InferenceWorker — fix cross-thread sqlite (post-smoke 5d)
+# ---------------------------------------------------------------------
+
+
+def test_inference_worker_opens_its_own_connection(
+    monkeypatch: pytest.MonkeyPatch,
+    ctx_and_collection: tuple[AppContext, Collection],
+    tmp_path,  # type: ignore[no-untyped-def]
+) -> None:
+    """El worker pide una conn propia al ctx (NO usa la del hilo principal).
+
+    Verifica el patrón:
+    1. `ctx.create_worker_connection()` se llama dentro de `run()`.
+    2. El `OcrService.run_inference` recibe la conn nueva, NO `ctx.conn`.
+    3. La conexión se cierra al final.
+    """
+    from collections_app.views.inventory.ocr_loader_tab import _InferenceWorker
+
+    ctx, coll = ctx_and_collection
+    assert coll.collection_id is not None
+
+    # Stub del factory del ctx + un fake conn que registramos.
+    opens: list[bool] = []
+    closes: list[object] = []
+
+    class _FakeConn:
+        def close(self) -> None:  # type: ignore[no-untyped-def]
+            closes.append(self)
+
+    def fake_factory(_self):  # type: ignore[no-untyped-def]
+        opens.append(True)
+        return _FakeConn()
+
+    monkeypatch.setattr(ctx.__class__, "create_worker_connection", fake_factory, raising=False)
+
+    # Stub del OcrService: capturamos qué conn le llegó.
+    received_conn: dict[str, object] = {}
+
+    class _FakeOcr:
+        def run_inference(self, _img, *, conn, collection_id):  # type: ignore[no-untyped-def]
+            received_conn["conn"] = conn
+            received_conn["cid"] = collection_id
+            return ([], [])
+
+    image = tmp_path / "x.jpg"
+    image.write_bytes(b"\xff\xd8\xff")
+    worker = _InferenceWorker(
+        ocr_service=_FakeOcr(),  # type: ignore[arg-type]
+        image_path=image,
+        ctx=ctx,
+        collection_id=coll.collection_id,
+    )
+
+    finished_payloads: list[tuple[list, list]] = []
+    worker.finished.connect(lambda d, e: finished_payloads.append((d, e)))
+
+    worker.run()
+
+    # 1. Pidió una conn al ctx exactamente una vez.
+    assert opens == [True]
+    # 2. La conn que llegó al run_inference NO es la del hilo principal.
+    assert isinstance(received_conn["conn"], _FakeConn)
+    assert received_conn["conn"] is not ctx.conn
+    # 3. La cerró.
+    assert len(closes) == 1
+    # 4. Emitió `finished` con listas vacías.
+    assert finished_payloads == [([], [])]
+
+
+def test_inference_worker_closes_connection_on_error(
+    monkeypatch: pytest.MonkeyPatch,
+    ctx_and_collection: tuple[AppContext, Collection],
+    tmp_path,  # type: ignore[no-untyped-def]
+) -> None:
+    """Si `run_inference` levanta OcrError, la conexión se cierra igual."""
+    from collections_app.services.exceptions import OcrModelError
+    from collections_app.views.inventory.ocr_loader_tab import _InferenceWorker
+
+    ctx, coll = ctx_and_collection
+    assert coll.collection_id is not None
+
+    closes: list[object] = []
+
+    class _FakeConn:
+        def close(self) -> None:  # type: ignore[no-untyped-def]
+            closes.append(self)
+
+    monkeypatch.setattr(
+        ctx.__class__,
+        "create_worker_connection",
+        lambda _self: _FakeConn(),
+        raising=False,
+    )
+
+    class _FakeOcr:
+        def run_inference(self, *_a, **_k):  # type: ignore[no-untyped-def]
+            raise OcrModelError("modelo roto")
+
+    image = tmp_path / "x.jpg"
+    image.write_bytes(b"\xff\xd8\xff")
+    worker = _InferenceWorker(
+        ocr_service=_FakeOcr(),  # type: ignore[arg-type]
+        image_path=image,
+        ctx=ctx,
+        collection_id=coll.collection_id,
+    )
+    failures: list[str] = []
+    worker.failed.connect(lambda msg: failures.append(msg))
+
+    worker.run()
+
+    assert failures == ["modelo roto"]
+    # Conn cerrada aunque la inferencia rompió.
+    assert len(closes) == 1

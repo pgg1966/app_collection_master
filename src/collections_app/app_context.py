@@ -48,9 +48,17 @@ if TYPE_CHECKING:
 
 @dataclass(slots=True)
 class AppContext:
-    """Container con la conexión y todos los services instanciados."""
+    """Container con la conexión y todos los services instanciados.
+
+    `db_path` se conserva como string (no `Path`) porque puede ser
+    el literal `:memory:` que NO es un path de filesystem. Es lo
+    que se le pasa a `sqlite3.connect` cuando un worker de QThread
+    necesita su propia conexión (CLAUDE.md sec 2.1 + fix post-5d:
+    no compartir Connection cross-thread).
+    """
 
     conn: sqlite3.Connection
+    db_path: str
     inventory: InventoryService
     collections: CollectionsService
     cards: CardsService
@@ -71,6 +79,18 @@ class AppContext:
         # Conexión ya cerrada o inválida → nada que hacer.
         with contextlib.suppress(sqlite3.Error):
             self.conn.close()
+
+    def create_worker_connection(self: AppContext) -> sqlite3.Connection:
+        """Abre una `sqlite3.Connection` nueva apuntando a la misma DB.
+
+        Los views NO pueden importar `core.db.connection` (CLAUDE.md sec
+        2.1), así que el ctx — que sí puede — expone este helper. Lo usan
+        los workers de QThread que necesitan su propia conexión, ya que
+        SQLite no permite compartir Connection entre hilos.
+
+        El caller es responsable de cerrar la conexión (`with` o try/finally).
+        """
+        return create_connection(self.db_path)
 
     def get_ocr_service(self: AppContext, collection: Collection) -> OcrService | None:
         """Factory de `OcrService` para una colección específica.
@@ -115,6 +135,7 @@ def create_app_context(db_path: Path | str) -> AppContext:
     run_migrations(conn)
     return AppContext(
         conn=conn,
+        db_path=str(db_path),
         inventory=InventoryService(conn),
         collections=CollectionsService(conn),
         cards=CardsService(conn),

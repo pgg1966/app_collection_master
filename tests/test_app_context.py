@@ -181,6 +181,38 @@ def test_get_ocr_service_returns_none_when_no_model_configured(
         ctx.close()
 
 
+def test_create_worker_connection_returns_separate_connection() -> None:
+    """`create_worker_connection` debe devolver una conn NUEVA, no la del ctx.
+
+    Es la que usan los workers de QThread para evitar el cross-thread
+    error de SQLite. El ctx también guarda `db_path` para que la conn
+    apunte a la misma DB.
+    """
+    ctx = create_app_context(":memory:")
+    try:
+        worker_conn = ctx.create_worker_connection()
+        try:
+            assert worker_conn is not ctx.conn
+            # Apunta a la misma DB lógica (`:memory:` es un caso especial;
+            # cada conn :memory: es una DB distinta — verificamos solo que
+            # devolvió una conn usable).
+            assert hasattr(worker_conn, "execute")
+        finally:
+            worker_conn.close()
+    finally:
+        ctx.close()
+
+
+def test_ctx_db_path_preserved_after_creation(tmp_path: Path) -> None:
+    """`ctx.db_path` queda en el ctx para que los workers lo usen."""
+    db_path = tmp_path / "test.db"
+    ctx = create_app_context(db_path)
+    try:
+        assert ctx.db_path == str(db_path)
+    finally:
+        ctx.close()
+
+
 def test_get_ocr_service_returns_none_when_model_file_missing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
