@@ -315,3 +315,64 @@ def test_install_idle_tick_does_not_exceed_step_ceiling(
     # El 100% aparece una sola vez, al final.
     assert progress.count(100) == 1
     assert progress[-1] == 100
+
+
+# ---------------------------------------------------------------------
+# Pre-flight: detectar módulos bloqueados antes de pip
+# ---------------------------------------------------------------------
+
+
+def test_install_raises_pre_flight_when_cv2_already_loaded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Si cv2 ya está en sys.modules, install() falla antes de tocar pip.
+
+    Es el escenario "el usuario abrió una foto antes de instalar":
+    el .pyd queda mapeado y pip no puede sobrescribirlo. Mejor avisar
+    con un mensaje útil que dejar caer un WinError 5 opaco.
+    """
+    import sys
+    import types
+
+    monkeypatch.setitem(sys.modules, "cv2", types.ModuleType("cv2"))
+
+    def spy_popen(*_a, **_k):  # type: ignore[no-untyped-def]
+        raise AssertionError("Popen no debería ejecutarse en pre-flight")
+
+    with (
+        patch("subprocess.Popen", side_effect=spy_popen),
+        pytest.raises(OcrInstallError, match="cerrá y reabrí"),
+    ):
+        OcrInstallService().install(lambda _p, _m: None)
+
+
+def test_install_pre_flight_passes_when_modules_not_loaded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Si ningún módulo está cargado, install() avanza al pipeline."""
+    import sys
+
+    for m in ("cv2", "torch", "torchvision", "ultralytics", "easyocr"):
+        monkeypatch.delitem(sys.modules, m, raising=False)
+
+    factory = _make_popen([])
+    with patch("subprocess.Popen", side_effect=factory):
+        OcrInstallService().install(lambda _p, _m: None)
+    assert len(factory.calls) == 3  # type: ignore[attr-defined]
+
+
+def test_install_pre_flight_ignores_none_module_in_sys_modules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`monkeypatch.setitem(sys.modules, "X", None)` (patrón de los
+    tests del service para forzar ImportError) NO debe contar como
+    módulo cargado en el pre-flight."""
+    import sys
+
+    for m in ("cv2", "torch", "torchvision", "ultralytics", "easyocr"):
+        monkeypatch.setitem(sys.modules, m, None)
+
+    factory = _make_popen([])
+    with patch("subprocess.Popen", side_effect=factory):
+        OcrInstallService().install(lambda _p, _m: None)
+    assert len(factory.calls) == 3  # type: ignore[attr-defined]

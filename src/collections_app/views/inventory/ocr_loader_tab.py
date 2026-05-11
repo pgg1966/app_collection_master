@@ -63,6 +63,33 @@ if TYPE_CHECKING:
 
 
 _CONFIDENCE_THRESHOLD = 0.70
+
+# Sentinels que indican que pip falló por archivos bloqueados. El
+# patrón aparece tal cual en Windows (CPython traduce automáticamente
+# el `errno` a "WinError 5"; el español a "Acceso denegado").
+_ACCESS_DENIED_HINTS: tuple[str, ...] = ("WinError 5", "Acceso denegado")
+
+
+def _format_install_error(raw_message: str) -> str:
+    """Si el error de pip es de archivos bloqueados, dar instrucciones.
+
+    Devuelve el mensaje crudo en cualquier otro caso. Función pura
+    para que el test la cubra sin necesidad de Qt.
+    """
+    if any(hint in raw_message for hint in _ACCESS_DENIED_HINTS):
+        return (
+            "Acceso denegado.\n\n"
+            "Intentá:\n"
+            "1. Cerrar la app\n"
+            "2. Abrir PowerShell como administrador\n"
+            "3. Correr: .venv\\Scripts\\pip install easyocr opencv-python\n"
+            "4. Reabrir la app\n\n"
+            "Detalle técnico:\n"
+            f"{raw_message}"
+        )
+    return raw_message
+
+
 _PAGE_INSTALL = 0
 _PAGE_NO_MODEL = 1
 _PAGE_READY = 2
@@ -370,7 +397,7 @@ class OcrLoaderTab(QWidget):
         QMessageBox.critical(
             self,
             self.tr("Error en la instalación"),
-            message,
+            _format_install_error(message),
         )
         self._install_progress.setVisible(False)
         self._install_status_label.setVisible(False)

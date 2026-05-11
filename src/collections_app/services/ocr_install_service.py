@@ -72,6 +72,18 @@ _INSTALL_PIPELINE: list[tuple[list[str], str, int, int]] = [
 
 _IDLE_TICK_SECONDS = 2.0  # cada cuánto avanzar 1% si pip no emite output
 
+# Si alguno de estos módulos ya está cargado, pip no va a poder
+# sobrescribir su `.pyd` y va a fallar con WinError 5 / Acceso denegado.
+# El chequeo va antes de pip para dar al usuario un mensaje útil en
+# lugar del traceback opaco.
+_LOCKABLE_MODULES: tuple[str, ...] = (
+    "cv2",
+    "torch",
+    "torchvision",
+    "ultralytics",
+    "easyocr",
+)
+
 
 class OcrInstallService:
     """Wrapper sobre `pip install` para los packages de OCR."""
@@ -99,9 +111,26 @@ class OcrInstallService:
         `(100, "Instalación completada.")`.
 
         Raises:
-            OcrInstallError: si algún comando retorna código != 0 o si
-                `Popen` lanza OSError.
+            OcrInstallError: si algún módulo del pipeline ya está
+                cargado en el proceso actual (pip no podría
+                sobrescribir su `.pyd`), o si algún comando retorna
+                código != 0, o si `Popen` lanza OSError.
         """
+        # Pre-flight: si cv2 / torch / etc. ya están en sys.modules, pip
+        # va a fallar con WinError 5 al intentar reemplazar los archivos.
+        # `is not None` para que el patrón de tests
+        # `monkeypatch.setitem(sys.modules, "X", None)` no se considere
+        # como módulo cargado.
+        loaded = [m for m in _LOCKABLE_MODULES if sys.modules.get(m) is not None]
+        if loaded:
+            raise OcrInstallError(
+                "Para instalar las dependencias de OCR, cerrá y reabrí "
+                "la app y hacé click en 'Instalar dependencias' antes "
+                "de abrir ninguna foto. El módulo de imágenes (cv2) "
+                "está cargado y no se puede actualizar con la app en "
+                "ejecución."
+            )
+
         for cmd, message, start_pct, ceiling_pct in _INSTALL_PIPELINE:
             progress_callback(start_pct, message)
             self._run_streamed(

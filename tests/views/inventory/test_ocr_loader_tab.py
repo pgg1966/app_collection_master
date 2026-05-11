@@ -19,6 +19,7 @@ from collections_app.views.inventory.ocr_loader_tab import (
     _PAGE_NO_MODEL,
     _PAGE_READY,
     OcrLoaderTab,
+    _format_install_error,
 )
 
 pytestmark = pytest.mark.gui
@@ -228,3 +229,34 @@ def test_inference_worker_emits_failed_on_ocr_error(
     worker.run()
 
     assert failures == ["modelo roto"]
+
+
+# ---------------------------------------------------------------------
+# _format_install_error — traducción del WinError 5
+# ---------------------------------------------------------------------
+
+
+def test_format_install_error_passes_through_normal_message() -> None:
+    """Sin pistas de acceso denegado, el mensaje se devuelve tal cual."""
+    msg = "el comando falló (código 1):\nERROR: package not found"
+    assert _format_install_error(msg) == msg
+
+
+def test_format_install_error_translates_winerror_5() -> None:
+    """Si el error trae WinError 5, agregar pasos para resolverlo manualmente."""
+    raw = "el comando falló (código 1):\nWinError 5: cv2.pyd is locked"
+    out = _format_install_error(raw)
+    assert "Acceso denegado" in out
+    assert "Cerrar la app" in out
+    assert "PowerShell como administrador" in out
+    assert ".venv\\Scripts\\pip install easyocr opencv-python" in out
+    # El mensaje original queda incluido como detalle técnico.
+    assert "WinError 5" in out
+
+
+def test_format_install_error_translates_acceso_denegado_es() -> None:
+    """También dispara con la traducción en español."""
+    raw = "el comando falló:\nAcceso denegado: cv2.pyd"
+    out = _format_install_error(raw)
+    assert "Cerrar la app" in out
+    assert "Acceso denegado" in out
