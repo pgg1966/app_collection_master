@@ -42,6 +42,8 @@ from PySide6.QtWidgets import (
 )
 
 if TYPE_CHECKING:
+    from collections_app.app_context import AppContext
+    from collections_app.core.models.collection import Collection
     from collections_app.core.models.ocr_detection import OcrDetection, OcrParseError
 
 
@@ -96,8 +98,49 @@ class _ScaledImageLabel(QLabel):
             super().setPixmap(scaled)
 
 
+class _ManualCardDialog(QDialog):
+    """Envuelve `CardLoaderView` en un modal para usarlo desde el flow OCR.
+
+    El usuario abre este popup desde el botón "Agregar no procesadas" del
+    `OcrResultDialog` cuando una card no fue detectada por YOLO/OCR y
+    quiere agregarla manualmente sin abortar el batch. `CardLoaderView`
+    aplica las altas directamente al inventario (vista preservada de
+    v0.1, CLAUDE.md §7.1 — no se modifica). Al cerrar, el usuario vuelve
+    al `OcrResultDialog` para confirmar las detecciones OCR.
+    """
+
+    def __init__(
+        self: _ManualCardDialog,
+        ctx: AppContext,
+        collection: Collection,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        # Import lazy para evitar el ciclo
+        # views/inventory/ocr_result_dialog.py ⇄ views/inventory/card_loader.py
+        # — ambos terminan importados por OcrLoaderTab.
+        from collections_app.views.inventory.card_loader import (  # noqa: PLC0415
+            CardLoaderView,
+        )
+
+        self.setWindowTitle(self.tr("Agregar carta manualmente"))
+        self.setModal(True)
+        self.resize(650, 420)
+
+        layout = QVBoxLayout(self)
+        self._loader = CardLoaderView(ctx=ctx, collection=collection)
+        layout.addWidget(self._loader)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        close_btn = QPushButton(self.tr("Cerrar"))
+        close_btn.clicked.connect(self.accept)
+        btn_layout.addWidget(close_btn)
+        layout.addLayout(btn_layout)
+
+
 class OcrResultDialog(QDialog):
-    """Modal: foto anotada + tabla de detecciones + 3 botones."""
+    """Modal: foto anotada + tabla de detecciones + 4 botones."""
 
     def __init__(
         self: OcrResultDialog,
@@ -106,6 +149,8 @@ class OcrResultDialog(QDialog):
         errors: list[OcrParseError],
         photo_index: int,
         total_photos: int,
+        ctx: AppContext,
+        collection: Collection,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -114,6 +159,10 @@ class OcrResultDialog(QDialog):
         self._errors = list(errors)
         self._photo_index = photo_index
         self._total_photos = total_photos
+        # ctx + collection se usan para instanciar `_ManualCardDialog`
+        # cuando el usuario clickea "Agregar no procesadas".
+        self._ctx = ctx
+        self._collection = collection
         # Flags de salida (Rejected). Sin estos, `exec()` solo informa
         # Accepted/Rejected y el caller no sabría si fue skip o cancel.
         self.skip = False
@@ -198,12 +247,15 @@ class OcrResultDialog(QDialog):
         self._cancel_all_btn.clicked.connect(self._on_cancel_all)
         self._skip_btn = QPushButton(self.tr("Saltar foto"))
         self._skip_btn.clicked.connect(self._on_skip)
+        self._add_manual_btn = QPushButton(self.tr("Agregar no procesadas"))
+        self._add_manual_btn.clicked.connect(self._on_add_manual)
         self._load_btn = QPushButton(self.tr("Cargar esta foto"))
         self._load_btn.setDefault(True)
         self._load_btn.clicked.connect(self.accept)
         btn_row.addWidget(self._cancel_all_btn)
         btn_row.addWidget(self._skip_btn)
         btn_row.addStretch()
+        btn_row.addWidget(self._add_manual_btn)
         btn_row.addWidget(self._load_btn)
         outer.addLayout(btn_row)
 
@@ -247,6 +299,16 @@ class OcrResultDialog(QDialog):
     def _on_cancel_all(self: OcrResultDialog) -> None:
         self.cancel_all = True
         self.reject()
+
+    def _on_add_manual(self: OcrResultDialog) -> None:
+        """Abre el popup de alta manual sin cerrar este diálogo.
+
+        El popup envuelve `CardLoaderView` y aplica las altas
+        directamente al inventario. Al cerrarse, el usuario vuelve a
+        este diálogo para terminar de revisar las detecciones OCR.
+        """
+        dlg = _ManualCardDialog(ctx=self._ctx, collection=self._collection, parent=self)
+        dlg.exec()
 
     # ------------------------------------------------------------------
     # API pública

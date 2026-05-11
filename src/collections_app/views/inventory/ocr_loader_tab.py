@@ -458,6 +458,8 @@ class OcrLoaderTab(QWidget):
             errors=parse_errors,
             photo_index=self._current_index,
             total_photos=len(self._pending_paths),
+            ctx=self._ctx,
+            collection=self._collection,
             parent=self,
         )
         dialog.exec()
