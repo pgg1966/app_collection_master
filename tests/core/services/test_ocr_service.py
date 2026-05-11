@@ -372,3 +372,44 @@ def test_run_inference_handles_multiple_boxes(
     assert errors == []
     assert len(detections) == 2
     assert {(d.code_id, d.card_number) for d in detections} == {("KOR", 6), ("KOR", 10)}
+
+
+def test_run_inference_passes_conf_and_iou_to_yolo(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    db_with_collection: tuple[str, int],
+) -> None:
+    """YOLO recibe `conf=0.25, iou=0.45, verbose=False`.
+
+    El `iou` activa NMS para descartar bounding boxes duplicados sobre
+    el mismo badge cuando el umbral de confianza es bajo (fix
+    post-smoke 5d).
+    """
+    db_path, cid = db_with_collection
+    _patch_cv2(monkeypatch)
+    monkeypatch.setattr("collections_app.services.ocr_reader.leer_badge", lambda _crop: "")
+
+    captured: dict[str, object] = {}
+
+    class _CapturingYolo:
+        def __init__(self, _path: str) -> None:
+            pass
+
+        def __call__(self, *_args, **kwargs):  # type: ignore[no-untyped-def]
+            captured.update(kwargs)
+            return [_FakeYoloResult([])]
+
+    fake_module = types.ModuleType("ultralytics")
+    fake_module.YOLO = _CapturingYolo  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "ultralytics", fake_module)
+
+    f = tmp_path / "fake_model.pt"
+    f.write_bytes(b"\x00\x00")
+    svc = OcrService(f)
+    image = tmp_path / "foto.jpg"
+    image.write_bytes(b"\xff\xd8\xff")
+    svc.run_inference(image, db_path=db_path, collection_id=cid)
+
+    assert captured.get("conf") == pytest.approx(0.25)
+    assert captured.get("iou") == pytest.approx(0.45)
+    assert captured.get("verbose") is False

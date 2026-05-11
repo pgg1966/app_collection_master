@@ -3,7 +3,8 @@
 El pipeline completo, ejecutado por `run_inference`:
 
 1. `cv2.imread` carga la foto.
-2. YOLO detecta bounding boxes de badges (`self._model(img, conf=0.4)`).
+2. YOLO detecta bounding boxes de badges (`self._model(img, conf=0.25,
+   iou=0.45)`). El `iou=0.45` activa NMS para descartar duplicados.
 3. Para cada bbox: recortar con 4px de padding.
 4. `ocr_reader.leer_badge(crop)` lee texto crudo con EasyOCR.
 5. `ocr_validator.build_validator(...)` arma un validador desde la
@@ -48,6 +49,13 @@ if TYPE_CHECKING:
 # la marca como no reconocida. Bajar el umbral captura badges con
 # ángulos / iluminación marginales sin agregar ruido para el user.
 _YOLO_CONF_THRESHOLD = 0.25
+# Threshold de IoU (Intersection over Union) para Non-Maximum
+# Suppression. Si dos bounding boxes se solapan más de este ratio,
+# YOLO descarta el de menor confianza. 0.45 es lo suficientemente
+# permisivo para badges adyacentes en una hilera del álbum sin
+# perderlos, pero ataja los duplicados sobre el mismo badge que
+# aparecen al bajar el umbral de confianza.
+_YOLO_IOU_THRESHOLD = 0.45
 # Padding (pixeles) alrededor del bbox antes del crop. Mejora la lectura
 # de EasyOCR — el bbox de YOLO suele recortar muy ajustado al texto.
 _CROP_PADDING = 4
@@ -155,7 +163,12 @@ class OcrService:
                 if c.card_id is not None
             }
 
-            yolo_results = self._model(img, conf=_YOLO_CONF_THRESHOLD, verbose=False)
+            yolo_results = self._model(
+                img,
+                conf=_YOLO_CONF_THRESHOLD,
+                iou=_YOLO_IOU_THRESHOLD,
+                verbose=False,
+            )
 
             detections: list[OcrDetection] = []
             errors: list[OcrParseError] = []
