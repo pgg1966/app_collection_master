@@ -43,15 +43,23 @@ def test_is_available_returns_false_when_torch_missing(
     assert OcrService.is_available() is False
 
 
-def test_is_available_returns_true_when_both_present(
+def test_is_available_returns_true_when_all_present(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Si ambos módulos importan, devuelve True."""
-    fake_torch = types.ModuleType("torch")
-    fake_ultralytics = types.ModuleType("ultralytics")
-    monkeypatch.setitem(sys.modules, "torch", fake_torch)
-    monkeypatch.setitem(sys.modules, "ultralytics", fake_ultralytics)
+    """Si los 4 módulos del pipeline importan, devuelve True."""
+    for name in ("torch", "ultralytics", "easyocr", "cv2"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
     assert OcrService.is_available() is True
+
+
+def test_is_available_returns_false_when_easyocr_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """torch/ultralytics OK pero falta easyocr → False (pipeline incompleto)."""
+    for name in ("torch", "ultralytics", "cv2"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, "easyocr", None)
+    assert OcrService.is_available() is False
 
 
 # ---------------------------------------------------------------------

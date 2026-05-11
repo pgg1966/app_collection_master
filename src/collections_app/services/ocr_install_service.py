@@ -35,6 +35,11 @@ ProgressCallback = Callable[[int, str], None]
 # Cada paso del pipeline define el rango de porcentaje que ocupa.
 # El "ceiling" deja un 2% de headroom para que el último tick no
 # alcance el techo del próximo paso antes de que el comando termine.
+#
+# Pipeline post fix-5d: PyTorch (necesario para YOLO y EasyOCR) →
+# Ultralytics (modelo YOLO de detección de badges) → EasyOCR + OpenCV
+# (segunda etapa de lectura de texto sobre cada crop). Cada paso ocupa
+# ~30% del progreso total.
 _INSTALL_PIPELINE: list[tuple[list[str], str, int, int]] = [
     (
         [
@@ -48,13 +53,19 @@ _INSTALL_PIPELINE: list[tuple[list[str], str, int, int]] = [
             "https://download.pytorch.org/whl/cpu",
         ],
         "Instalando PyTorch (CPU)... esto puede tardar varios minutos.",
-        0,  # start_pct
-        48,  # ceiling_pct (deja 2% antes del 50% del siguiente paso)
+        0,
+        30,
     ),
     (
         [sys.executable, "-m", "pip", "install", "ultralytics"],
         "Instalando Ultralytics YOLO...",
-        50,
+        32,
+        60,
+    ),
+    (
+        [sys.executable, "-m", "pip", "install", "easyocr", "opencv-python"],
+        "Instalando EasyOCR + OpenCV...",
+        62,
         98,
     ),
 ]

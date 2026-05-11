@@ -43,13 +43,19 @@ class OcrService:
 
     @staticmethod
     def is_available() -> bool:
-        """¿Están instalados torch y ultralytics?
+        """¿Están instaladas las 4 dependencias del pipeline OCR?
+
+        Pipeline: YOLO (torch + ultralytics) → crop (cv2) → EasyOCR
+        (easyocr, que internamente usa torch). Si falta cualquiera de
+        las 4 piezas el flow no funciona, así que devolvemos `False`.
 
         Se llama desde la UI ANTES de instanciar el service para decidir
         el estado de la tab. Hace los imports adentro para que un módulo
         que importe `OcrService` no arrastre torch al cargar.
         """
         try:
+            import cv2  # noqa: F401, PLC0415
+            import easyocr  # noqa: F401, PLC0415
             import torch  # noqa: F401, PLC0415
             import ultralytics  # noqa: F401, PLC0415
         except ImportError:

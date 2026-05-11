@@ -140,10 +140,12 @@ def test_install_runs_full_pipeline_with_streaming_output() -> None:
     with patch("subprocess.Popen", side_effect=factory):
         OcrInstallService().install(lambda pct, msg: progress.append((pct, msg)))
 
-    # 2 comandos en el pipeline.
-    assert len(factory.calls) == 2  # type: ignore[attr-defined]
+    # 3 comandos en el pipeline (torch / ultralytics / easyocr+opencv).
+    assert len(factory.calls) == 3  # type: ignore[attr-defined]
     assert "torch" in factory.calls[0]  # type: ignore[attr-defined]
     assert "ultralytics" in factory.calls[1]  # type: ignore[attr-defined]
+    assert "easyocr" in factory.calls[2]  # type: ignore[attr-defined]
+    assert "opencv-python" in factory.calls[2]  # type: ignore[attr-defined]
 
     # Primer y último tick: inicio del paso 1 y "Instalación completada."
     assert progress[0][0] == 0
@@ -153,7 +155,7 @@ def test_install_runs_full_pipeline_with_streaming_output() -> None:
 
 
 def test_install_emits_progress_for_each_command_in_pipeline() -> None:
-    """El callback recibe los dos mensajes descriptivos del pipeline."""
+    """El callback recibe los tres mensajes descriptivos del pipeline."""
     factory = _make_popen([])
     messages: list[str] = []
 
@@ -162,6 +164,7 @@ def test_install_emits_progress_for_each_command_in_pipeline() -> None:
 
     assert any("PyTorch" in m for m in messages)
     assert any("Ultralytics" in m for m in messages)
+    assert any("EasyOCR" in m for m in messages)
     assert messages[-1] == "Instalación completada."
 
 
