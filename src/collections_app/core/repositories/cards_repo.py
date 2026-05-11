@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
+from collections_app.core.models.aggregates.code_catalog import CodeCatalog
 from collections_app.core.models.aggregates.code_stats import CodeStats
 from collections_app.core.models.card import Card
 from collections_app.core.repositories.base import BaseRepository
@@ -92,6 +93,41 @@ class CardsRepository(BaseRepository):
             (collection_id, card_number),
         ).fetchall()
         return [_row_to_card(r) for r in rows]
+
+    def get_code_catalog(self: CardsRepository, collection_id: int) -> CodeCatalog:
+        """Catálogo de códigos de la colección (para validador OCR).
+
+        Sesión 5d / fix post-smoke: empaqueta los dos datos que el
+        validador de OCR necesita — los códigos únicos en orden de
+        álbum y el máximo `card_number` por código — en un solo
+        agregado para respetar el contrato de retorno de repos
+        (CLAUDE.md sec 2.3 prohíbe `list[str]` y `dict[str, int]`
+        sueltos).
+
+        Para colecciones con `requires_code=False`, los códigos pueden
+        no estar en `codes_lines`; el LEFT JOIN deja `code_order=NULL`
+        y `COALESCE(...,0)` los agrupa al mismo bucket. Una única
+        query resuelve los dos datos.
+        """
+        rows = self.conn.execute(
+            "SELECT c.code_id AS code_id, "
+            "       MAX(c.card_number) AS max_num, "
+            "       COALESCE(cl.code_order, 0) AS code_order "
+            "FROM cards c "
+            "LEFT JOIN codes_lines cl "
+            "  ON cl.code_id = c.code_id "
+            " AND cl.code_header_id = ("
+            "       SELECT code_header_id FROM collections "
+            "       WHERE collection_id = ?"
+            "    ) "
+            "WHERE c.collection_id = ? "
+            "GROUP BY c.code_id, cl.code_order "
+            "ORDER BY code_order, c.code_id",
+            (collection_id, collection_id),
+        ).fetchall()
+        codes = tuple(row["code_id"] for row in rows)
+        max_by_code = {row["code_id"]: int(row["max_num"]) for row in rows}
+        return CodeCatalog(codes=codes, max_number_by_code=max_by_code)
 
     def count_by_collection(self: CardsRepository, collection_id: int) -> int:
         """Cuántas cards tiene la colección."""

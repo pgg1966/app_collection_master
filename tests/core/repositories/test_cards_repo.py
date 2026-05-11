@@ -8,9 +8,11 @@ import pytest
 
 from collections_app.core.models.card import Card
 from collections_app.core.models.code_header import CodeHeader
+from collections_app.core.models.code_line import CodeLine
 from collections_app.core.models.collection import Collection
 from collections_app.core.repositories.cards_repo import CardsRepository
 from collections_app.core.repositories.code_headers_repo import CodeHeadersRepository
+from collections_app.core.repositories.code_lines_repo import CodeLinesRepository
 from collections_app.core.repositories.collections_repo import CollectionsRepository
 
 
@@ -229,3 +231,98 @@ def test_delete_by_id_cascades_to_inventory(
         "SELECT COUNT(*) AS c FROM inventory WHERE card_id = ?", (saved.card_id,)
     ).fetchone()
     assert remaining["c"] == 0
+
+
+# ---------------------------------------------------------------------
+# get_code_catalog (Sesión 5d / fix OCR)
+# ---------------------------------------------------------------------
+
+
+def test_get_code_catalog_empty_collection(repo: CardsRepository, collection_id: int) -> None:
+    """Collection sin cards → catálogo vacío."""
+    catalog = repo.get_code_catalog(collection_id)
+    assert catalog.codes == ()
+    assert catalog.max_number_by_code == {}
+
+
+def test_get_code_catalog_returns_unique_codes(repo: CardsRepository, collection_id: int) -> None:
+    """Múltiples cards con el mismo `code_id` aparecen una sola vez en `codes`."""
+    repo.create(_make(collection_id, code_id="ARG", card_number=1))
+    repo.create(_make(collection_id, code_id="ARG", card_number=2))
+    repo.create(_make(collection_id, code_id="BRA", card_number=1))
+    catalog = repo.get_code_catalog(collection_id)
+    assert set(catalog.codes) == {"ARG", "BRA"}
+
+
+def test_get_code_catalog_orders_codes_by_code_order(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """Si la colección tiene `codes_lines` con `code_order`, respeta ese orden."""
+    headers = CodeHeadersRepository(db_conn)
+    lines = CodeLinesRepository(db_conn)
+    collections = CollectionsRepository(db_conn)
+    repo = CardsRepository(db_conn)
+
+    h = headers.create(CodeHeader(code_header_id=None, code_header_name="WC"))
+    assert h.code_header_id is not None
+    for code, order in [("ZIM", 1), ("ARG", 2), ("ALG", 3)]:
+        lines.upsert(
+            CodeLine(
+                code_line_id=None,
+                code_header_id=h.code_header_id,
+                code_id=code,
+                code_name=code,
+                code_order=order,
+            )
+        )
+    coll = collections.create(
+        Collection(
+            collection_id=None,
+            collection_name="Mundial",
+            card_count=3,
+            requires_code=True,
+            code_field_name="País",
+            code_header_id=h.code_header_id,
+        )
+    )
+    assert coll.collection_id is not None
+    for code in ("ALG", "ARG", "ZIM"):  # alfabético al insertar
+        repo.create(_make(coll.collection_id, code_id=code, card_number=1))
+    catalog = repo.get_code_catalog(coll.collection_id)
+    assert catalog.codes == ("ZIM", "ARG", "ALG")
+
+
+def test_get_code_catalog_returns_max_number_per_code(
+    repo: CardsRepository, collection_id: int
+) -> None:
+    """`max(card_number)` por code_id, una entrada por código."""
+    for code, num in [("ARG", 1), ("ARG", 18), ("ARG", 5), ("BRA", 20), ("KOR", 6)]:
+        repo.create(_make(collection_id, code_id=code, card_number=num))
+    catalog = repo.get_code_catalog(collection_id)
+    assert catalog.max_number_by_code == {"ARG": 18, "BRA": 20, "KOR": 6}
+
+
+def test_get_code_catalog_isolated_per_collection(
+    repo: CardsRepository,
+    collection_id: int,
+    db_conn: sqlite3.Connection,
+) -> None:
+    """El catálogo de una colección no se contamina con cards de otra."""
+    headers = CodeHeadersRepository(db_conn)
+    h = headers.create(CodeHeader(code_header_id=None, code_header_name="OtherH"))
+    assert h.code_header_id is not None
+    other = CollectionsRepository(db_conn).create(
+        Collection(
+            collection_id=None,
+            collection_name="OtherC",
+            card_count=1,
+            requires_code=False,
+            code_field_name=None,
+            code_header_id=h.code_header_id,
+        )
+    )
+    assert other.collection_id is not None
+    repo.create(_make(collection_id, code_id="X", card_number=5))
+    repo.create(_make(other.collection_id, code_id="X", card_number=99))
+    assert repo.get_code_catalog(collection_id).max_number_by_code == {"X": 5}
+    assert repo.get_code_catalog(other.collection_id).max_number_by_code == {"X": 99}
