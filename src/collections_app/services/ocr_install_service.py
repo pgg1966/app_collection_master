@@ -106,6 +106,12 @@ def _build_pipeline(python_exe: str) -> list[tuple[list[str], str, int, int]]:
 
 _IDLE_TICK_SECONDS = 2.0  # cada cuánto avanzar 1% si pip no emite output
 
+# CREATE_NO_WINDOW (0x08000000) suprime la ventana de consola que
+# Windows abre automaticamente al lanzar un subprocess GUI-less desde
+# un .exe windowed. Solo aplica en Windows; en otros SO el flag se
+# pasa como 0 (no-op).
+_NO_WINDOW_FLAG = 0x08000000 if sys.platform == "win32" else 0
+
 # Si alguno de estos módulos ya está cargado, pip no va a poder
 # sobrescribir su `.pyd` y va a fallar con WinError 5 / Acceso denegado.
 # El chequeo va antes de pip para dar al usuario un mensaje útil en
@@ -197,6 +203,7 @@ class OcrInstallService:
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
+                creationflags=_NO_WINDOW_FLAG,
             )
         except OSError as exc:
             raise OcrInstallError(
