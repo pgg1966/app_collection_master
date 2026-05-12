@@ -1,11 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
-# Spec PyInstaller para collections-client.exe (Windows x64, onefile).
+# Spec PyInstaller para CollectionsApp.exe (Windows x64, onefile).
 #
 # Compilar con:
-#     python build/build_client.py [--clean] [--debug]
+#     python build/build_app.py [--clean] [--debug]
 #
 # El .spec se modifica como código Python: PyInstaller lo ejecuta y usa
 # los objetos resultantes (Analysis / PYZ / EXE) para empaquetar.
+#
+# Bundle "liviano": las dependencias pesadas del OCR (torch, torchvision,
+# ultralytics, easyocr, cv2) NO van adentro — se instalan bajo demanda
+# desde la app (OcrInstallService) la primera vez que el usuario abre
+# la tab "Por foto". Ver docs/install_guide.md.
 
 from pathlib import Path
 
@@ -15,7 +20,7 @@ SRC = ROOT / "src"
 block_cipher = None
 
 a = Analysis(
-    [str(SRC / "collections_app" / "client" / "main.py")],
+    [str(SRC / "collections_app" / "main.py")],
     pathex=[str(SRC)],
     binaries=[],
     datas=[
@@ -28,28 +33,42 @@ a = Analysis(
         ),
     ],
     hiddenimports=[
-        # Repositorios — algunos se importan de forma indirecta y PyInstaller
-        # no detecta el grafo si no se enumeran.
+        # core/db
         "collections_app.core.db.migrator",
-        "collections_app.core.repositories.settings_repo",
+        "collections_app.core.db.connection",
+        # core/repositories
+        "collections_app.core.repositories.app_settings_repo",
         "collections_app.core.repositories.collections_repo",
-        "collections_app.core.repositories.codes_headers_repo",
-        "collections_app.core.repositories.codes_lines_repo",
+        "collections_app.core.repositories.code_headers_repo",
+        "collections_app.core.repositories.code_lines_repo",
         "collections_app.core.repositories.cards_repo",
         "collections_app.core.repositories.inventory_repo",
         "collections_app.core.repositories.transactions_repo",
         "collections_app.core.repositories.card_images_repo",
-        # Servicios
-        "collections_app.core.services.album_service",
-        "collections_app.core.services.pdf_generator",
-        "collections_app.core.services.inventory_service",
-        "collections_app.core.services.license_service",
-        "collections_app.core.services.reports_service",
-        "collections_app.core.services.collections_service",
-        "collections_app.core.services.settings_service",
-        "collections_app.core.services.update_service",
-        "collections_app.core.services.exchange_service",
-        "collections_app.core.services.profile_service",
+        # services — todos los que el AppContext instancia o expone vía factory
+        "collections_app.services.settings_service",
+        "collections_app.services.collections_service",
+        "collections_app.services.code_headers_service",
+        "collections_app.services.code_lines_service",
+        "collections_app.services.cards_service",
+        "collections_app.services.transactions_service",
+        "collections_app.services.inventory_service",
+        "collections_app.services.csv_import_service",
+        "collections_app.services.inventory_import_service",
+        "collections_app.services.inventory_snapshot_service",
+        "collections_app.services.matching_service",
+        "collections_app.services.exchange_import_service",
+        "collections_app.services.exchange_export_service",
+        "collections_app.services.exchange_apply_service",
+        "collections_app.services.exchange_errors",
+        "collections_app.services.exceptions",
+        # OCR — los modulos .py de la app SI van (son chicos y se importan
+        # de forma indirecta via app_context.get_ocr_service). Los packages
+        # pesados que ellos consumen (torch/cv2/etc.) estan en `excludes`.
+        "collections_app.services.ocr_install_service",
+        "collections_app.services.ocr_service",
+        "collections_app.services.ocr_reader",
+        "collections_app.services.ocr_validator",
         # PySide6 — módulos que pueden no detectarse si la app los usa
         # solo de forma indirecta (ej. SVG en QPixmap, print preview).
         "PySide6.QtSvg",
@@ -73,12 +92,17 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        # El cliente NO necesita el código de admin ni sus deps de scraping.
-        "collections_app.admin",
+        # Dependencias pesadas del OCR — NO van en el bundle, se instalan
+        # bajo demanda (OcrInstallService). Mantener el .exe liviano.
+        "torch",
+        "torchvision",
+        "ultralytics",
+        "easyocr",
         "cv2",
+        # Scraping y similares — no se usan en la app cliente.
         "duckduckgo_search",
         "bs4",
-        # Stdlib pesado que la app cliente no usa.
+        # Stdlib pesado que la app no usa.
         # OJO: NO excluir `email`, `xml.etree` ni `urllib` — reportlab los
         # arrastra transitivamente (reportlab/lib/utils.py → urllib.request
         # → email). Excluirlos rompe el .exe en runtime con
@@ -101,7 +125,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name="collections-client",
+    name="CollectionsApp",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

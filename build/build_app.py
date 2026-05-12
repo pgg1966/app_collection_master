@@ -1,13 +1,14 @@
-"""Compila collections-client.exe con PyInstaller (Windows x64, onefile).
+"""Compila CollectionsApp.exe con PyInstaller (Windows x64, onefile).
 
 Uso:
-    python build/build_client.py
-    python build/build_client.py --clean   # borrar dist/ y build/work/ antes
-    python build/build_client.py --debug   # consola visible para diagnóstico
+    python build/build_app.py
+    python build/build_app.py --clean   # borrar dist/ y build/work/ antes
+    python build/build_app.py --debug   # consola visible para diagnóstico
 
-El resultado es `dist/collections-client.exe` standalone (~80-150 MB con
-PySide6 + reportlab + Pillow incluidos). En el primer arranque tarda
-5-15s extrayendo a %TEMP% — comportamiento normal de onefile.
+El resultado es `dist/CollectionsApp.exe` standalone (~150-250 MB con
+PySide6 + reportlab + Pillow incluidos; sin torch/easyocr/ultralytics —
+esos se instalan bajo demanda desde la app). En el primer arranque
+tarda 5-15s extrayendo a %TEMP% — comportamiento normal de onefile.
 """
 
 import argparse
@@ -17,10 +18,10 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
-SPEC = ROOT / "build" / "collections-client.spec"
+SPEC = ROOT / "build" / "collections-app.spec"
 DIST = ROOT / "dist"
 WORK = ROOT / "build" / "work"
-EXE = DIST / "collections-client.exe"
+EXE = DIST / "CollectionsApp.exe"
 
 
 def main(argv: list[str] | None = None) -> int:
