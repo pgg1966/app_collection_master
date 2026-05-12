@@ -23,6 +23,8 @@ data/
 *.db-wal
 *.db-shm
 *.log
+# Excepción: la DB semilla SÍ va al repo (asset distribuido en el bundle).
+!assets/collections_seed.db
 
 # PyInstaller (versionar build/*.spec, hooks/ y build_app.py;
 # ignorar solo los outputs del compilador)

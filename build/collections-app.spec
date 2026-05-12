@@ -16,22 +16,36 @@ from pathlib import Path
 
 ROOT = Path(SPECPATH).parent
 SRC = ROOT / "src"
+ASSETS = ROOT / "assets"
 
 block_cipher = None
+
+# Datas estáticos del bundle. La DB semilla se agrega condicionalmente
+# (si existe en assets/) para que el build no falle en entornos sin
+# generarla — la app degrada graceful a "DB vacía" si la semilla no
+# está, ver `_ensure_default_db` en main.py.
+_datas = [
+    # Migraciones SQL — imprescindibles en runtime para inicializar la DB.
+    # Se montan en _MEIPASS/collections_app/core/db/schema (ver
+    # `_get_bundle_dir()` en paths.py).
+    (
+        str(SRC / "collections_app" / "core" / "db" / "schema"),
+        "collections_app/core/db/schema",
+    ),
+]
+
+_seed_db = ASSETS / "collections_seed.db"
+if _seed_db.is_file():
+    # Montado en _MEIPASS/collections_app/seed/ (ver `get_seed_dir()` en
+    # paths.py). Si la semilla no existe en assets/, el build sigue y la
+    # app arranca con DB vacía.
+    _datas.append((str(_seed_db), "collections_app/seed"))
 
 a = Analysis(
     [str(SRC / "collections_app" / "main.py")],
     pathex=[str(SRC)],
     binaries=[],
-    datas=[
-        # Migraciones SQL — imprescindibles en runtime para inicializar la DB.
-        # Se montan en _MEIPASS/collections_app/core/db/schema (ver
-        # `_get_bundle_dir()` en paths.py).
-        (
-            str(SRC / "collections_app" / "core" / "db" / "schema"),
-            "collections_app/core/db/schema",
-        ),
-    ],
+    datas=_datas,
     hiddenimports=[
         # core/db
         "collections_app.core.db.migrator",
