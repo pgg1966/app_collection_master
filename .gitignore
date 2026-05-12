@@ -25,6 +25,8 @@ data/
 *.log
 # Excepción: la DB semilla SÍ va al repo (asset distribuido en el bundle).
 !assets/collections_seed.db
+# Excepción: el PNG del splash del bootloader (asset embebido en el bundle).
+!assets/splash_bg.png
 
 # PyInstaller (versionar build/*.spec, hooks/ y build_app.py;
 # ignorar solo los outputs del compilador)

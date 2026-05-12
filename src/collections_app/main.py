@@ -148,6 +148,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     app = QApplication.instance() or QApplication(sys.argv)
     apply_app_style(app)
 
+    # Cierra el splash del bootloader de PyInstaller (la imagen estatica
+    # `assets/splash_bg.png` que mostro mientras se extraia el onefile).
+    # `pyi_splash` solo existe dentro del bundle; en desarrollo el import
+    # falla y se ignora.
+    try:
+        import pyi_splash  # type: ignore[import-not-found]  # noqa: PLC0415
+
+        pyi_splash.close()
+    except ImportError:
+        pass
+
     splash = AppSplashScreen()
     splash.show()
     QApplication.processEvents()

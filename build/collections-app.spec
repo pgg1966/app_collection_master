@@ -132,9 +132,31 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
+# Bootloader splash: imagen mostrada por el runtime de PyInstaller
+# ANTES de que Python arranque (la extracción onefile del bundle a
+# %TEMP% tarda 5-30s y sin splash el usuario ve la pantalla en blanco).
+# El asset es condicional al igual que la DB semilla: si el PNG no
+# existe en assets/, el build sigue sin splash de bootloader.
+_splash_png = ASSETS / "splash_bg.png"
+if _splash_png.is_file():
+    splash = Splash(
+        str(_splash_png),
+        binaries=a.binaries,
+        datas=a.datas,
+        text_pos=None,
+        text_size=12,
+        minify_script=True,
+        always_on_top=True,
+    )
+    _exe_extra_args = (splash, splash.binaries)
+else:
+    splash = None
+    _exe_extra_args = ()
+
 exe = EXE(
     pyz,
     a.scripts,
+    *_exe_extra_args,
     a.binaries,
     a.zipfiles,
     a.datas,
