@@ -92,6 +92,23 @@ class AppContext:
         """
         return create_connection(self.db_path)
 
+    def get_ocr_guide_path(self: AppContext, collection: Collection) -> Path | None:
+        """Path absoluto de la imagen de guía OCR de `collection`.
+
+        Devuelve `None` si la colección no tiene `ocr_guide_filename`
+        configurado o si el archivo no existe en disco. El caller
+        (OcrLoaderTab) usa esto para decidir si renderiza la imagen o
+        no.
+        """
+        if not collection.ocr_guide_filename:
+            return None
+        # Import lazy: paths.py NO se quiere cargar al testear el
+        # AppContext con `:memory:` (no hace falta).
+        from collections_app.core.utils.paths import get_images_dir  # noqa: PLC0415
+
+        path = get_images_dir() / collection.ocr_guide_filename
+        return path if path.is_file() else None
+
     def get_ocr_service(self: AppContext, collection: Collection) -> OcrService | None:
         """Factory de `OcrService` para una colección específica.
 

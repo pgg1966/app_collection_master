@@ -179,6 +179,32 @@ def test_get_models_dir_is_idempotent(tmp_path: Path, monkeypatch: pytest.Monkey
 
 
 # ---------------------------------------------------------------------
+# get_images_dir (migración 003 — guías OCR)
+# ---------------------------------------------------------------------
+
+
+def test_get_images_dir_creates_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`<app_data>/images/`, creado si no existe."""
+    from collections_app.core.utils.paths import get_images_dir
+
+    _isolate_app_data(tmp_path, monkeypatch)
+    target = get_images_dir()
+    assert target.is_dir()
+    assert target.name == "images"
+    assert target.parent == get_app_data_dir()
+
+
+def test_get_images_dir_is_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from collections_app.core.utils.paths import get_images_dir
+
+    _isolate_app_data(tmp_path, monkeypatch)
+    a = get_images_dir()
+    b = get_images_dir()
+    assert a == b
+    assert a.is_dir()
+
+
+# ---------------------------------------------------------------------
 # get_downloads_dir
 # ---------------------------------------------------------------------
 

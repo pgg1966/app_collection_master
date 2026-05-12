@@ -252,3 +252,86 @@ def test_get_ocr_service_returns_none_when_model_file_missing(
         assert ctx.get_ocr_service(coll) is None
     finally:
         ctx.close()
+
+
+# ---------------------------------------------------------------------
+# get_ocr_guide_path (migración 003)
+# ---------------------------------------------------------------------
+
+
+def _isolate_app_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Apunta `<app_data>/` al tmp_path del test."""
+    import sys
+
+    fake_base = tmp_path / "FakeBase"
+    if sys.platform == "win32":
+        monkeypatch.setenv("APPDATA", str(fake_base))
+    elif sys.platform == "darwin":
+        monkeypatch.setenv("HOME", str(fake_base))
+    else:
+        monkeypatch.setenv("XDG_DATA_HOME", str(fake_base))
+
+
+def _make_collection_with_guide(ctx: AppContext, guide_filename: str | None):  # type: ignore[no-untyped-def]
+    from collections_app.core.models.code_header import CodeHeader
+    from collections_app.core.models.collection import Collection
+
+    h = ctx.code_headers.create(
+        CodeHeader(code_header_id=None, code_header_name="WC", code_max_length=3)
+    )
+    assert h.code_header_id is not None
+    return ctx.collections.create(
+        Collection(
+            collection_id=None,
+            collection_name="X",
+            card_count=0,
+            requires_code=True,
+            code_field_name="País",
+            code_header_id=h.code_header_id,
+            ocr_guide_filename=guide_filename,
+        )
+    )
+
+
+def test_get_ocr_guide_path_returns_none_when_filename_not_configured() -> None:
+    """`collection.ocr_guide_filename = None` → factory devuelve None."""
+    ctx = create_app_context(":memory:")
+    try:
+        coll = _make_collection_with_guide(ctx, None)
+        assert ctx.get_ocr_guide_path(coll) is None
+    finally:
+        ctx.close()
+
+
+def test_get_ocr_guide_path_returns_none_when_file_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Filename configurado pero el archivo no existe en `images/` → None."""
+    _isolate_app_data(tmp_path, monkeypatch)
+    ctx = create_app_context(":memory:")
+    try:
+        coll = _make_collection_with_guide(ctx, "ocr_guide_nope.jpg")
+        assert ctx.get_ocr_guide_path(coll) is None
+    finally:
+        ctx.close()
+
+
+def test_get_ocr_guide_path_returns_path_when_file_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Filename configurado + archivo presente → Path absoluto."""
+    from collections_app.core.utils.paths import get_images_dir
+
+    _isolate_app_data(tmp_path, monkeypatch)
+    images_dir = get_images_dir()
+    real_image = images_dir / "ocr_guide_42.png"
+    real_image.write_bytes(b"\x89PNG\r\n\x1a\n")  # PNG header dummy
+
+    ctx = create_app_context(":memory:")
+    try:
+        coll = _make_collection_with_guide(ctx, "ocr_guide_42.png")
+        result = ctx.get_ocr_guide_path(coll)
+        assert result == real_image
+        assert result.is_file()
+    finally:
+        ctx.close()

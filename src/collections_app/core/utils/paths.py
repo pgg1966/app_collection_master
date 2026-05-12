@@ -148,6 +148,23 @@ def get_models_dir() -> Path:
     return target
 
 
+def get_images_dir() -> Path:
+    """Directorio para imágenes de instrucciones OCR (migración 003).
+
+    `<app_data>/images/`. Se crea si no existe. Cada colección con guía
+    OCR tiene una imagen acá (ej. `ocr_guide_1.jpg`); el filename se
+    persiste en `collections.ocr_guide_filename` y el path completo se
+    reconstruye con `get_images_dir() / filename`.
+
+    No se segrega por profile (mismo razonamiento que `get_models_dir`):
+    el filename canónico `ocr_guide_<collection_id>.<ext>` garantiza
+    unicidad por colección.
+    """
+    target = get_app_data_dir() / "images"
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
 def get_generated_cards_dir_for_profile(profile: str | None) -> Path:
     """Directorio para imágenes generadas, segregado por profile.
 
