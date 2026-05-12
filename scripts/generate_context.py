@@ -1,4 +1,14 @@
-"""Genera `docs/project_structure_NN.md` con la estructura del proyecto.
+"""Genera dos artefactos de contexto del proyecto.
+
+Outputs:
+
+- `docs/project_structure_NN.md` (N partes, default 3): árbol del repo +
+  contenido completo de cada archivo texto. Particionado por tamaño para
+  que cada archivo sea pegable a una conversación de LLM.
+- `docs/data_dictionary.md` (un archivo): hand-off compacto con el
+  schema SQL + dataclasses + repositorios. **Sin redundancia** con
+  `project_structure_NN.md` — esos ya contienen los `.py`/`.sql` completos;
+  este es el resumen.
 
 Características:
 
@@ -10,20 +20,16 @@ Características:
   (imágenes, .db, .pdf, .xlsx) se listan con nota.
 - **Por cada archivo `.py`**: outline de clases/funciones públicas con
   signaturas + docstring de primer renglón **antes** del código completo.
-- Mantiene la sección de **schema SQL + dataclasses + repositories** como
-  hand-off compacto para alimentar a un LLM.
-- **Partición en N archivos** (default 3) para que cada parte sea
-  pegable/subible a una conversación de LLM. Si una parte supera
-  `--max-mb` (default 1.0 MB), aumenta N automáticamente hasta que el
-  archivo más grande quede dentro del límite.
+- **Partición**: si una parte supera `--max-mb` (default 1.0 MB), N aumenta
+  automáticamente hasta que el archivo más grande quede dentro del límite.
 
 Uso:
     python scripts/generate_context.py                    # 3 partes
     python scripts/generate_context.py --parts 5         # forzar 5 partes
     python scripts/generate_context.py --max-mb 0.7      # techo 700 KB/parte
 
-Outputs: `docs/project_structure_01.md`, `_02.md`, ... (sobreescribe). El
-archivo antiguo `docs/project_structure.md` se borra si existe.
+`docs/project_structure.md` antiguo (monolítico) y huérfanos `_NN.md`
+de runs previos se borran.
 """
 
 from __future__ import annotations
@@ -45,6 +51,7 @@ DOCS_DIR = ROOT / "docs"
 # Output path stem para las partes: docs/project_structure_NN.md.
 OUTPUT_STEM = "project_structure"
 LEGACY_OUTPUT = DOCS_DIR / "project_structure.md"
+DATA_DICT_OUTPUT = DOCS_DIR / "data_dictionary.md"
 
 DEFAULT_PARTS = 3
 DEFAULT_MAX_MB = 1.0
@@ -573,13 +580,7 @@ def render_context_section(
     model_modules: list[ModuleSummary],
     repo_modules: list[ModuleSummary],
 ) -> list[str]:
-    out: list[str] = ["# 3. Contexto (schema, modelos, repositorios)", ""]
-    out.append(
-        "Resumen compacto del schema SQL, los dataclasses de `core/models/` "
-        "y la API pública de los Repository. Pensado como hand-off para "
-        "una conversación nueva."
-    )
-    out.append("")
+    out: list[str] = ["# Schema, modelos y repositorios", ""]
 
     out.append("## Schema SQL")
     out.append("")
@@ -794,8 +795,6 @@ def main(argv: list[str] | None = None) -> int:
     tree_block.extend(build_tree_from_files(files))
     tree_block.append("")
 
-    context_block: list[str] = render_context_section(tables, model_modules, repo_modules)
-
     # Bloques de §2 (uno por archivo). Pre-rendereados para que la
     # partición sea por tamaño real del output, no por estimación.
     file_blocks: list[tuple[Path, list[str]]] = [(p, render_file_section(p)) for p in files]
@@ -842,8 +841,9 @@ def main(argv: list[str] | None = None) -> int:
             out.append(
                 "Contenido en orden: **(1)** árbol del proyecto, **(2)** estructura + "
                 "contenido de cada archivo (filtrado vía `.gitignore`, repartido "
-                "entre las partes), **(3)** contexto compacto (schema SQL, modelos, "
-                "repositorios) en la última parte."
+                "entre las partes). Para el hand-off compacto de schema SQL + "
+                "dataclasses + repositorios, ver `data_dictionary.md` (artefacto "
+                "aparte)."
             )
             out.append("")
             out.extend(tree_block)
@@ -858,13 +858,35 @@ def main(argv: list[str] | None = None) -> int:
         for _path, lines in part_blocks:
             out.extend(lines)
 
-        if idx == num_parts - 1:
-            out.extend(context_block)
-
         path = DOCS_DIR / f"{OUTPUT_STEM}_{idx + 1:02d}.md"
         path.write_text("\n".join(out), encoding="utf-8")
         size_kb = path.stat().st_size / 1024
         print(f"  OK: {path.name} ({size_kb:.0f} KB, {len(part_blocks)} archivos)")
+
+    # data_dictionary.md: hand-off compacto del schema + modelos + repos.
+    # Vive en un archivo separado para no inflar `project_structure_NN.md`
+    # con contenido que ya está disponible (los .sql y .py completos ya
+    # aparecen en §2 de las partes).
+    dd_lines: list[str] = []
+    dd_lines.append("# Data Dictionary — Collections")
+    dd_lines.append("")
+    dd_lines.append(
+        "> Generado automáticamente por "
+        "[`scripts/generate_context.py`](../scripts/generate_context.py). "
+        "**No editar a mano** — se sobreescribe."
+    )
+    dd_lines.append("")
+    dd_lines.append(
+        "Hand-off compacto del contexto persistente: schema SQL, dataclasses "
+        "de `core/models/` y API pública de `core/repositories/`. Pensado para "
+        "alimentar a una conversación nueva de LLM sin necesidad de subir el "
+        "`project_structure_NN.md` completo."
+    )
+    dd_lines.append("")
+    dd_lines.extend(render_context_section(tables, model_modules, repo_modules))
+    DATA_DICT_OUTPUT.write_text("\n".join(dd_lines), encoding="utf-8")
+    dd_kb = DATA_DICT_OUTPUT.stat().st_size / 1024
+    print(f"  OK: {DATA_DICT_OUTPUT.name} ({dd_kb:.0f} KB)")
 
     return 0
 
