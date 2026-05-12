@@ -118,7 +118,16 @@ def _run(
     window.showMaximized()
     if splash is not None:
         splash.set_progress(100)
+        # Sin este processEvents previo, el splash queda visible despues
+        # del showMaximized en algunos sistemas (Win11 + bundle PyInstaller):
+        # el finish() solo "vincula" el cierre al window.show() pero el
+        # paint del splash habia ocurrido al frente y se quedaba dibujado.
+        # Bombear el event loop una vez procesa los show events pendientes
+        # y permite a finish() hacer el close real. El close() explicito
+        # despues es belt-and-suspenders.
+        QApplication.processEvents()
         splash.finish(window)
+        splash.close()
     return app.exec()
 
 
