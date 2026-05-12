@@ -155,6 +155,27 @@ Tras el refactor de InventoryTab+HistoryTab y validación experimental con menú
 
 ---
 
+## Nota informativa — `ocr_python_exe` huérfano en DBs pre-7e
+
+**Contexto:** entre Prompt 7c y 7d, `OcrInstallService.install()`
+persistía en `app_settings` la key `ocr_python_exe` con la ruta al
+Python del sistema que se usaba para correr pip + chequear las deps.
+A partir del Prompt 7e (torch incluido en el bundle), `install()` se
+eliminó y la key ya no se escribe ni se lee.
+
+**Síntoma:** las DBs creadas con un build entre 7c y 7d pueden tener
+una fila `app_settings (setting_key='ocr_python_exe', setting_value=...)`
+huérfana.
+
+**Impacto:** ninguno. La app ya no consulta esa key; queda como ruido
+inocuo en la tabla.
+
+**Decisión:** no migrar. Sin SQL de limpieza. Si en un cleanup
+post-1.0 se decide normalizar `app_settings`, agregar un `DELETE FROM
+app_settings WHERE setting_key = 'ocr_python_exe'` en la migración.
+
+---
+
 ## Plantilla para próximas issues
 
 ```markdown
