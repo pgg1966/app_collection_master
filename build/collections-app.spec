@@ -121,6 +121,18 @@ a = Analysis(
         "unittest",
         "pydoc",
         "doctest",
+        # polars: arrastrado por ultralytics solo en pipelines de training,
+        # no en inferencia. Su runtime binary (_polars_runtime_*) crashea
+        # el subprocess de analisis de imports de PyInstaller durante el
+        # build. Sin polars, ultralytics importa con un fallback warning
+        # que no afecta la inferencia.
+        "polars",
+        # pytest + plugins: arrastrados por torch.testing._internal. No
+        # se necesitan en runtime de la app.
+        "pytest",
+        "_pytest",
+        "iniconfig",
+        "pluggy",
     ],
     cipher=block_cipher,
     noarchive=False,
