@@ -115,50 +115,11 @@ def test_close_after_native_close_does_not_raise() -> None:
 # ---------------------------------------------------------------------
 
 
-def test_get_ocr_service_returns_none_when_deps_missing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Sin torch/ultralytics → factory devuelve None sin tocar el modelo."""
+def test_get_ocr_service_returns_none_when_no_model_configured() -> None:
+    """`collection.ocr_model_filename = None` → factory devuelve None."""
     from collections_app.core.models.code_header import CodeHeader
     from collections_app.core.models.collection import Collection
 
-    monkeypatch.setattr(
-        "collections_app.app_context.OcrInstallService.is_installed",
-        staticmethod(lambda: False),
-    )
-    ctx = create_app_context(":memory:")
-    try:
-        h = ctx.code_headers.create(
-            CodeHeader(code_header_id=None, code_header_name="WC", code_max_length=3)
-        )
-        assert h.code_header_id is not None
-        coll = ctx.collections.create(
-            Collection(
-                collection_id=None,
-                collection_name="X",
-                card_count=0,
-                requires_code=True,
-                code_field_name="País",
-                code_header_id=h.code_header_id,
-                ocr_model_filename="ocr_99.pt",  # daría igual
-            )
-        )
-        assert ctx.get_ocr_service(coll) is None
-    finally:
-        ctx.close()
-
-
-def test_get_ocr_service_returns_none_when_no_model_configured(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Deps OK pero collection.ocr_model_filename = None → None."""
-    from collections_app.core.models.code_header import CodeHeader
-    from collections_app.core.models.collection import Collection
-
-    monkeypatch.setattr(
-        "collections_app.app_context.OcrInstallService.is_installed",
-        staticmethod(lambda: True),
-    )
     ctx = create_app_context(":memory:")
     try:
         h = ctx.code_headers.create(
@@ -228,10 +189,6 @@ def test_get_ocr_service_returns_none_when_model_file_missing(
     else:
         monkeypatch.setenv("XDG_DATA_HOME", str(fake_base))
 
-    monkeypatch.setattr(
-        "collections_app.app_context.OcrInstallService.is_installed",
-        staticmethod(lambda: True),
-    )
     ctx = create_app_context(":memory:")
     try:
         h = ctx.code_headers.create(

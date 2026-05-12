@@ -133,20 +133,25 @@ class AppContext:
         """Factory de `OcrService` para una colección específica.
 
         Devuelve `None` si:
-        - Las dependencias (torch / ultralytics) no están instaladas.
         - La colección no tiene modelo configurado.
         - El archivo del modelo no existe en `get_models_dir()`.
         - El modelo existe pero no se pudo cargar (versión incompatible,
           archivo corrupto, etc.) → captura `OcrError` y devuelve None
-          para que la UI caiga al Estado 2 sin crashear.
+          para que la UI caiga al Estado No-Model sin crashear.
+
+        Las deps de Python (torch / ultralytics / easyocr / cv2) están
+        incluidas en el bundle a partir del Prompt 7e — antes había un
+        check via `OcrInstallService.is_installed()` que delegaba a
+        subprocess al Python del sistema. Esa gate desaparece: el
+        `OcrService.__init__` importa torch lazy y, si por alguna razón
+        falla en runtime (archivo corrupto), tira `OcrError` que se
+        captura abajo.
 
         El `OcrService` no se cachea: cada llamada re-evalúa el estado y
         re-intenta cargar. La construcción es barata cuando todo está OK
         (importa YOLO + carga el modelo) y la UI llama esto una vez por
         colección al cambiar de tab.
         """
-        if not OcrInstallService.is_installed():
-            return None
         if not collection.ocr_model_filename:
             return None
         # Import lazy: solo si llegamos hasta acá.
