@@ -56,6 +56,20 @@ def get_schema_dir() -> Path:
     return _get_bundle_dir() / "core" / "db" / "schema"
 
 
+def get_seed_dir() -> Path:
+    """Path al directorio con la DB semilla embebida en el bundle.
+
+    En bundle PyInstaller resuelve a `<_MEIPASS>/collections_app/seed/`
+    (ver spec: `('assets/collections_seed.db', 'collections_app/seed')`).
+    En desarrollo apunta a `<repo>/src/collections_app/seed/`, que normalmente
+    no existe — el caller debe manejar `FileNotFoundError` o chequear
+    `.is_file()` antes de leer. La semilla "canónica" en desarrollo vive
+    en `<repo>/assets/collections_seed.db`; `main._ensure_default_db`
+    chequea ambos candidatos.
+    """
+    return _get_bundle_dir() / "seed"
+
+
 def get_app_data_dir() -> Path:
     """Directorio donde la app persiste datos del usuario.
 

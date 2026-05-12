@@ -59,7 +59,7 @@ def test_main_runs_with_default_profile(tmp_path: Path, monkeypatch: pytest.Monk
 
     captured: dict[str, object] = {}
 
-    def fake_run(ctx, app, profile):  # type: ignore[no-untyped-def]
+    def fake_run(ctx, app, profile, **_kwargs):  # type: ignore[no-untyped-def]
         captured["profile"] = profile
         captured["ctx"] = ctx
         return 0
@@ -75,7 +75,7 @@ def test_main_runs_with_named_profile(tmp_path: Path, monkeypatch: pytest.Monkey
 
     captured: dict[str, object] = {}
 
-    def fake_run(ctx, app, profile):  # type: ignore[no-untyped-def]
+    def fake_run(ctx, app, profile, **_kwargs):  # type: ignore[no-untyped-def]
         captured["profile"] = profile
         return 0
 
@@ -104,7 +104,7 @@ def test_main_closes_context_even_when_run_raises(
 
     monkeypatch.setattr(main_module.AppContext, "close", counting_close)
 
-    def fake_run(ctx, app, profile):  # type: ignore[no-untyped-def]
+    def fake_run(ctx, app, profile, **_kwargs):  # type: ignore[no-untyped-def]
         raise RuntimeError("simulated UI failure")
 
     monkeypatch.setattr(main_module, "_run", fake_run)
