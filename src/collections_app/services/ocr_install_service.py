@@ -4,13 +4,13 @@ Permite a la UI lanzar `pip install` desde un `QThread` con un
 callback de progreso, sin tener que conocer los detalles del
 subprocess.
 
-**Riesgo conocido (R1 del plan):** en un bundle de PyInstaller,
-`sys.executable` apunta al Python embebido del bundle, no al Python
-del sistema. El `pip install` se aplica entonces dentro del directorio
-del bundle. Esto es lo deseado para la app standalone, pero requiere
-verificación durante el Prompt 7 (empaquetado). Si el bundle no
-expone el módulo `pip`, este service falla con `OcrInstallError` y la
-UI muestra el botón "Reintentar" + el `stderr` del comando.
+**Bundle PyInstaller (Prompt 7):** dentro del bundle, `sys.executable`
+apunta al `.exe` y NO acepta `-m pip` — PyInstaller no embebe un
+intérprete Python utilizable. Por eso `_resolve_python_exe()` detecta
+el modo frozen y busca Python en el `PATH` del sistema con
+`shutil.which`. Si no se encuentra, lanza `OcrInstallError` con un
+mensaje que apunta a python.org. En desarrollo (no frozen) se usa
+`sys.executable` directo.
 
 **Streaming de progreso (fix post-smoke 5d):** el callback se llama
 en cada línea de output del pip + un "tick incremental" cuando no
@@ -22,6 +22,7 @@ porcentaje 1% a la vez hasta el techo del paso (~48% para torch,
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 import time
@@ -32,6 +33,31 @@ from collections_app.services.exceptions import OcrInstallError
 ProgressCallback = Callable[[int, str], None]
 
 
+def _resolve_python_exe() -> str:
+    """Devuelve el ejecutable de Python a usar para correr `pip install`.
+
+    En desarrollo (no frozen): `sys.executable` apunta al intérprete
+    real, se usa directo.
+
+    En bundle PyInstaller (`sys.frozen` is True): `sys.executable` es
+    el `.exe` del bundle, que NO soporta `-m pip`. Buscamos Python en
+    el PATH del sistema con `shutil.which`. Si no aparece, lanzamos
+    `OcrInstallError` con el link a python.org — el usuario necesita
+    instalar Python para poder usar el OCR.
+    """
+    if getattr(sys, "frozen", False):
+        found = shutil.which("python") or shutil.which("python3")
+        if found is None:
+            raise OcrInstallError(
+                "Para usar el reconocimiento por foto necesitas tener "
+                "Python 3.11+ instalado en el sistema. Descargalo desde "
+                "https://www.python.org/downloads/ (marcando 'Add Python "
+                "to PATH' durante la instalacion) y reabri la app."
+            )
+        return found
+    return sys.executable
+
+
 # Cada paso del pipeline define el rango de porcentaje que ocupa.
 # El "ceiling" deja un 2% de headroom para que el último tick no
 # alcance el techo del próximo paso antes de que el comando termine.
@@ -40,35 +66,43 @@ ProgressCallback = Callable[[int, str], None]
 # Ultralytics (modelo YOLO de detección de badges) → EasyOCR + OpenCV
 # (segunda etapa de lectura de texto sobre cada crop). Cada paso ocupa
 # ~30% del progreso total.
-_INSTALL_PIPELINE: list[tuple[list[str], str, int, int]] = [
-    (
-        [
-            sys.executable,
-            "-m",
-            "pip",
-            "install",
-            "torch",
-            "torchvision",
-            "--index-url",
-            "https://download.pytorch.org/whl/cpu",
-        ],
-        "Instalando PyTorch (CPU)... esto puede tardar varios minutos.",
-        0,
-        30,
-    ),
-    (
-        [sys.executable, "-m", "pip", "install", "ultralytics"],
-        "Instalando Ultralytics YOLO...",
-        32,
-        60,
-    ),
-    (
-        [sys.executable, "-m", "pip", "install", "easyocr", "opencv-python"],
-        "Instalando EasyOCR + OpenCV...",
-        62,
-        98,
-    ),
-]
+def _build_pipeline(python_exe: str) -> list[tuple[list[str], str, int, int]]:
+    """Construye el pipeline de comandos `pip install` con el Python dado.
+
+    Es función (no constante a nivel módulo) para que el ejecutable se
+    resuelva en cada `install()` — necesario porque en el bundle el
+    Python del sistema podría aparecer/desaparecer entre runs.
+    """
+    return [
+        (
+            [
+                python_exe,
+                "-m",
+                "pip",
+                "install",
+                "torch",
+                "torchvision",
+                "--index-url",
+                "https://download.pytorch.org/whl/cpu",
+            ],
+            "Instalando PyTorch (CPU)... esto puede tardar varios minutos.",
+            0,
+            30,
+        ),
+        (
+            [python_exe, "-m", "pip", "install", "ultralytics"],
+            "Instalando Ultralytics YOLO...",
+            32,
+            60,
+        ),
+        (
+            [python_exe, "-m", "pip", "install", "easyocr", "opencv-python"],
+            "Instalando EasyOCR + OpenCV...",
+            62,
+            98,
+        ),
+    ]
+
 
 _IDLE_TICK_SECONDS = 2.0  # cada cuánto avanzar 1% si pip no emite output
 
@@ -131,7 +165,8 @@ class OcrInstallService:
                 "ejecución."
             )
 
-        for cmd, message, start_pct, ceiling_pct in _INSTALL_PIPELINE:
+        python_exe = _resolve_python_exe()
+        for cmd, message, start_pct, ceiling_pct in _build_pipeline(python_exe):
             progress_callback(start_pct, message)
             self._run_streamed(
                 cmd=cmd,
