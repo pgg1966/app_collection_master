@@ -1,19 +1,19 @@
-"""Tab "Por foto" — carga de inventario por reconocimiento óptico (Sesión 5d).
+"""Tab "Por foto" — carga de inventario por reconocimiento óptico.
 
-Tres estados, vivientes en un `QStackedWidget`:
+Dos estados, vivientes en un `QStackedWidget`:
 
-1. Sin dependencias (torch/ultralytics) instaladas → mensaje + botón
-   para instalarlas. La instalación corre en `QThread` y emite
-   progreso. Al terminar se re-evalúa el estado.
-2. Dependencias OK pero la colección no tiene modelo configurado →
-   mensaje "pedile al admin que configure el modelo".
-3. Listo → botón "Agregar fotos" que abre un file picker, lista de
-   fotos pendientes y un progress bar. Después de cada inferencia se
-   abre `OcrResultDialog` (foto anotada + tabla); los 3 botones del
-   flow viven en el diálogo.
+1. **No-model**: deps OCR OK (torch+cv2+etc. están en el bundle) pero
+   el modelo `.pt` no se puede usar. Dos sub-variantes:
+   - Modelo configurado en DB pero archivo no en disco → botón
+     "Descargar modelo" que baja `.pt` + guía desde GitHub Releases.
+   - Modelo no configurado en DB → mensaje "pedile al admin".
+2. **Ready**: modelo presente. Botón "Agregar fotos" que abre un file
+   picker, lista de fotos pendientes y un progress bar. Tras cada
+   inferencia se abre `OcrResultDialog` (foto anotada + tabla); los
+   3 botones del flow viven en el diálogo.
 
-Re-evaluación: en `__init__`, después de instalar exitosamente, y
-cuando cambia la collection vía `set_active_collection`.
+Re-evaluación: en `__init__`, después de descargar el modelo, y cuando
+cambia la collection vía `set_active_collection`.
 
 Inferencia: cada foto se procesa en un `QThread` para no bloquear la
 UI. El service se obtiene del `AppContext` vía
@@ -28,7 +28,6 @@ refresque.
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -64,35 +63,8 @@ if TYPE_CHECKING:
     from collections_app.services.ocr_service import OcrService
 
 
-# Sentinels que indican que pip falló por archivos bloqueados. El
-# patrón aparece tal cual en Windows (CPython traduce automáticamente
-# el `errno` a "WinError 5"; el español a "Acceso denegado").
-_ACCESS_DENIED_HINTS: tuple[str, ...] = ("WinError 5", "Acceso denegado")
-
-
-def _format_install_error(raw_message: str) -> str:
-    """Si el error de pip es de archivos bloqueados, dar instrucciones.
-
-    Devuelve el mensaje crudo en cualquier otro caso. Función pura
-    para que el test la cubra sin necesidad de Qt.
-    """
-    if any(hint in raw_message for hint in _ACCESS_DENIED_HINTS):
-        return (
-            "Acceso denegado.\n\n"
-            "Intentá:\n"
-            "1. Cerrar la app\n"
-            "2. Abrir PowerShell como administrador\n"
-            "3. Correr: .venv\\Scripts\\pip install easyocr opencv-python\n"
-            "4. Reabrir la app\n\n"
-            "Detalle técnico:\n"
-            f"{raw_message}"
-        )
-    return raw_message
-
-
-_PAGE_INSTALL = 0
-_PAGE_NO_MODEL = 1
-_PAGE_READY = 2
+_PAGE_NO_MODEL = 0
+_PAGE_READY = 1
 
 
 # ======================================================================
@@ -100,33 +72,12 @@ _PAGE_READY = 2
 # ======================================================================
 
 
-class _InstallWorker(QObject):
-    """Wrapper de `OcrInstallService.install` para correr en un QThread."""
-
-    progress = Signal(int, str)  # (pct, message)
-    finished = Signal(str)  # emitido tras éxito; payload = python_exe usado
-    failed = Signal(str)  # emitido tras error; mensaje para el user
-
-    def __init__(self: _InstallWorker, service: OcrInstallService) -> None:
-        super().__init__()
-        self._service = service
-
-    def run(self: _InstallWorker) -> None:
-        try:
-            python_exe = self._service.install(lambda pct, msg: self.progress.emit(pct, msg))
-        except OcrInstallError as exc:
-            self.failed.emit(str(exc))
-            return
-        self.finished.emit(python_exe)
-
-
 class _DownloadOnlyWorker(QThread):
     """Wrapper de `OcrInstallService.download_ocr_assets` en QThread.
 
-    Para el flow "Descargar modelo" del Estado 2: las deps de Python ya
-    estan instaladas (estamos en el branch installed=True) pero falta
-    el modelo OCR en disco. Este worker baja solo modelo+guia sin
-    re-tocar pip.
+    Para el flow "Descargar modelo" del Estado No-Model variante B: el
+    modelo está configurado en DB pero falta en disco. Este worker baja
+    modelo + guía desde GitHub Releases sin bloquear la UI.
     """
 
     progress = Signal(int, str)
@@ -148,33 +99,6 @@ class _DownloadOnlyWorker(QThread):
             self.failed.emit(str(exc))
             return
         self.finished.emit()
-
-
-class _CheckInstallWorker(QThread):
-    """Verifica `OcrInstallService.is_installed()` en un hilo aparte.
-
-    En el bundle PyInstaller, `is_installed()` lanza un subprocess al
-    Python del sistema y puede tardar varios segundos (importlib.util
-    find_spec sobre torch en un Python "frio" con AV scanning). Correr
-    eso en el main thread congela la UI durante todo ese tiempo, asi
-    que lo movemos a un QThread.
-
-    Hereda directo de QThread (no QObject + moveToThread) porque el
-    payload es pequeno (un bool) y no necesitamos cleanup elaborado.
-    """
-
-    result = Signal(bool)
-
-    def __init__(
-        self: _CheckInstallWorker,
-        parent: QObject | None,
-        python_exe_hint: str | None,
-    ) -> None:
-        super().__init__(parent)
-        self._hint = python_exe_hint
-
-    def run(self: _CheckInstallWorker) -> None:
-        self.result.emit(OcrInstallService.is_installed(python_exe=self._hint))
 
 
 class _InferenceWorker(QObject):
@@ -220,7 +144,7 @@ class _InferenceWorker(QObject):
 
 
 class OcrLoaderTab(QWidget):
-    """Tab con los tres estados del flow OCR."""
+    """Tab con los dos estados del flow OCR."""
 
     card_changed = Signal()
 
@@ -234,17 +158,12 @@ class OcrLoaderTab(QWidget):
         self._ctx = ctx
         self._collection = collection
         # Workers + threads viven mientras la tab existe.
-        self._install_thread: QThread | None = None
-        self._install_worker: _InstallWorker | None = None
         self._inference_thread: QThread | None = None
         self._inference_worker: _InferenceWorker | None = None
-        # Check async (bundle PyInstaller): worker temporal, vive solo
-        # durante el subprocess. Se autodestruye con deleteLater.
-        self._check_worker: _CheckInstallWorker | None = None
-        # Worker de descarga standalone (boton "Descargar modelo" del
-        # Estado 2 cuando el modelo esta en DB pero no en disco).
+        # Worker de descarga del modelo (botón "Descargar modelo" del
+        # Estado No-Model variante B).
         self._download_worker: _DownloadOnlyWorker | None = None
-        # Estado del flow de carga (Estado 3).
+        # Estado del flow de carga (Estado Ready).
         self._pending_paths: list[Path] = []
         self._current_index: int = 0
         self._loaded_count: int = 0
@@ -258,56 +177,27 @@ class OcrLoaderTab(QWidget):
     def _build_ui(self: OcrLoaderTab) -> None:
         outer = QVBoxLayout(self)
         self._stack = QStackedWidget()
-        self._stack.addWidget(self._build_install_page())
         self._stack.addWidget(self._build_no_model_page())
         self._stack.addWidget(self._build_ready_page())
         outer.addWidget(self._stack)
 
-    def _build_install_page(self: OcrLoaderTab) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        layout.addWidget(
-            QLabel(
-                self.tr(
-                    "Para usar la carga por foto necesitás instalar:\n\n"
-                    "• PyTorch (procesamiento de imágenes con IA)  ~800 MB\n"
-                    "• Ultralytics YOLO (detección de objetos)        ~50 MB\n\n"
-                    "La instalación puede tardar varios minutos."
-                )
-            )
-        )
-        self._install_progress = QProgressBar()
-        self._install_progress.setRange(0, 100)
-        self._install_progress.setVisible(False)
-        layout.addWidget(self._install_progress)
-        self._install_status_label = QLabel("")
-        self._install_status_label.setVisible(False)
-        layout.addWidget(self._install_status_label)
-        self._install_btn = QPushButton(self.tr("Instalar dependencias"))
-        self._install_btn.clicked.connect(self._on_install_clicked)
-        layout.addWidget(self._install_btn, alignment=Qt.AlignmentFlag.AlignLeft)
-        layout.addStretch()
-        return page
-
     def _build_no_model_page(self: OcrLoaderTab) -> QWidget:
-        """Estado 2: deps instaladas pero el OCR no esta listo para correr.
+        """Estado No-Model: el OCR no está listo para correr.
 
-        Dos sub-variantes (ver `_on_install_check_done`):
-        - **Modelo configurado en DB pero no en disco**: muestra el
-          boton "Descargar modelo" + barra de progreso. Click dispara
+        Dos sub-variantes (ver `_show_no_model_state`):
+        - **Variante B** (modelo en DB pero no en disco): muestra el
+          botón "Descargar modelo" + barra de progreso. Click dispara
           `_DownloadOnlyWorker` que baja `ocr_1.pt` + `ocr_guide_1.jpg`
-          de GitHub Releases sin reinstalar pip.
-        - **Modelo no configurado**: muestra mensaje "pedile al admin".
-          El boton queda oculto.
+          de GitHub Releases.
+        - **Variante A** (modelo no configurado): muestra mensaje
+          "pedile al admin". El botón queda oculto.
 
-        Las visibilidades concretas se setean en `_on_install_check_done`
-        segun la variante. Aca solo construimos los widgets, ocultos.
+        Las visibilidades concretas se setean en `_show_no_model_state`
+        según la variante. Acá solo construimos los widgets, ocultos.
         """
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        layout.addWidget(QLabel(self.tr("✓ Dependencias instaladas")))
         self._no_model_label = QLabel("")
         self._no_model_label.setWordWrap(True)
         layout.addWidget(self._no_model_label)
@@ -401,46 +291,12 @@ class OcrLoaderTab(QWidget):
     def _evaluate_state(self: OcrLoaderTab) -> None:
         """Decide qué página mostrar.
 
-        En el **bundle PyInstaller** la check delega a un subprocess al
-        Python del sistema (puede tardar varios segundos por carga de
-        DLLs nativas si torch/cv2 estan instalados). Para no congelar
-        la UI, el check se hace en un `_CheckInstallWorker` y la
-        continuación vive en `_on_install_check_done`. Durante esos
-        segundos la tab queda en el _PAGE_INSTALL: si la check da True
-        transiciona, si da False se queda — mismo estado terminal que
-        antes.
-
-        En **desarrollo** (no frozen) el check es un import directo:
-        rapido y sincronico, sin worker.
+        Con torch incluido en el bundle (Prompt 7e), las deps OCR
+        siempre están disponibles — ya no hace falta un Estado 1 de
+        instalación. Solo queda chequear si el modelo `.pt` puede
+        cargarse: si sí → Estado Ready; si no → Estado No-Model con la
+        variante A o B según corresponda.
         """
-        if not getattr(sys, "frozen", False):
-            self._on_install_check_done(OcrInstallService.is_installed())
-            return
-
-        # Bundle: check async. Mientras tanto, _PAGE_INSTALL.
-        self._stack.setCurrentIndex(_PAGE_INSTALL)
-        hint = self._read_python_exe_hint()
-        worker = _CheckInstallWorker(self, python_exe_hint=hint)
-        worker.result.connect(self._on_install_check_done)
-        worker.finished.connect(worker.deleteLater)
-        self._check_worker = worker
-        worker.start()
-
-    def _on_install_check_done(self: OcrLoaderTab, installed: bool) -> None:
-        """Continuacion de `_evaluate_state` tras el check (sync o async).
-
-        Cuando `installed=True` pero `get_ocr_service` retorna None, hay
-        dos sub-variantes que importa distinguir para la UX:
-        - **Variante B**: el modelo esta configurado en DB pero el
-          archivo no esta en disco (ej. PC nueva / app data borrado).
-          Mostramos el boton "Descargar modelo" para que el usuario
-          dispare la descarga sin reinstalar pip.
-        - **Variante A**: el modelo no esta configurado en DB. La unica
-          accion posible es que el admin lo configure desde el ABM.
-        """
-        if not installed:
-            self._stack.setCurrentIndex(_PAGE_INSTALL)
-            return
         ocr = self._get_ocr_service()
         if ocr is None:
             self._show_no_model_state()
@@ -449,7 +305,7 @@ class OcrLoaderTab(QWidget):
         self._stack.setCurrentIndex(_PAGE_READY)
 
     def _show_no_model_state(self: OcrLoaderTab) -> None:
-        """Configura el contenido del Estado 2 segun la sub-variante."""
+        """Configura el contenido del Estado No-Model según la sub-variante."""
         has_model_in_db = bool(self._collection.ocr_model_filename)
         model_on_disk_getter = getattr(self._ctx, "get_ocr_model_path", None)
         model_path = (
@@ -483,11 +339,6 @@ class OcrLoaderTab(QWidget):
         self._download_status.setVisible(False)
         self._stack.setCurrentIndex(_PAGE_NO_MODEL)
 
-    def _read_python_exe_hint(self: OcrLoaderTab) -> str | None:
-        """Lee el `python_exe` que uso `install()` exitoso, si existe."""
-        setting = self._ctx.settings.get("ocr_python_exe")
-        return setting.value if setting else None
-
     def _refresh_guide_image(self: OcrLoaderTab) -> None:
         """Actualiza la imagen de guía OCR si la colección tiene una.
 
@@ -509,11 +360,7 @@ class OcrLoaderTab(QWidget):
         self._guide_image.setVisible(True)
 
     def _get_ocr_service(self: OcrLoaderTab) -> OcrService | None:
-        """Acceso a la factory del ctx con manejo defensivo.
-
-        Si el ctx no tiene la factory todavía (sesión 5d aún no
-        terminada), devolvemos None — la tab se queda en Estado 2.
-        """
+        """Acceso a la factory del ctx con manejo defensivo."""
         getter = getattr(self._ctx, "get_ocr_service", None)
         if getter is None:
             return None
@@ -523,73 +370,11 @@ class OcrLoaderTab(QWidget):
             return None
 
     # ------------------------------------------------------------------
-    # Estado 1 — Instalación
-    # ------------------------------------------------------------------
-
-    def _on_install_clicked(self: OcrLoaderTab) -> None:
-        self._install_btn.setVisible(False)
-        self._install_progress.setValue(0)
-        self._install_progress.setVisible(True)
-        self._install_status_label.setText(self.tr("Iniciando..."))
-        self._install_status_label.setVisible(True)
-
-        worker = _InstallWorker(OcrInstallService())
-        thread = QThread(self)
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.progress.connect(self._on_install_progress)
-        worker.finished.connect(self._on_install_finished)
-        worker.failed.connect(self._on_install_failed)
-        # Cleanup
-        worker.finished.connect(thread.quit)
-        worker.failed.connect(thread.quit)
-        thread.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        self._install_worker = worker
-        self._install_thread = thread
-        thread.start()
-
-    def _on_install_progress(self: OcrLoaderTab, pct: int, message: str) -> None:
-        self._install_progress.setValue(pct)
-        self._install_status_label.setText(message)
-
-    def _on_install_finished(self: OcrLoaderTab, python_exe: str) -> None:
-        """Slot del signal `finished` del `_InstallWorker`.
-
-        Persiste el `python_exe` que se uso en `install()` (asi
-        `is_installed()` futuros consultan el mismo Python sin depender
-        del PATH del shell) y re-evalua el estado para que la tab
-        transicione al Estado 2 (sin modelo) o Estado 3 (listo).
-        """
-        self._install_progress.setValue(100)
-        self._install_status_label.setText(self.tr("Instalación completada."))
-        self._ctx.settings.set("ocr_python_exe", python_exe)
-        self._ctx.conn.commit()
-        self._evaluate_state()
-
-    def _on_install_failed(self: OcrLoaderTab, message: str) -> None:
-        QMessageBox.critical(
-            self,
-            self.tr("Error en la instalación"),
-            _format_install_error(message),
-        )
-        self._install_progress.setVisible(False)
-        self._install_status_label.setVisible(False)
-        self._install_btn.setText(self.tr("Reintentar"))
-        self._install_btn.setVisible(True)
-
-    # ------------------------------------------------------------------
-    # Estado 2 — Solo descarga del modelo (deps ya instaladas)
+    # Estado No-Model — Solo descarga del modelo
     # ------------------------------------------------------------------
 
     def _on_download_model_clicked(self: OcrLoaderTab) -> None:
-        """Lanza la descarga standalone del modelo + guia OCR.
-
-        Solo aplica cuando la tab esta en Estado 2 con la sub-variante
-        "modelo en DB pero no en disco" (ver `_show_no_model_state`).
-        El worker corre en un QThread; el `OcrInstallService` se
-        instancia local porque no necesita estado.
-        """
+        """Lanza la descarga standalone del modelo + guía OCR."""
         self._download_model_btn.setEnabled(False)
         self._download_model_btn.setText(self.tr("Descargando..."))
         self._download_progress.setValue(0)
@@ -611,7 +396,7 @@ class OcrLoaderTab(QWidget):
         self._download_status.setText(message)
 
     def _on_download_finished(self: OcrLoaderTab) -> None:
-        """Descarga OK: re-evalua estado (debe transicionar a Estado 3)."""
+        """Descarga OK: re-evalua estado (debe transicionar a Estado Ready)."""
         self._download_progress.setValue(100)
         self._download_status.setText(self.tr("Descarga completada."))
         self._evaluate_state()
@@ -628,7 +413,7 @@ class OcrLoaderTab(QWidget):
         self._download_model_btn.setText(self.tr("Reintentar descarga"))
 
     # ------------------------------------------------------------------
-    # Estado 3 — Flow foto a foto
+    # Estado Ready — Flow foto a foto
     # ------------------------------------------------------------------
 
     def _on_add_photos_clicked(self: OcrLoaderTab) -> None:

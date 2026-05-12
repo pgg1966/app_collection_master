@@ -1,7 +1,7 @@
-"""Tests del OcrLoaderTab — smoke de los 3 estados.
+"""Tests del OcrLoaderTab — smoke de los 2 estados.
 
-Cero subprocess real, cero modelo cargado: los stubs del state-detection
-deciden qué página mostrar y validamos que la UI corresponde.
+Cero modelo cargado: los stubs del state-detection deciden qué página
+mostrar y validamos que la UI corresponde.
 """
 
 from __future__ import annotations
@@ -15,11 +15,9 @@ from collections_app.app_context import AppContext, create_app_context
 from collections_app.core.models.code_header import CodeHeader
 from collections_app.core.models.collection import Collection
 from collections_app.views.inventory.ocr_loader_tab import (
-    _PAGE_INSTALL,
     _PAGE_NO_MODEL,
     _PAGE_READY,
     OcrLoaderTab,
-    _format_install_error,
 )
 
 pytestmark = pytest.mark.gui
@@ -55,52 +53,26 @@ def ctx_and_collection() -> Iterator[tuple[AppContext, Collection]]:
         ctx.close()
 
 
-def test_state_install_when_dependencies_missing(
+def test_state_no_model_when_factory_returns_none(
     qtbot,  # type: ignore[no-untyped-def]
-    monkeypatch: pytest.MonkeyPatch,
     ctx_and_collection: tuple[AppContext, Collection],
 ) -> None:
-    """Sin torch/ultralytics → página de instalación."""
-    monkeypatch.setattr(
-        "collections_app.views.inventory.ocr_loader_tab.OcrInstallService.is_installed",
-        staticmethod(lambda: False),
-    )
+    """Factory `get_ocr_service` retorna None (sin modelo configurado) → Estado No-Model."""
     ctx, coll = ctx_and_collection
-    tab = OcrLoaderTab(ctx=ctx, collection=coll)
-    qtbot.addWidget(tab)
-    assert tab._stack.currentIndex() == _PAGE_INSTALL
-    assert tab._install_btn.isHidden() is False
-
-
-def test_state_no_model_when_deps_ok_but_no_model(
-    qtbot,  # type: ignore[no-untyped-def]
-    monkeypatch: pytest.MonkeyPatch,
-    ctx_and_collection: tuple[AppContext, Collection],
-) -> None:
-    """Deps OK + collection sin OCR configurado → página informativa."""
-    monkeypatch.setattr(
-        "collections_app.views.inventory.ocr_loader_tab.OcrInstallService.is_installed",
-        staticmethod(lambda: True),
-    )
-    ctx, coll = ctx_and_collection
-    # ctx no tiene `get_ocr_service` todavía (commit 9 lo agrega) →
-    # _get_ocr_service devuelve None → cae a Estado 2.
+    # ctx real con la collection default (sin ocr_model_filename) → la factory
+    # retorna None → cae al Estado No-Model variante A.
     tab = OcrLoaderTab(ctx=ctx, collection=coll)
     qtbot.addWidget(tab)
     assert tab._stack.currentIndex() == _PAGE_NO_MODEL
     assert "no tiene un modelo" in tab._no_model_label.text()
 
 
-def test_state_ready_when_deps_ok_and_model_present(
+def test_state_ready_when_factory_returns_service(
     qtbot,  # type: ignore[no-untyped-def]
     monkeypatch: pytest.MonkeyPatch,
     ctx_and_collection: tuple[AppContext, Collection],
 ) -> None:
-    """Deps OK + factory devuelve un OcrService real → página de carga."""
-    monkeypatch.setattr(
-        "collections_app.views.inventory.ocr_loader_tab.OcrInstallService.is_installed",
-        staticmethod(lambda: True),
-    )
+    """Factory devuelve un OcrService real → página de carga."""
     ctx, coll = ctx_and_collection
     # Stub de la factory: devolvemos un objeto cualquiera (no se invoca).
     monkeypatch.setattr(
@@ -121,10 +93,6 @@ def test_guide_image_hidden_when_no_guide_configured(
     ctx_and_collection: tuple[AppContext, Collection],
 ) -> None:
     """Sin `get_ocr_guide_path` o devolviendo None → el widget de guía está oculto."""
-    monkeypatch.setattr(
-        "collections_app.views.inventory.ocr_loader_tab.OcrInstallService.is_installed",
-        staticmethod(lambda: True),
-    )
     ctx, coll = ctx_and_collection
     monkeypatch.setattr(
         ctx.__class__,
@@ -152,10 +120,6 @@ def test_guide_image_shown_when_path_exists(
     """Con un path válido + imagen legible → el widget de guía se muestra."""
     from PySide6.QtGui import QImage
 
-    monkeypatch.setattr(
-        "collections_app.views.inventory.ocr_loader_tab.OcrInstallService.is_installed",
-        staticmethod(lambda: True),
-    )
     ctx, coll = ctx_and_collection
     monkeypatch.setattr(
         ctx.__class__,
@@ -187,32 +151,30 @@ def test_set_active_collection_re_evaluates_state(
     ctx_and_collection: tuple[AppContext, Collection],
 ) -> None:
     """Cambiar de collection refresca el estado."""
-    state = {"installed": False}
-    monkeypatch.setattr(
-        "collections_app.views.inventory.ocr_loader_tab.OcrInstallService.is_installed",
-        staticmethod(lambda: state["installed"]),
-    )
     ctx, coll = ctx_and_collection
+    # Empezamos sin factory (Estado No-Model). Al setear la factory y
+    # re-llamar set_active_collection, la tab debe transicionar a Ready.
+    state = {"has_service": False}
+    monkeypatch.setattr(
+        ctx.__class__,
+        "get_ocr_service",
+        lambda self, _coll: object() if state["has_service"] else None,
+        raising=False,
+    )
     tab = OcrLoaderTab(ctx=ctx, collection=coll)
     qtbot.addWidget(tab)
-    assert tab._stack.currentIndex() == _PAGE_INSTALL
-
-    # Cambiamos el flag, set_active_collection debe re-evaluar.
-    state["installed"] = True
-    tab.set_active_collection(coll)
     assert tab._stack.currentIndex() == _PAGE_NO_MODEL
+
+    state["has_service"] = True
+    tab.set_active_collection(coll)
+    assert tab._stack.currentIndex() == _PAGE_READY
 
 
 def test_card_changed_signal_exists(
     qtbot,  # type: ignore[no-untyped-def]
-    monkeypatch: pytest.MonkeyPatch,
     ctx_and_collection: tuple[AppContext, Collection],
 ) -> None:
     """El wrapper LoaderTab necesita re-emitir este signal."""
-    monkeypatch.setattr(
-        "collections_app.views.inventory.ocr_loader_tab.OcrInstallService.is_installed",
-        staticmethod(lambda: False),
-    )
     ctx, coll = ctx_and_collection
     tab = OcrLoaderTab(ctx=ctx, collection=coll)
     qtbot.addWidget(tab)
@@ -298,38 +260,7 @@ def test_inference_worker_emits_failed_on_ocr_error(
 
 
 # ---------------------------------------------------------------------
-# _format_install_error — traducción del WinError 5
-# ---------------------------------------------------------------------
-
-
-def test_format_install_error_passes_through_normal_message() -> None:
-    """Sin pistas de acceso denegado, el mensaje se devuelve tal cual."""
-    msg = "el comando falló (código 1):\nERROR: package not found"
-    assert _format_install_error(msg) == msg
-
-
-def test_format_install_error_translates_winerror_5() -> None:
-    """Si el error trae WinError 5, agregar pasos para resolverlo manualmente."""
-    raw = "el comando falló (código 1):\nWinError 5: cv2.pyd is locked"
-    out = _format_install_error(raw)
-    assert "Acceso denegado" in out
-    assert "Cerrar la app" in out
-    assert "PowerShell como administrador" in out
-    assert ".venv\\Scripts\\pip install easyocr opencv-python" in out
-    # El mensaje original queda incluido como detalle técnico.
-    assert "WinError 5" in out
-
-
-def test_format_install_error_translates_acceso_denegado_es() -> None:
-    """También dispara con la traducción en español."""
-    raw = "el comando falló:\nAcceso denegado: cv2.pyd"
-    out = _format_install_error(raw)
-    assert "Cerrar la app" in out
-    assert "Acceso denegado" in out
-
-
-# ---------------------------------------------------------------------
-# Flow Estado 3 — dispatching del diálogo (Prompt 6 / B4)
+# Flow Estado Ready — dispatching del diálogo
 # ---------------------------------------------------------------------
 
 
@@ -361,10 +292,6 @@ def _ready_tab(
     ctx_and_collection: tuple[AppContext, Collection],
 ) -> tuple[OcrLoaderTab, AppContext, Collection]:
     """Construye una tab en estado Ready para los tests del flow."""
-    monkeypatch.setattr(
-        "collections_app.views.inventory.ocr_loader_tab.OcrInstallService.is_installed",
-        staticmethod(lambda: True),
-    )
     monkeypatch.setattr(
         ctx_and_collection[0].__class__,
         "get_ocr_service",
@@ -576,10 +503,6 @@ def test_state_no_model_variant_b_shows_download_button_when_model_missing(
     ctx_and_collection: tuple[AppContext, Collection],
 ) -> None:
     """Modelo configurado en DB pero archivo no existe → botón "Descargar"."""
-    monkeypatch.setattr(
-        "collections_app.views.inventory.ocr_loader_tab.OcrInstallService.is_installed",
-        staticmethod(lambda: True),
-    )
     ctx, _ = ctx_and_collection
     coll = _make_collection_with_model_filename(ctx, "ocr_1.pt")
     # ctx.get_ocr_service → None (modelo no cargable).
@@ -611,10 +534,6 @@ def test_state_no_model_variant_a_hides_download_button_when_filename_absent(
     ctx_and_collection: tuple[AppContext, Collection],
 ) -> None:
     """Sin `ocr_model_filename` en DB → mensaje "pedile al admin", botón oculto."""
-    monkeypatch.setattr(
-        "collections_app.views.inventory.ocr_loader_tab.OcrInstallService.is_installed",
-        staticmethod(lambda: True),
-    )
     ctx, _ = ctx_and_collection
     coll = _make_collection_with_model_filename(ctx, None)
     monkeypatch.setattr(
