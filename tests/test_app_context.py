@@ -335,3 +335,77 @@ def test_get_ocr_guide_path_returns_path_when_file_exists(
         assert result.is_file()
     finally:
         ctx.close()
+
+
+# ---------------------------------------------------------------------
+# get_ocr_model_path
+# ---------------------------------------------------------------------
+
+
+def _make_collection_with_model(ctx: AppContext, model_filename: str | None):  # type: ignore[no-untyped-def]
+    from collections_app.core.models.code_header import CodeHeader
+    from collections_app.core.models.collection import Collection
+
+    h = ctx.code_headers.create(
+        CodeHeader(code_header_id=None, code_header_name="WC", code_max_length=3)
+    )
+    assert h.code_header_id is not None
+    return ctx.collections.create(
+        Collection(
+            collection_id=None,
+            collection_name="X",
+            card_count=0,
+            requires_code=True,
+            code_field_name="País",
+            code_header_id=h.code_header_id,
+            ocr_model_filename=model_filename,
+        )
+    )
+
+
+def test_get_ocr_model_path_returns_none_when_filename_not_configured() -> None:
+    """`collection.ocr_model_filename = None` → factory devuelve None."""
+    ctx = create_app_context(":memory:")
+    try:
+        coll = _make_collection_with_model(ctx, None)
+        assert ctx.get_ocr_model_path(coll) is None
+    finally:
+        ctx.close()
+
+
+def test_get_ocr_model_path_returns_none_when_file_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Filename configurado pero el archivo no existe en `models/` → None.
+
+    Este es el caso "modelo en DB pero no en disco" que dispara la
+    Variante B del Estado 2 del OcrLoaderTab (boton "Descargar modelo").
+    """
+    _isolate_app_data(tmp_path, monkeypatch)
+    ctx = create_app_context(":memory:")
+    try:
+        coll = _make_collection_with_model(ctx, "ocr_no_existe.pt")
+        assert ctx.get_ocr_model_path(coll) is None
+    finally:
+        ctx.close()
+
+
+def test_get_ocr_model_path_returns_path_when_file_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Filename configurado + archivo presente → Path absoluto."""
+    from collections_app.core.utils.paths import get_models_dir
+
+    _isolate_app_data(tmp_path, monkeypatch)
+    models_dir = get_models_dir()
+    real_model = models_dir / "ocr_42.pt"
+    real_model.write_bytes(b"fake pt bytes")
+
+    ctx = create_app_context(":memory:")
+    try:
+        coll = _make_collection_with_model(ctx, "ocr_42.pt")
+        result = ctx.get_ocr_model_path(coll)
+        assert result == real_model
+        assert result.is_file()
+    finally:
+        ctx.close()

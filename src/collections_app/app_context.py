@@ -109,6 +109,26 @@ class AppContext:
         path = get_images_dir() / collection.ocr_guide_filename
         return path if path.is_file() else None
 
+    def get_ocr_model_path(self: AppContext, collection: Collection) -> Path | None:
+        """Path absoluto del modelo OCR de `collection`.
+
+        Devuelve `None` si la colección no tiene `ocr_model_filename`
+        configurado o si el archivo no existe en disco. La vista usa
+        este helper (vs. importar `get_models_dir()` directo, lo cual
+        violaría la regla de capas) para distinguir:
+        - `collection.ocr_model_filename` truthy AND retorno None →
+          modelo configurado en DB pero NO en disco. Variante "necesita
+          descarga" del Estado 2 del OcrLoaderTab.
+        - `collection.ocr_model_filename` falsy → modelo no configurado.
+          Variante "pedile al admin".
+        """
+        if not collection.ocr_model_filename:
+            return None
+        from collections_app.core.utils.paths import get_models_dir  # noqa: PLC0415
+
+        path = get_models_dir() / collection.ocr_model_filename
+        return path if path.is_file() else None
+
     def get_ocr_service(self: AppContext, collection: Collection) -> OcrService | None:
         """Factory de `OcrService` para una colección específica.
 

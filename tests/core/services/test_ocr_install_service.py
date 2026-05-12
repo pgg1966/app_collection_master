@@ -17,12 +17,51 @@ from __future__ import annotations
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from collections_app.services.exceptions import OcrInstallError
 from collections_app.services.ocr_install_service import OcrInstallService
+
+
+@pytest.fixture(autouse=True)
+def _isolated_ocr_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[Path, Path]:
+    """Asegura que NINGUN test toque `%APPDATA%/Collections/` real ni la red.
+
+    Patchea:
+    - `get_models_dir` / `get_images_dir` → subdirs de `tmp_path`. Asi
+      cualquier `install()` que pase por el bloque de descargas escribe
+      en el tmp_path del test, no en el filesystem del dev.
+    - `urllib.request.urlretrieve` → escribe un archivo fake al `dest`.
+      Tests que necesiten un urlretrieve distinto (404, idempotencia,
+      etc.) lo overrideán via su propio monkeypatch.
+
+    Returns (models_dir, images_dir) para tests que quieran asertarlos.
+    """
+    models_dir = tmp_path / "models"
+    images_dir = tmp_path / "images"
+    models_dir.mkdir(parents=True)
+    images_dir.mkdir(parents=True)
+    monkeypatch.setattr(
+        "collections_app.services.ocr_install_service.get_models_dir",
+        lambda: models_dir,
+    )
+    monkeypatch.setattr(
+        "collections_app.services.ocr_install_service.get_images_dir",
+        lambda: images_dir,
+    )
+
+    def fake_urlretrieve(url, dest, reporthook=None):  # type: ignore[no-untyped-def]
+        Path(dest).write_bytes(b"fake bytes")
+        if reporthook is not None:
+            reporthook(1, 1024, 1024)
+        return str(dest), None
+
+    monkeypatch.setattr(urllib.request, "urlretrieve", fake_urlretrieve)
+    return models_dir, images_dir
+
 
 # ---------------------------------------------------------------------
 # is_installed
@@ -385,37 +424,17 @@ def test_install_pre_flight_ignores_none_module_in_sys_modules(
 # ---------------------------------------------------------------------
 
 
-def _redirect_assets_to_tmp(monkeypatch: pytest.MonkeyPatch, tmp_path) -> tuple:  # type: ignore[no-untyped-def]
-    """Aisla `get_models_dir` y `get_images_dir` para que `install()`
-    descargue/lea en `tmp_path` y no en el `%APPDATA%` real."""
-    models_dir = tmp_path / "models"
-    images_dir = tmp_path / "images"
-    models_dir.mkdir(parents=True)
-    images_dir.mkdir(parents=True)
-    monkeypatch.setattr(
-        "collections_app.services.ocr_install_service.get_models_dir",
-        lambda: models_dir,
-    )
-    monkeypatch.setattr(
-        "collections_app.services.ocr_install_service.get_images_dir",
-        lambda: images_dir,
-    )
-    return models_dir, images_dir
-
-
 def test_install_downloads_model_and_guide_after_pip_install(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:  # type: ignore[no-untyped-def]
+    _isolated_ocr_paths: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Happy path: tras los pip install se descargan los 2 assets."""
     from collections_app.services import ocr_install_service as mod
 
-    models_dir, images_dir = _redirect_assets_to_tmp(monkeypatch, tmp_path)
+    models_dir, images_dir = _isolated_ocr_paths
     urls_called: list[str] = []
 
     def fake_urlretrieve(url, dest, reporthook=None):  # type: ignore[no-untyped-def]
         urls_called.append(url)
-        from pathlib import Path
-
         Path(dest).write_bytes(b"x" * 1024)
         if reporthook is not None:
             reporthook(1, 1024, 1024)
@@ -432,12 +451,12 @@ def test_install_downloads_model_and_guide_after_pip_install(
 
 
 def test_install_skips_download_when_files_already_exist(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:  # type: ignore[no-untyped-def]
+    _isolated_ocr_paths: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Idempotente: si los assets ya están en disco, no hay descarga."""
     from collections_app.services import ocr_install_service as mod
 
-    models_dir, images_dir = _redirect_assets_to_tmp(monkeypatch, tmp_path)
+    models_dir, images_dir = _isolated_ocr_paths
     (models_dir / mod.OCR_MODEL_FILENAME).write_bytes(b"existing model")
     (images_dir / mod.OCR_GUIDE_FILENAME).write_bytes(b"existing guide")
 
@@ -455,17 +474,15 @@ def test_install_skips_download_when_files_already_exist(
 
 
 def test_install_raises_when_model_download_fails(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:  # type: ignore[no-untyped-def]
+    _isolated_ocr_paths: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Fallo de red descargando el modelo → OcrInstallError (fatal)."""
     from collections_app.services import ocr_install_service as mod
 
-    models_dir, _ = _redirect_assets_to_tmp(monkeypatch, tmp_path)
+    models_dir, _ = _isolated_ocr_paths
 
     def fake_urlretrieve(url, dest, reporthook=None):  # type: ignore[no-untyped-def]
-        # Simular escritura parcial antes del fallo (debe ser limpiada).
-        from pathlib import Path
-
+        # Simular escritura parcial al .part antes del fallo (debe ser limpiada).
         Path(dest).write_bytes(b"partial")
         raise urllib.error.URLError("Connection reset")
 
@@ -477,24 +494,61 @@ def test_install_raises_when_model_download_fails(
     ):
         OcrInstallService().install(lambda _p, _m: None)
 
-    # El archivo parcial fue limpiado para que el siguiente intento NO
-    # entre al branch idempotente.
+    # El destino final NO existe (el .part fue limpiado, dest nunca recibió rename).
     assert not (models_dir / mod.OCR_MODEL_FILENAME).exists()
+    assert not (models_dir / (mod.OCR_MODEL_FILENAME + ".part")).exists()
+
+
+def test_install_does_not_corrupt_existing_dest_on_failure(
+    _isolated_ocr_paths: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Si dest ya existe (no entró al branch idempotente por algún motivo)
+    y urlretrieve falla, el contenido pre-existente NO se sobrescribe.
+
+    Regresión del bug donde urlretrieve(url, dest, ...) escribía a dest
+    el body de error 404 y el catch lo unlink-eaba después, perdiendo
+    el archivo válido.
+    """
+    from collections_app.services import ocr_install_service as mod
+
+    models_dir, _ = _isolated_ocr_paths
+    valid_path = models_dir / mod.OCR_MODEL_FILENAME
+    # Caso de prueba: removemos el archivo solo para que el "if exists()"
+    # entre al branch de descarga, pero validamos que el download "fake"
+    # 404 NO toque ningún otro archivo válido en el directorio.
+    other_path = models_dir / "other_critical.dat"
+    other_path.write_bytes(b"critical pre-existing data")
+
+    def fake_urlretrieve(url, dest, reporthook=None):  # type: ignore[no-untyped-def]
+        # Simula urlretrieve real: escribe el body 404 al destino y después raises.
+        Path(dest).write_bytes(b"<html>404 not found</html>")
+        raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(urllib.request, "urlretrieve", fake_urlretrieve)
+    factory = _make_popen([])
+    with (
+        patch("subprocess.Popen", side_effect=factory),
+        pytest.raises(OcrInstallError, match="No se pudo descargar el modelo OCR"),
+    ):
+        OcrInstallService().install(lambda _p, _m: None)
+
+    # Archivo critico pre-existente intacto.
+    assert other_path.read_bytes() == b"critical pre-existing data"
+    # Destino final no se creó (el body 404 quedó solo en el .part y fue limpiado).
+    assert not valid_path.exists()
 
 
 def test_install_guide_download_failure_does_not_raise(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:  # type: ignore[no-untyped-def]
+    _isolated_ocr_paths: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Fallo de red descargando la guía → warning, install sigue OK."""
     from collections_app.services import ocr_install_service as mod
 
-    models_dir, images_dir = _redirect_assets_to_tmp(monkeypatch, tmp_path)
+    models_dir, images_dir = _isolated_ocr_paths
     # Pre-existir el modelo para que solo la guía intente descargarse.
     (models_dir / mod.OCR_MODEL_FILENAME).write_bytes(b"existing model")
 
     def fake_urlretrieve(url, dest, reporthook=None):  # type: ignore[no-untyped-def]
-        from pathlib import Path
-
         Path(dest).write_bytes(b"partial guide")
         raise urllib.error.URLError("Timeout")
 
@@ -508,3 +562,67 @@ def test_install_guide_download_failure_does_not_raise(
     assert progress[-1] == (100, "Instalación completada.")
     # Guía parcial limpiada — no quedó archivo corrupto en disco.
     assert not (images_dir / mod.OCR_GUIDE_FILENAME).exists()
+
+
+# ---------------------------------------------------------------------
+# download_ocr_assets — standalone (sin pip)
+# ---------------------------------------------------------------------
+
+
+def test_download_ocr_assets_downloads_both_when_missing(
+    _isolated_ocr_paths: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Standalone: corre solo los 2 pasos de descarga sin tocar pip."""
+    from collections_app.services import ocr_install_service as mod
+
+    models_dir, images_dir = _isolated_ocr_paths
+    urls_called: list[str] = []
+
+    def fake_urlretrieve(url, dest, reporthook=None):  # type: ignore[no-untyped-def]
+        urls_called.append(url)
+        Path(dest).write_bytes(b"y")
+        return str(dest), None
+
+    monkeypatch.setattr(urllib.request, "urlretrieve", fake_urlretrieve)
+    progress: list[tuple[int, str]] = []
+    # NO mockeamos Popen — si download_ocr_assets accidentalmente
+    # llama pip, el test crashea con FileNotFoundError o similar.
+    OcrInstallService().download_ocr_assets(lambda p, m: progress.append((p, m)))
+
+    assert urls_called == [mod.OCR_MODEL_URL, mod.OCR_GUIDE_URL]
+    assert (models_dir / mod.OCR_MODEL_FILENAME).is_file()
+    assert (images_dir / mod.OCR_GUIDE_FILENAME).is_file()
+    assert progress[-1] == (100, "Descarga completada.")
+
+
+def test_download_ocr_assets_skips_when_files_already_exist(
+    _isolated_ocr_paths: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Standalone idempotente: archivos pre-existentes no se sobrescriben."""
+    from collections_app.services import ocr_install_service as mod
+
+    models_dir, images_dir = _isolated_ocr_paths
+    (models_dir / mod.OCR_MODEL_FILENAME).write_bytes(b"existing model")
+    (images_dir / mod.OCR_GUIDE_FILENAME).write_bytes(b"existing guide")
+
+    def boom(*_a, **_kw):  # type: ignore[no-untyped-def]
+        raise AssertionError("urlretrieve no debería ejecutarse")
+
+    monkeypatch.setattr(urllib.request, "urlretrieve", boom)
+    OcrInstallService().download_ocr_assets(lambda _p, _m: None)
+
+    assert (models_dir / mod.OCR_MODEL_FILENAME).read_bytes() == b"existing model"
+    assert (images_dir / mod.OCR_GUIDE_FILENAME).read_bytes() == b"existing guide"
+
+
+def test_download_ocr_assets_raises_when_model_fails(
+    _isolated_ocr_paths: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Standalone: si falla el modelo (fatal), levanta OcrInstallError."""
+
+    def fake_urlretrieve(url, dest, reporthook=None):  # type: ignore[no-untyped-def]
+        raise urllib.error.URLError("No internet")
+
+    monkeypatch.setattr(urllib.request, "urlretrieve", fake_urlretrieve)
+    with pytest.raises(OcrInstallError, match="No se pudo descargar el modelo OCR"):
+        OcrInstallService().download_ocr_assets(lambda _p, _m: None)

@@ -263,50 +263,83 @@ class OcrInstallService:
                 progress_callback=progress_callback,
             )
 
-        # Paso 4 (fatal): descargar el modelo OCR. Sin el .pt el OCR no
-        # puede correr nunca, asi que un fallo de red revierte toda la
-        # operacion con OcrInstallError. Las deps de Python instaladas
-        # arriba quedan en el sistema; el usuario reintenta solo este
-        # paso re-clickeando "Instalar dependencias" (con dependencias
-        # ya en disco, los pip install son no-op rapidos).
+        # Pasos 4+5: descarga de modelo + guia con rangos comprimidos
+        # (los pip install ocuparon 0-63).
+        self._download_assets(
+            progress_callback,
+            model_range=(65, 85),
+            guide_range=(87, 95),
+        )
+
+        progress_callback(100, "Instalación completada.")
+        return python_exe
+
+    def download_ocr_assets(self: OcrInstallService, progress_callback: ProgressCallback) -> None:
+        """Descarga solo modelo y guia OCR, sin tocar pip.
+
+        Para el flow "Descargar modelo" del OcrLoaderTab cuando las
+        deps de Python YA estan instaladas pero los archivos no existen
+        en disco (ej. reinstalacion en PC nueva con el mismo Python que
+        ya tenia torch). Idempotente: archivos pre-existentes se
+        skippean igual que en `install()`.
+
+        Mismas reglas de error que el bloque de descargas de `install()`:
+        modelo es fatal, guia es no-fatal (warning + sigue).
+        """
+        self._download_assets(
+            progress_callback,
+            model_range=(0, 80),
+            guide_range=(82, 97),
+        )
+        progress_callback(100, "Descarga completada.")
+
+    def _download_assets(
+        self: OcrInstallService,
+        progress_callback: ProgressCallback,
+        *,
+        model_range: tuple[int, int],
+        guide_range: tuple[int, int],
+    ) -> None:
+        """Pasos compartidos de descarga (modelo fatal + guia no-fatal).
+
+        Los rangos de progreso vienen como tuplas (start, end) para que
+        este metodo pueda emitirse tanto al final de `install()` (rangos
+        comprimidos por encima del bloque pip) como en standalone via
+        `download_ocr_assets()` (rangos completos 0-97). NO emite el
+        progress final (100, "..."); el caller decide el mensaje.
+        """
         model_dest = get_models_dir() / OCR_MODEL_FILENAME
         if model_dest.exists():
-            progress_callback(85, "Modelo OCR ya descargado.")
+            progress_callback(model_range[1], "Modelo OCR ya descargado.")
         else:
             self._download_file(
                 url=OCR_MODEL_URL,
                 dest=model_dest,
                 progress_callback=progress_callback,
-                start_pct=65,
-                end_pct=85,
+                start_pct=model_range[0],
+                end_pct=model_range[1],
                 error_msg=(
                     "No se pudo descargar el modelo OCR. "
                     "Verificá tu conexión a internet y reintentá."
                 ),
             )
 
-        # Paso 5 (no-fatal): descargar la imagen de guia. El OCR funciona
-        # sin ella — solo se pierde la ayuda visual en la tab Por foto.
-        # Si la descarga falla, se loggea y se sigue.
         guide_dest = get_images_dir() / OCR_GUIDE_FILENAME
         if guide_dest.exists():
-            progress_callback(95, "Guía OCR ya descargada.")
+            progress_callback(guide_range[1], "Guía OCR ya descargada.")
         else:
             try:
                 self._download_file(
                     url=OCR_GUIDE_URL,
                     dest=guide_dest,
                     progress_callback=progress_callback,
-                    start_pct=87,
-                    end_pct=95,
+                    start_pct=guide_range[0],
+                    end_pct=guide_range[1],
                     error_msg=None,
                 )
             except (urllib.error.URLError, OSError) as exc:
                 logger.warning("No se pudo descargar la guía OCR: %s", exc)
-                progress_callback(95, "Guía OCR no disponible (no es crítico).")
-
-        progress_callback(100, "Instalación completada.")
-        return python_exe
+                progress_callback(guide_range[1], "Guía OCR no disponible (no es crítico).")
 
     def _run_streamed(
         self: OcrInstallService,
@@ -378,17 +411,21 @@ class OcrInstallService:
     ) -> None:
         """Descarga `url` a `dest` con progreso entre `start_pct`/`end_pct`.
 
+        Usa un archivo temporal `dest.<.part>` y solo renombra a `dest`
+        si la descarga termino OK — para NO sobrescribir un archivo
+        valido pre-existente en caso de fallo. `urllib.request.urlretrieve`
+        escribe al destino antes de poder fallar (ej. al hacer 404
+        recibe body de error y lo guarda igual), asi que el patron
+        ingenuo `if exc: dest.unlink()` corrompe un archivo legitimo.
+
         Si `error_msg` se provee, las excepciones de red/IO se traducen
         a `OcrInstallError` con ese mensaje + detalle tecnico. Si es
         None, las excepciones se propagan tal cual al caller (que decide
         si las trata como warning).
-
-        Borra el archivo parcial en `dest` si la descarga falla, asi el
-        chequeo de idempotencia (`if dest.exists()`) no se confunde con
-        un download incompleto en el siguiente intento.
         """
         progress_callback(start_pct, f"Descargando {dest.name}...")
         dest.parent.mkdir(parents=True, exist_ok=True)
+        temp = dest.with_name(dest.name + ".part")
 
         def reporthook(block_num: int, block_size: int, total_size: int) -> None:
             if total_size <= 0:
@@ -399,13 +436,15 @@ class OcrInstallService:
             progress_callback(pct, f"Descargando {dest.name}... ({downloaded // 1024} KB)")
 
         try:
-            urllib.request.urlretrieve(url, dest, reporthook=reporthook)  # noqa: S310 — URL hardcoded
+            urllib.request.urlretrieve(url, temp, reporthook=reporthook)  # noqa: S310 — URL hardcoded
         except (urllib.error.URLError, OSError) as exc:
             with contextlib.suppress(OSError):
-                dest.unlink(missing_ok=True)
+                temp.unlink(missing_ok=True)
             if error_msg is not None:
                 raise OcrInstallError(f"{error_msg}\n\nDetalle: {exc}") from exc
             raise
+        # Rename atómico solo si la descarga completo.
+        temp.replace(dest)
 
     def _iter_lines_with_idle_ticks(
         self: OcrInstallService,
