@@ -129,22 +129,32 @@ class OcrInstallService:
     """Wrapper sobre `pip install` para los packages de OCR."""
 
     @staticmethod
-    def is_installed() -> bool:
+    def is_installed(python_exe: str | None = None) -> bool:
         """Indica si torch/ultralytics/easyocr/cv2 estan disponibles.
 
         En **desarrollo** (no frozen) delega a `OcrService.is_available()`
         que hace un import directo: el venv del dev tiene torch en su
-        sys.path, asi que ese check es correcto.
+        sys.path, asi que ese check es correcto. El parametro
+        `python_exe` se ignora en este modo.
 
-        En **bundle PyInstaller** los imports apuntan al sys.path del
-        bundle, que no incluye torch (lo excluimos para mantener el .exe
-        liviano — se instalan bajo demanda en el Python del sistema).
-        Verificar ahi con `import torch` siempre daria False aunque el
-        usuario las haya instalado. Por eso, en modo frozen lanzamos un
-        subprocess al Python del sistema (mismo que uso `install()`) y
-        chequeamos los imports ahi. Costo: ~1s por llamada, aceptable
-        porque solo se invoca al evaluar el estado de la tab OCR (no
-        en cada frame).
+        En **bundle PyInstaller** los imports del proceso apuntan al
+        sys.path del bundle, que no incluye torch. El usuario los instala
+        bajo demanda en el Python del sistema. Para chequear si esa
+        instalacion existe lanzamos un subprocess al Python correcto:
+
+        - Si el caller provee `python_exe` (tipicamente leido del
+          AppSetting `ocr_python_exe` que persistio el `install()`
+          exitoso), usar ese. Mismo Python que se uso para instalar
+          → garantiza que el check encuentra las deps.
+        - Si no, fallback a `shutil.which("python")`. Heredamos el PATH
+          del shell que lanzo el .exe, asi que en doble-click desde
+          Explorer resuelve al Python global del sistema.
+
+        El subprocess usa `importlib.util.find_spec` para chequear que
+        los modulos son importables sin cargarlos. Es ~30x mas rapido
+        que `import torch` (que dispara la carga de DLLs nativas de
+        torch / opencv, 5-15s cold). Timeout 30s defensivo para el
+        peor caso (Python frio del sistema con AV scanning).
         """
         if not getattr(sys, "frozen", False):
             # Import dentro del método para evitar arrastrar OcrService
@@ -153,14 +163,25 @@ class OcrInstallService:
 
             return OcrService.is_available()
 
-        python_exe = shutil.which("python") or shutil.which("python3")
+        if python_exe is None:
+            python_exe = shutil.which("python") or shutil.which("python3")
         if python_exe is None:
             return False
         try:
             result = subprocess.run(  # noqa: S603 — argv literal
-                [python_exe, "-c", "import torch, ultralytics, easyocr, cv2"],
+                [
+                    python_exe,
+                    "-c",
+                    (
+                        "import importlib.util as u, sys; "
+                        "sys.exit(0 if all("
+                        "u.find_spec(m) for m in "
+                        "('torch','ultralytics','easyocr','cv2')"
+                        ") else 1)"
+                    ),
+                ],
                 capture_output=True,
-                timeout=10,
+                timeout=30,
                 creationflags=_NO_WINDOW_FLAG,
                 check=False,
             )
@@ -168,7 +189,7 @@ class OcrInstallService:
             return False
         return result.returncode == 0
 
-    def install(self: OcrInstallService, progress_callback: ProgressCallback) -> None:
+    def install(self: OcrInstallService, progress_callback: ProgressCallback) -> str:
         """Corre el pipeline de instalación con progreso streameado.
 
         Para cada comando: lanza `Popen` con stdout mergeado, lee
@@ -179,6 +200,12 @@ class OcrInstallService:
 
         Al terminar el pipeline llama una vez más con
         `(100, "Instalación completada.")`.
+
+        Returns:
+            El path al `python_exe` que se usó para correr `pip install`.
+            El caller (slot en main thread) lo persiste en
+            `AppSetting("ocr_python_exe")` para que `is_installed()`
+            futuros consulten el mismo Python.
 
         Raises:
             OcrInstallError: si algún módulo del pipeline ya está
@@ -211,6 +238,7 @@ class OcrInstallService:
                 progress_callback=progress_callback,
             )
         progress_callback(100, "Instalación completada.")
+        return python_exe
 
     def _run_streamed(
         self: OcrInstallService,
