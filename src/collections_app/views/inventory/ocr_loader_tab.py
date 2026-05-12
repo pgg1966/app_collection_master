@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QObject, Qt, QThread, Signal
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
@@ -52,6 +53,7 @@ from collections_app.services.exceptions import (
     OcrInstallError,
 )
 from collections_app.services.ocr_install_service import OcrInstallService
+from collections_app.views.inventory._scaled_image_label import ScaledImageLabel
 from collections_app.views.inventory.ocr_result_dialog import OcrResultDialog
 
 if TYPE_CHECKING:
@@ -238,6 +240,18 @@ class OcrLoaderTab(QWidget):
     def _build_ready_page(self: OcrLoaderTab) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
+
+        # Imagen de guía OCR — visible solo si la colección tiene una
+        # configurada. Se inicializa con un placeholder vacío y se
+        # actualiza en `_refresh_guide_image()` (también llamado desde
+        # set_active_collection cuando cambia la colección).
+        self._guide_image = ScaledImageLabel(
+            QPixmap(), parent=page, minimum_width=200, minimum_height=120
+        )
+        self._guide_image.setMaximumHeight(250)
+        self._guide_image.setVisible(False)
+        layout.addWidget(self._guide_image)
+
         intro = QLabel(
             self.tr(
                 "Sacá fotos a los reversos de las figuritas y agregalas. "
@@ -309,7 +323,28 @@ class OcrLoaderTab(QWidget):
             )
             self._stack.setCurrentIndex(_PAGE_NO_MODEL)
             return
+        self._refresh_guide_image()
         self._stack.setCurrentIndex(_PAGE_READY)
+
+    def _refresh_guide_image(self: OcrLoaderTab) -> None:
+        """Actualiza la imagen de guía OCR si la colección tiene una.
+
+        Si `ctx.get_ocr_guide_path(collection)` devuelve `None` (sin
+        filename configurado o archivo no existe en disco), oculta el
+        widget. Si devuelve un path válido, carga el QPixmap y lo
+        muestra.
+        """
+        getter = getattr(self._ctx, "get_ocr_guide_path", None)
+        guide_path = getter(self._collection) if getter is not None else None
+        if guide_path is None:
+            self._guide_image.setVisible(False)
+            return
+        pix = QPixmap(str(guide_path))
+        if pix.isNull():
+            self._guide_image.setVisible(False)
+            return
+        self._guide_image.set_original_pixmap(pix)
+        self._guide_image.setVisible(True)
 
     def _get_ocr_service(self: OcrLoaderTab) -> OcrService | None:
         """Acceso a la factory del ctx con manejo defensivo.

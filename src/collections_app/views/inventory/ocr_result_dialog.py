@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QBrush, QCloseEvent, QColor, QFont, QPixmap, QResizeEvent
+from PySide6.QtGui import QBrush, QCloseEvent, QColor, QFont, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -41,6 +41,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from collections_app.views.inventory._scaled_image_label import ScaledImageLabel
 
 if TYPE_CHECKING:
     from collections_app.app_context import AppContext
@@ -64,46 +66,6 @@ _COL_CHECK = 0
 _COL_CODE = 1
 _COL_NAME = 2
 _COL_CONF = 3
-
-
-class _ScaledImageLabel(QLabel):
-    """QLabel que re-escala su pixmap al tamaño disponible.
-
-    El QLabel default no re-escala el pixmap cuando el widget cambia de
-    tamaño; setScaledContents=True ignora el aspect ratio. Esta subclase
-    guarda el pixmap original y re-escala en cada resizeEvent preservando
-    proporción.
-    """
-
-    def __init__(self: _ScaledImageLabel, pixmap: QPixmap, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._original = pixmap
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Expanding,
-        )
-        # Mínimo razonable. Antes era (1, 1) lo que permitía al splitter
-        # colapsar el panel a 0px de ancho cuando el QTableWidget vecino
-        # tenía un sizeHint horizontal mayor; ahora el panel siempre se
-        # ve.
-        self.setMinimumWidth(300)
-        self.setMinimumHeight(200)
-        # Mostrar el pixmap antes del primer resize (si esperamos al
-        # resizeEvent, el label queda vacío hasta que el dialog se
-        # muestra; en tests no se llega a mostrar nunca).
-        if not pixmap.isNull():
-            super().setPixmap(pixmap)
-
-    def resizeEvent(self: _ScaledImageLabel, event: QResizeEvent) -> None:  # noqa: N802
-        super().resizeEvent(event)
-        if not self._original.isNull():
-            scaled = self._original.scaled(
-                self.size(),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            super().setPixmap(scaled)
 
 
 class _ManualCardDialog(QDialog):
@@ -207,7 +169,7 @@ class OcrResultDialog(QDialog):
         # con texto explicativo.
         annotated = self._annotate_image()
         if not annotated.isNull():
-            self._image_label: QLabel = _ScaledImageLabel(annotated)
+            self._image_label: QLabel = ScaledImageLabel(annotated)
         else:
             self._image_label = QLabel(self.tr("(no se pudo cargar la imagen)"))
             self._image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)

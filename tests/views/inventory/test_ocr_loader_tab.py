@@ -115,6 +115,72 @@ def test_state_ready_when_deps_ok_and_model_present(
     assert tab._add_photos_btn.isHidden() is False
 
 
+def test_guide_image_hidden_when_no_guide_configured(
+    qtbot,  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+    ctx_and_collection: tuple[AppContext, Collection],
+) -> None:
+    """Sin `get_ocr_guide_path` o devolviendo None → el widget de guía está oculto."""
+    monkeypatch.setattr(
+        "collections_app.views.inventory.ocr_loader_tab.OcrInstallService.is_installed",
+        staticmethod(lambda: True),
+    )
+    ctx, coll = ctx_and_collection
+    monkeypatch.setattr(
+        ctx.__class__,
+        "get_ocr_service",
+        lambda self, _coll: object(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        ctx.__class__,
+        "get_ocr_guide_path",
+        lambda self, _coll: None,
+        raising=False,
+    )
+    tab = OcrLoaderTab(ctx=ctx, collection=coll)
+    qtbot.addWidget(tab)
+    assert tab._guide_image.isHidden() is True
+
+
+def test_guide_image_shown_when_path_exists(
+    qtbot,  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+    ctx_and_collection: tuple[AppContext, Collection],
+    tmp_path,  # type: ignore[no-untyped-def]
+) -> None:
+    """Con un path válido + imagen legible → el widget de guía se muestra."""
+    from PySide6.QtGui import QImage
+
+    monkeypatch.setattr(
+        "collections_app.views.inventory.ocr_loader_tab.OcrInstallService.is_installed",
+        staticmethod(lambda: True),
+    )
+    ctx, coll = ctx_and_collection
+    monkeypatch.setattr(
+        ctx.__class__,
+        "get_ocr_service",
+        lambda self, _coll: object(),
+        raising=False,
+    )
+
+    # Generar una imagen PNG válida via Qt (en vez de bytes mágicos).
+    guide_path = tmp_path / "guide.png"
+    qimg = QImage(100, 60, QImage.Format.Format_RGB888)
+    qimg.fill(0)
+    assert qimg.save(str(guide_path)) is True
+
+    monkeypatch.setattr(
+        ctx.__class__,
+        "get_ocr_guide_path",
+        lambda self, _coll: guide_path,
+        raising=False,
+    )
+    tab = OcrLoaderTab(ctx=ctx, collection=coll)
+    qtbot.addWidget(tab)
+    assert tab._guide_image.isHidden() is False
+
+
 def test_set_active_collection_re_evaluates_state(
     qtbot,  # type: ignore[no-untyped-def]
     monkeypatch: pytest.MonkeyPatch,
