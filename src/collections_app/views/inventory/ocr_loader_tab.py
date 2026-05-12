@@ -28,6 +28,7 @@ refresque.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -103,7 +104,7 @@ class _InstallWorker(QObject):
     """Wrapper de `OcrInstallService.install` para correr en un QThread."""
 
     progress = Signal(int, str)  # (pct, message)
-    finished = Signal()  # emitido tras éxito; NO recibe nada
+    finished = Signal(str)  # emitido tras éxito; payload = python_exe usado
     failed = Signal(str)  # emitido tras error; mensaje para el user
 
     def __init__(self: _InstallWorker, service: OcrInstallService) -> None:
@@ -112,11 +113,38 @@ class _InstallWorker(QObject):
 
     def run(self: _InstallWorker) -> None:
         try:
-            self._service.install(lambda pct, msg: self.progress.emit(pct, msg))
+            python_exe = self._service.install(lambda pct, msg: self.progress.emit(pct, msg))
         except OcrInstallError as exc:
             self.failed.emit(str(exc))
             return
-        self.finished.emit()
+        self.finished.emit(python_exe)
+
+
+class _CheckInstallWorker(QThread):
+    """Verifica `OcrInstallService.is_installed()` en un hilo aparte.
+
+    En el bundle PyInstaller, `is_installed()` lanza un subprocess al
+    Python del sistema y puede tardar varios segundos (importlib.util
+    find_spec sobre torch en un Python "frio" con AV scanning). Correr
+    eso en el main thread congela la UI durante todo ese tiempo, asi
+    que lo movemos a un QThread.
+
+    Hereda directo de QThread (no QObject + moveToThread) porque el
+    payload es pequeno (un bool) y no necesitamos cleanup elaborado.
+    """
+
+    result = Signal(bool)
+
+    def __init__(
+        self: _CheckInstallWorker,
+        parent: QObject | None,
+        python_exe_hint: str | None,
+    ) -> None:
+        super().__init__(parent)
+        self._hint = python_exe_hint
+
+    def run(self: _CheckInstallWorker) -> None:
+        self.result.emit(OcrInstallService.is_installed(python_exe=self._hint))
 
 
 class _InferenceWorker(QObject):
@@ -180,6 +208,9 @@ class OcrLoaderTab(QWidget):
         self._install_worker: _InstallWorker | None = None
         self._inference_thread: QThread | None = None
         self._inference_worker: _InferenceWorker | None = None
+        # Check async (bundle PyInstaller): worker temporal, vive solo
+        # durante el subprocess. Se autodestruye con deleteLater.
+        self._check_worker: _CheckInstallWorker | None = None
         # Estado del flow de carga (Estado 3).
         self._pending_paths: list[Path] = []
         self._current_index: int = 0
@@ -307,8 +338,36 @@ class OcrLoaderTab(QWidget):
     # ------------------------------------------------------------------
 
     def _evaluate_state(self: OcrLoaderTab) -> None:
-        """Decide qué página mostrar y prepara los textos dinámicos."""
-        if not OcrInstallService.is_installed():
+        """Decide qué página mostrar.
+
+        En el **bundle PyInstaller** la check delega a un subprocess al
+        Python del sistema (puede tardar varios segundos por carga de
+        DLLs nativas si torch/cv2 estan instalados). Para no congelar
+        la UI, el check se hace en un `_CheckInstallWorker` y la
+        continuación vive en `_on_install_check_done`. Durante esos
+        segundos la tab queda en el _PAGE_INSTALL: si la check da True
+        transiciona, si da False se queda — mismo estado terminal que
+        antes.
+
+        En **desarrollo** (no frozen) el check es un import directo:
+        rapido y sincronico, sin worker.
+        """
+        if not getattr(sys, "frozen", False):
+            self._on_install_check_done(OcrInstallService.is_installed())
+            return
+
+        # Bundle: check async. Mientras tanto, _PAGE_INSTALL.
+        self._stack.setCurrentIndex(_PAGE_INSTALL)
+        hint = self._read_python_exe_hint()
+        worker = _CheckInstallWorker(self, python_exe_hint=hint)
+        worker.result.connect(self._on_install_check_done)
+        worker.finished.connect(worker.deleteLater)
+        self._check_worker = worker
+        worker.start()
+
+    def _on_install_check_done(self: OcrLoaderTab, installed: bool) -> None:
+        """Continuacion de `_evaluate_state` tras el check (sync o async)."""
+        if not installed:
             self._stack.setCurrentIndex(_PAGE_INSTALL)
             return
         ocr = self._get_ocr_service()
@@ -325,6 +384,11 @@ class OcrLoaderTab(QWidget):
             return
         self._refresh_guide_image()
         self._stack.setCurrentIndex(_PAGE_READY)
+
+    def _read_python_exe_hint(self: OcrLoaderTab) -> str | None:
+        """Lee el `python_exe` que uso `install()` exitoso, si existe."""
+        setting = self._ctx.settings.get("ocr_python_exe")
+        return setting.value if setting else None
 
     def _refresh_guide_image(self: OcrLoaderTab) -> None:
         """Actualiza la imagen de guía OCR si la colección tiene una.
@@ -391,9 +455,18 @@ class OcrLoaderTab(QWidget):
         self._install_progress.setValue(pct)
         self._install_status_label.setText(message)
 
-    def _on_install_finished(self: OcrLoaderTab) -> None:
+    def _on_install_finished(self: OcrLoaderTab, python_exe: str) -> None:
+        """Slot del signal `finished` del `_InstallWorker`.
+
+        Persiste el `python_exe` que se uso en `install()` (asi
+        `is_installed()` futuros consultan el mismo Python sin depender
+        del PATH del shell) y re-evalua el estado para que la tab
+        transicione al Estado 2 (sin modelo) o Estado 3 (listo).
+        """
         self._install_progress.setValue(100)
         self._install_status_label.setText(self.tr("Instalación completada."))
+        self._ctx.settings.set("ocr_python_exe", python_exe)
+        self._ctx.conn.commit()
         self._evaluate_state()
 
     def _on_install_failed(self: OcrLoaderTab, message: str) -> None:
