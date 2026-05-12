@@ -1,4 +1,4 @@
-"""Genera `docs/project_structure.md` con la estructura completa del proyecto.
+"""Genera `docs/project_structure_NN.md` con la estructura del proyecto.
 
 Características:
 
@@ -12,15 +12,23 @@ Características:
   signaturas + docstring de primer renglón **antes** del código completo.
 - Mantiene la sección de **schema SQL + dataclasses + repositories** como
   hand-off compacto para alimentar a un LLM.
+- **Partición en N archivos** (default 3) para que cada parte sea
+  pegable/subible a una conversación de LLM. Si una parte supera
+  `--max-mb` (default 1.0 MB), aumenta N automáticamente hasta que el
+  archivo más grande quede dentro del límite.
 
 Uso:
-    python scripts/generate_context.py
+    python scripts/generate_context.py                    # 3 partes
+    python scripts/generate_context.py --parts 5         # forzar 5 partes
+    python scripts/generate_context.py --max-mb 0.7      # techo 700 KB/parte
 
-Sin argumentos. Output: `docs/project_structure.md` (sobreescribe).
+Outputs: `docs/project_structure_01.md`, `_02.md`, ... (sobreescribe). El
+archivo antiguo `docs/project_structure.md` se borra si existe.
 """
 
 from __future__ import annotations
 
+import argparse
 import ast
 import re
 import subprocess
@@ -34,7 +42,14 @@ SCHEMA_DIR = SRC_DIR / "collections_app" / "core" / "db" / "schema"
 MODELS_DIR = SRC_DIR / "collections_app" / "core" / "models"
 REPOS_DIR = SRC_DIR / "collections_app" / "core" / "repositories"
 DOCS_DIR = ROOT / "docs"
-OUTPUT_PATH = DOCS_DIR / "project_structure.md"
+# Output path stem para las partes: docs/project_structure_NN.md.
+OUTPUT_STEM = "project_structure"
+LEGACY_OUTPUT = DOCS_DIR / "project_structure.md"
+
+DEFAULT_PARTS = 3
+DEFAULT_MAX_MB = 1.0
+# Tope duro para evitar splits absurdos si auto-grow se descontrola.
+MAX_PARTS_CEILING = 30
 
 # Extensiones tratadas como texto (contenido se incluye completo).
 TEXT_SUFFIXES = frozenset(
@@ -642,12 +657,122 @@ def render_context_section(
 
 
 # ---------------------------------------------------------------------
+# Partition helpers
+# ---------------------------------------------------------------------
+
+
+def _block_bytes(block: list[str]) -> int:
+    """Tamaño aproximado en bytes de un bloque de líneas (incluye \\n)."""
+    return sum(len(line) + 1 for line in block)
+
+
+def split_into_parts(
+    file_blocks: list[tuple[Path, list[str]]],
+    num_parts: int,
+) -> list[list[tuple[Path, list[str]]]]:
+    """Reparte `file_blocks` en `num_parts` listas balanceadas por tamaño.
+
+    Greedy con target = total / num_parts. Cuando agregar el siguiente
+    bloque hace que la parte actual supere el target — y todavía quedan
+    partes por usar — saltamos a la siguiente. Esto mantiene el orden
+    original de los archivos (importante para la legibilidad del output)
+    y evita partir un archivo entre dos partes.
+    """
+    if num_parts <= 1:
+        return [list(file_blocks)]
+    sizes = [_block_bytes(lines) for _, lines in file_blocks]
+    total = sum(sizes)
+    target = total / num_parts if num_parts else total
+
+    parts: list[list[tuple[Path, list[str]]]] = [[] for _ in range(num_parts)]
+    current = 0
+    current_size = 0
+    for entry, size in zip(file_blocks, sizes, strict=True):
+        # Saltar a la siguiente parte solo si la actual ya tiene algo
+        # (evita partes vacías cuando el primer archivo supera el target).
+        if current_size + size > target and current < num_parts - 1 and parts[current]:
+            current += 1
+            current_size = 0
+        parts[current].append(entry)
+        current_size += size
+    return parts
+
+
+def split_with_auto_grow(
+    file_blocks: list[tuple[Path, list[str]]],
+    base_parts: int,
+    max_bytes: int,
+    overhead_per_part: int,
+) -> list[list[tuple[Path, list[str]]]]:
+    """Reparte en `base_parts` y aumenta N si alguna parte excede `max_bytes`.
+
+    `overhead_per_part` es el costo fijo del header/navegación que se va a
+    prepender a cada parte; se suma al tamaño de los blocks para que el
+    cómputo del techo sea fiel al output final.
+    """
+    n = max(1, base_parts)
+    while True:
+        parts = split_into_parts(file_blocks, n)
+        max_size = max(
+            (overhead_per_part + sum(_block_bytes(lines) for _, lines in part)) for part in parts
+        )
+        if max_size <= max_bytes:
+            return parts
+        if n >= len(file_blocks) or n >= MAX_PARTS_CEILING:
+            print(
+                f"WARN: alcanzado el tope de partes ({n}); la mayor sigue "
+                f"en {max_size/1024:.0f} KB > {max_bytes/1024:.0f} KB target."
+            )
+            return parts
+        n += 1
+
+
+def _navigation_block(part_idx: int, num_parts: int) -> list[str]:
+    """Líneas de navegación entre partes: 'Parte 2 de 3' + links."""
+    out: list[str] = [f"> **Parte {part_idx + 1} de {num_parts}**"]
+    links = []
+    for i in range(num_parts):
+        name = f"{OUTPUT_STEM}_{i + 1:02d}.md"
+        if i == part_idx:
+            links.append(f"**{i + 1}**")
+        else:
+            links.append(f"[{i + 1}]({name})")
+    out.append(">")
+    out.append("> Navegación: " + " · ".join(links))
+    out.append("")
+    return out
+
+
+# ---------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------
 
 
-def main() -> int:
+def _parse_args(argv: list[str] | None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else None)
+    parser.add_argument(
+        "--parts",
+        type=int,
+        default=DEFAULT_PARTS,
+        help=f"Cantidad mínima de partes a generar (default {DEFAULT_PARTS}).",
+    )
+    parser.add_argument(
+        "--max-mb",
+        type=float,
+        default=DEFAULT_MAX_MB,
+        help=(
+            f"Techo de tamaño por parte en MB (default {DEFAULT_MAX_MB}). "
+            "Si alguna parte excede este límite, se aumenta N "
+            "automáticamente hasta cumplirlo (o hasta el tope duro)."
+        ),
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
     print(f"ROOT: {ROOT}")
+    print(f"Args: parts>={args.parts}, max_mb={args.max_mb}")
 
     files = list_repo_files()
     print(f"Archivos detectados (gitignore-aware): {len(files)}")
@@ -663,43 +788,84 @@ def main() -> int:
     tables = parse_sql_schema(sql_files)
     print(f"Tablas detectadas: {sorted(tables)}")
 
-    # Build sections.
-    sections: list[str] = []
-    sections.append("# Contexto del Proyecto Collections")
-    sections.append("")
-    sections.append(
-        "> Generado automáticamente por "
-        "[`scripts/generate_context.py`](../scripts/generate_context.py). "
-        "**No editar a mano** — se sobreescribe."
-    )
-    sections.append("")
-    sections.append(
-        "Contenido en orden: **(1)** árbol del proyecto, **(2)** estructura + "
-        "contenido de cada archivo (filtrado vía `.gitignore`), **(3)** contexto "
-        "(schema SQL, modelos, repositorios)."
-    )
-    sections.append("")
+    # Bloques de la §1 (árbol) y §3 (contexto compacto) — van enteros en la
+    # primera y última parte respectivamente.
+    tree_block: list[str] = ["# 1. Estructura del proyecto", ""]
+    tree_block.extend(build_tree_from_files(files))
+    tree_block.append("")
 
-    sections.append("# 1. Estructura del proyecto")
-    sections.append("")
-    sections.extend(build_tree_from_files(files))
-    sections.append("")
+    context_block: list[str] = render_context_section(tables, model_modules, repo_modules)
 
-    sections.append("# 2. Archivos del proyecto")
-    sections.append("")
-    sections.append(
-        "Por cada archivo: estructura (clases/funciones públicas en `.py`) + "
-        "contenido completo. Binarios se listan con nota."
+    # Bloques de §2 (uno por archivo). Pre-rendereados para que la
+    # partición sea por tamaño real del output, no por estimación.
+    file_blocks: list[tuple[Path, list[str]]] = [(p, render_file_section(p)) for p in files]
+
+    # Tamaño aproximado del header/navegación por parte (para que el
+    # auto-grow estime correctamente el techo del archivo final).
+    overhead_estimate = 600
+
+    parts = split_with_auto_grow(
+        file_blocks,
+        base_parts=args.parts,
+        max_bytes=int(args.max_mb * 1024 * 1024),
+        overhead_per_part=overhead_estimate,
     )
-    sections.append("")
-    for path in files:
-        sections.extend(render_file_section(path))
-
-    sections.extend(render_context_section(tables, model_modules, repo_modules))
+    num_parts = len(parts)
+    print(f"Generando {num_parts} parte(s).")
 
     DOCS_DIR.mkdir(parents=True, exist_ok=True)
-    OUTPUT_PATH.write_text("\n".join(sections), encoding="utf-8")
-    print(f"OK: {OUTPUT_PATH}")
+
+    # Borrar el archivo monolítico anterior si quedó del flow viejo. Y los
+    # _NN.md huérfanos que pueda haber dejado un run previo con más partes.
+    if LEGACY_OUTPUT.exists():
+        LEGACY_OUTPUT.unlink()
+        print(f"  borrado legacy {LEGACY_OUTPUT.name}")
+    for stale in sorted(DOCS_DIR.glob(f"{OUTPUT_STEM}_*.md")):
+        m = re.match(rf"^{re.escape(OUTPUT_STEM)}_(\d+)\.md$", stale.name)
+        if m and int(m.group(1)) > num_parts:
+            stale.unlink()
+            print(f"  borrado stale {stale.name}")
+
+    for idx, part_blocks in enumerate(parts):
+        out: list[str] = []
+        out.append(f"# Contexto del Proyecto Collections — Parte {idx + 1} de {num_parts}")
+        out.append("")
+        out.append(
+            "> Generado automáticamente por "
+            "[`scripts/generate_context.py`](../scripts/generate_context.py). "
+            "**No editar a mano** — se sobreescribe."
+        )
+        out.append("")
+        out.extend(_navigation_block(idx, num_parts))
+
+        if idx == 0:
+            out.append(
+                "Contenido en orden: **(1)** árbol del proyecto, **(2)** estructura + "
+                "contenido de cada archivo (filtrado vía `.gitignore`, repartido "
+                "entre las partes), **(3)** contexto compacto (schema SQL, modelos, "
+                "repositorios) en la última parte."
+            )
+            out.append("")
+            out.extend(tree_block)
+
+        out.append(f"# 2. Archivos del proyecto — parte {idx + 1}/{num_parts}")
+        out.append("")
+        out.append(
+            "Por cada archivo: estructura (clases/funciones públicas en `.py`) + "
+            "contenido completo. Binarios se listan con nota."
+        )
+        out.append("")
+        for _path, lines in part_blocks:
+            out.extend(lines)
+
+        if idx == num_parts - 1:
+            out.extend(context_block)
+
+        path = DOCS_DIR / f"{OUTPUT_STEM}_{idx + 1:02d}.md"
+        path.write_text("\n".join(out), encoding="utf-8")
+        size_kb = path.stat().st_size / 1024
+        print(f"  OK: {path.name} ({size_kb:.0f} KB, {len(part_blocks)} archivos)")
+
     return 0
 
 

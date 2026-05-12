@@ -52,6 +52,7 @@ docs/reference/
 
 # Personal planning artifacts (generated locally for conversation context)
 docs/project_structure.md
+docs/project_structure_*.md
 docs/data_dictionary.md
 # Datos personales del usuario (no versionar)
 mi_inventario_*.csv
