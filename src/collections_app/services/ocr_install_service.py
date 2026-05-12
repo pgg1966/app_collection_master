@@ -22,15 +22,38 @@ porcentaje 1% a la vez hasta el techo del paso (~48% para torch,
 
 from __future__ import annotations
 
+import contextlib
+import logging
 import shutil
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from collections.abc import Callable
+from pathlib import Path
 
+from collections_app.core.utils.paths import get_images_dir, get_models_dir
 from collections_app.services.exceptions import OcrInstallError
 
+logger = logging.getLogger(__name__)
+
 ProgressCallback = Callable[[int, str], None]
+
+
+# URLs y filenames de los assets OCR distribuidos junto al .exe via
+# GitHub Releases. Se descargan dentro de `install()` despues de los
+# pip install, asi el usuario tiene un solo flow para preparar el OCR.
+OCR_MODEL_URL = "https://github.com/pgg1966/app_collection_master/releases/download/v0.2.0/ocr_1.pt"
+OCR_GUIDE_URL = (
+    "https://github.com/pgg1966/app_collection_master" "/releases/download/v0.2.0/ocr_guide_1.jpg"
+)
+# Nombre canonico de la coleccion semilla que usa el modelo (informativo,
+# no se valida en runtime — la semilla ya tiene los filenames seteados
+# en `collections.ocr_model_filename` / `ocr_guide_filename`).
+OCR_MODEL_COLLECTION_NAME = "Panini FIFA WC 2026 - Stickers"
+OCR_MODEL_FILENAME = "ocr_1.pt"
+OCR_GUIDE_FILENAME = "ocr_guide_1.jpg"
 
 
 def _resolve_python_exe() -> str:
@@ -73,6 +96,8 @@ def _build_pipeline(python_exe: str) -> list[tuple[list[str], str, int, int]]:
     resuelva en cada `install()` — necesario porque en el bundle el
     Python del sistema podría aparecer/desaparecer entre runs.
     """
+    # Rangos comprimidos para dejar headroom (65-100) para las descargas
+    # del modelo OCR y la imagen de guia que vienen despues del pip install.
     return [
         (
             [
@@ -87,19 +112,19 @@ def _build_pipeline(python_exe: str) -> list[tuple[list[str], str, int, int]]:
             ],
             "Instalando PyTorch (CPU)... esto puede tardar varios minutos.",
             0,
-            30,
+            28,
         ),
         (
             [python_exe, "-m", "pip", "install", "ultralytics"],
             "Instalando Ultralytics YOLO...",
-            32,
-            60,
+            30,
+            48,
         ),
         (
             [python_exe, "-m", "pip", "install", "easyocr", "opencv-python"],
             "Instalando EasyOCR + OpenCV...",
-            62,
-            98,
+            50,
+            63,
         ),
     ]
 
@@ -237,6 +262,49 @@ class OcrInstallService:
                 ceiling_pct=ceiling_pct,
                 progress_callback=progress_callback,
             )
+
+        # Paso 4 (fatal): descargar el modelo OCR. Sin el .pt el OCR no
+        # puede correr nunca, asi que un fallo de red revierte toda la
+        # operacion con OcrInstallError. Las deps de Python instaladas
+        # arriba quedan en el sistema; el usuario reintenta solo este
+        # paso re-clickeando "Instalar dependencias" (con dependencias
+        # ya en disco, los pip install son no-op rapidos).
+        model_dest = get_models_dir() / OCR_MODEL_FILENAME
+        if model_dest.exists():
+            progress_callback(85, "Modelo OCR ya descargado.")
+        else:
+            self._download_file(
+                url=OCR_MODEL_URL,
+                dest=model_dest,
+                progress_callback=progress_callback,
+                start_pct=65,
+                end_pct=85,
+                error_msg=(
+                    "No se pudo descargar el modelo OCR. "
+                    "Verificá tu conexión a internet y reintentá."
+                ),
+            )
+
+        # Paso 5 (no-fatal): descargar la imagen de guia. El OCR funciona
+        # sin ella — solo se pierde la ayuda visual en la tab Por foto.
+        # Si la descarga falla, se loggea y se sigue.
+        guide_dest = get_images_dir() / OCR_GUIDE_FILENAME
+        if guide_dest.exists():
+            progress_callback(95, "Guía OCR ya descargada.")
+        else:
+            try:
+                self._download_file(
+                    url=OCR_GUIDE_URL,
+                    dest=guide_dest,
+                    progress_callback=progress_callback,
+                    start_pct=87,
+                    end_pct=95,
+                    error_msg=None,
+                )
+            except (urllib.error.URLError, OSError) as exc:
+                logger.warning("No se pudo descargar la guía OCR: %s", exc)
+                progress_callback(95, "Guía OCR no disponible (no es crítico).")
+
         progress_callback(100, "Instalación completada.")
         return python_exe
 
@@ -297,6 +365,47 @@ class OcrInstallService:
             tail = "\n".join(captured_tail).strip()
             tail = tail[-1500:] if len(tail) > 1500 else tail
             raise OcrInstallError(f"el comando falló (código {process.returncode}):\n{tail}")
+
+    def _download_file(
+        self: OcrInstallService,
+        *,
+        url: str,
+        dest: Path,
+        progress_callback: ProgressCallback,
+        start_pct: int,
+        end_pct: int,
+        error_msg: str | None,
+    ) -> None:
+        """Descarga `url` a `dest` con progreso entre `start_pct`/`end_pct`.
+
+        Si `error_msg` se provee, las excepciones de red/IO se traducen
+        a `OcrInstallError` con ese mensaje + detalle tecnico. Si es
+        None, las excepciones se propagan tal cual al caller (que decide
+        si las trata como warning).
+
+        Borra el archivo parcial en `dest` si la descarga falla, asi el
+        chequeo de idempotencia (`if dest.exists()`) no se confunde con
+        un download incompleto en el siguiente intento.
+        """
+        progress_callback(start_pct, f"Descargando {dest.name}...")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+
+        def reporthook(block_num: int, block_size: int, total_size: int) -> None:
+            if total_size <= 0:
+                return
+            downloaded = min(block_num * block_size, total_size)
+            fraction = downloaded / total_size
+            pct = min(end_pct, start_pct + int(fraction * (end_pct - start_pct)))
+            progress_callback(pct, f"Descargando {dest.name}... ({downloaded // 1024} KB)")
+
+        try:
+            urllib.request.urlretrieve(url, dest, reporthook=reporthook)  # noqa: S310 — URL hardcoded
+        except (urllib.error.URLError, OSError) as exc:
+            with contextlib.suppress(OSError):
+                dest.unlink(missing_ok=True)
+            if error_msg is not None:
+                raise OcrInstallError(f"{error_msg}\n\nDetalle: {exc}") from exc
+            raise
 
     def _iter_lines_with_idle_ticks(
         self: OcrInstallService,
