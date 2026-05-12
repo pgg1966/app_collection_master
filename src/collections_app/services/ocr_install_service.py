@@ -130,13 +130,43 @@ class OcrInstallService:
 
     @staticmethod
     def is_installed() -> bool:
-        """Alias de `OcrService.is_available()` — re-export para que
-        la UI lo importe sin pasar por `OcrService`."""
-        # Import dentro del método para evitar arrastrar OcrService
-        # (y sus imports) al construir este service.
-        from collections_app.services.ocr_service import OcrService  # noqa: PLC0415
+        """Indica si torch/ultralytics/easyocr/cv2 estan disponibles.
 
-        return OcrService.is_available()
+        En **desarrollo** (no frozen) delega a `OcrService.is_available()`
+        que hace un import directo: el venv del dev tiene torch en su
+        sys.path, asi que ese check es correcto.
+
+        En **bundle PyInstaller** los imports apuntan al sys.path del
+        bundle, que no incluye torch (lo excluimos para mantener el .exe
+        liviano — se instalan bajo demanda en el Python del sistema).
+        Verificar ahi con `import torch` siempre daria False aunque el
+        usuario las haya instalado. Por eso, en modo frozen lanzamos un
+        subprocess al Python del sistema (mismo que uso `install()`) y
+        chequeamos los imports ahi. Costo: ~1s por llamada, aceptable
+        porque solo se invoca al evaluar el estado de la tab OCR (no
+        en cada frame).
+        """
+        if not getattr(sys, "frozen", False):
+            # Import dentro del método para evitar arrastrar OcrService
+            # (y sus imports) al construir este service.
+            from collections_app.services.ocr_service import OcrService  # noqa: PLC0415
+
+            return OcrService.is_available()
+
+        python_exe = shutil.which("python") or shutil.which("python3")
+        if python_exe is None:
+            return False
+        try:
+            result = subprocess.run(  # noqa: S603 — argv literal
+                [python_exe, "-c", "import torch, ultralytics, easyocr, cv2"],
+                capture_output=True,
+                timeout=10,
+                creationflags=_NO_WINDOW_FLAG,
+                check=False,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            return False
+        return result.returncode == 0
 
     def install(self: OcrInstallService, progress_callback: ProgressCallback) -> None:
         """Corre el pipeline de instalación con progreso streameado.
