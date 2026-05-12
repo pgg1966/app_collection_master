@@ -544,3 +544,94 @@ def test_apply_detections_skips_unknown_card_id(
 
     # Solo las dos con card_id concreto se imputan.
     assert len(calls) == 2
+
+
+# =====================================================================
+# Estado 2 — sub-variantes (Variante A: sin modelo, Variante B: descargar)
+# =====================================================================
+
+
+def _make_collection_with_model_filename(ctx: AppContext, model_filename: str | None) -> Collection:
+    """Crea una collection nueva con el `ocr_model_filename` dado."""
+    h = ctx.code_headers.create(
+        CodeHeader(code_header_id=None, code_header_name="W2", code_max_length=3)
+    )
+    assert h.code_header_id is not None
+    return ctx.collections.create(
+        Collection(
+            collection_id=None,
+            collection_name="Variante",
+            card_count=0,
+            requires_code=True,
+            code_field_name="País",
+            code_header_id=h.code_header_id,
+            ocr_model_filename=model_filename,
+        )
+    )
+
+
+def test_state_no_model_variant_b_shows_download_button_when_model_missing(
+    qtbot,  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+    ctx_and_collection: tuple[AppContext, Collection],
+) -> None:
+    """Modelo configurado en DB pero archivo no existe → botón "Descargar"."""
+    monkeypatch.setattr(
+        "collections_app.views.inventory.ocr_loader_tab.OcrInstallService.is_installed",
+        staticmethod(lambda: True),
+    )
+    ctx, _ = ctx_and_collection
+    coll = _make_collection_with_model_filename(ctx, "ocr_1.pt")
+    # ctx.get_ocr_service → None (modelo no cargable).
+    monkeypatch.setattr(
+        ctx.__class__,
+        "get_ocr_service",
+        lambda self, _coll: None,
+        raising=False,
+    )
+    # ctx.get_ocr_model_path → None (filename configurado pero archivo no en disco).
+    monkeypatch.setattr(
+        ctx.__class__,
+        "get_ocr_model_path",
+        lambda self, _coll: None,
+        raising=False,
+    )
+
+    tab = OcrLoaderTab(ctx=ctx, collection=coll)
+    qtbot.addWidget(tab)
+    assert tab._stack.currentIndex() == _PAGE_NO_MODEL
+    assert tab._download_model_btn.isHidden() is False
+    assert tab._download_model_btn.isEnabled() is True
+    assert "no está descargado" in tab._no_model_label.text()
+
+
+def test_state_no_model_variant_a_hides_download_button_when_filename_absent(
+    qtbot,  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+    ctx_and_collection: tuple[AppContext, Collection],
+) -> None:
+    """Sin `ocr_model_filename` en DB → mensaje "pedile al admin", botón oculto."""
+    monkeypatch.setattr(
+        "collections_app.views.inventory.ocr_loader_tab.OcrInstallService.is_installed",
+        staticmethod(lambda: True),
+    )
+    ctx, _ = ctx_and_collection
+    coll = _make_collection_with_model_filename(ctx, None)
+    monkeypatch.setattr(
+        ctx.__class__,
+        "get_ocr_service",
+        lambda self, _coll: None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        ctx.__class__,
+        "get_ocr_model_path",
+        lambda self, _coll: None,
+        raising=False,
+    )
+
+    tab = OcrLoaderTab(ctx=ctx, collection=coll)
+    qtbot.addWidget(tab)
+    assert tab._stack.currentIndex() == _PAGE_NO_MODEL
+    assert tab._download_model_btn.isHidden() is True
+    assert "no tiene un modelo" in tab._no_model_label.text()
