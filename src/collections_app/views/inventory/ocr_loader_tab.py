@@ -254,9 +254,9 @@ class OcrLoaderTab(QWidget):
 
         intro = QLabel(
             self.tr(
-                "Sacá fotos a los reversos de las figuritas y agregalas. "
-                "Después de procesar cada foto se va a abrir una ventana "
-                "con las detecciones para que las confirmes antes de cargar."
+                "Sacá fotos como se indica en el modelo.\n"
+                "Podés agregar varias fotos a la vez.\n"
+                "Las cartas no reconocidas se pueden cargar manualmente."
             )
         )
         intro.setWordWrap(True)
