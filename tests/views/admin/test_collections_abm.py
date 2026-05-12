@@ -172,6 +172,114 @@ def test_configure_ocr_persists_on_accept(
     assert fetched.ocr_model_filename == f"ocr_{cid}.pt"
 
 
+# ---------------------------------------------------------------------
+# Botón "Configurar imagen OCR" (Migración 003)
+# ---------------------------------------------------------------------
+
+
+def test_guide_config_button_hidden_without_admin_env(
+    qtbot,  # type: ignore[no-untyped-def]
+    ctx_with_collections: AppContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("COLLECTIONS_ADMIN", raising=False)
+    coll = ctx_with_collections.collections.list_all()[0]
+    dlg = CollectionEditDialog(ctx=ctx_with_collections, collection=coll)
+    qtbot.addWidget(dlg)
+    assert dlg._guide_config_btn.isHidden() is True
+
+
+def test_guide_config_button_visible_with_admin_env(
+    qtbot,  # type: ignore[no-untyped-def]
+    ctx_with_collections: AppContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("COLLECTIONS_ADMIN", "1")
+    coll = ctx_with_collections.collections.list_all()[0]
+    dlg = CollectionEditDialog(ctx=ctx_with_collections, collection=coll)
+    qtbot.addWidget(dlg)
+    assert dlg._guide_config_btn.isHidden() is False
+
+
+def test_guide_status_label_shows_no_configurada_when_none(
+    qtbot,  # type: ignore[no-untyped-def]
+    ctx_with_collections: AppContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("COLLECTIONS_ADMIN", "1")
+    coll = ctx_with_collections.collections.list_all()[0]
+    assert coll.ocr_guide_filename is None
+    dlg = CollectionEditDialog(ctx=ctx_with_collections, collection=coll)
+    qtbot.addWidget(dlg)
+    assert "No configurada" in dlg._guide_status_label.text()
+
+
+def test_configure_guide_copies_file_and_updates_label(
+    qtbot,  # type: ignore[no-untyped-def]
+    ctx_with_collections: AppContext,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,  # type: ignore[no-untyped-def]
+) -> None:
+    """Click "Configurar imagen..." → copia a images/ con nombre canónico."""
+    monkeypatch.setenv("COLLECTIONS_ADMIN", "1")
+    fake_base = tmp_path / "FakeBase"
+    monkeypatch.setenv("APPDATA", str(fake_base))
+
+    src = tmp_path / "guia_original.PNG"  # mayúsculas a propósito
+    src.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    coll = ctx_with_collections.collections.list_all()[0]
+    cid = coll.collection_id
+
+    monkeypatch.setattr(
+        "collections_app.views.admin.collections_abm.QFileDialog.getOpenFileName",
+        lambda *_a, **_k: (str(src), "Imágenes (*.png)"),
+    )
+
+    dlg = CollectionEditDialog(ctx=ctx_with_collections, collection=coll)
+    qtbot.addWidget(dlg)
+    dlg._on_configure_ocr_guide()
+
+    expected_filename = f"ocr_guide_{cid}.png"  # suffix.lower()
+    assert dlg._pending_guide_filename == expected_filename
+    assert expected_filename in dlg._guide_status_label.text()
+
+    from collections_app.core.utils.paths import get_images_dir
+
+    assert (get_images_dir() / expected_filename).is_file()
+
+
+def test_configure_guide_persists_on_accept(
+    qtbot,  # type: ignore[no-untyped-def]
+    ctx_with_collections: AppContext,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,  # type: ignore[no-untyped-def]
+) -> None:
+    monkeypatch.setenv("COLLECTIONS_ADMIN", "1")
+    fake_base = tmp_path / "FakeBase"
+    monkeypatch.setenv("APPDATA", str(fake_base))
+
+    src = tmp_path / "guia.jpg"
+    src.write_bytes(b"\xff\xd8\xff")
+
+    coll = ctx_with_collections.collections.list_all()[0]
+    cid = coll.collection_id
+
+    monkeypatch.setattr(
+        "collections_app.views.admin.collections_abm.QFileDialog.getOpenFileName",
+        lambda *_a, **_k: (str(src), ""),
+    )
+
+    dlg = CollectionEditDialog(ctx=ctx_with_collections, collection=coll)
+    qtbot.addWidget(dlg)
+    dlg._on_configure_ocr_guide()
+    dlg._on_accept()
+
+    fetched = ctx_with_collections.collections.get_by_id(cid or 0)
+    assert fetched is not None
+    assert fetched.ocr_guide_filename == f"ocr_guide_{cid}.jpg"
+
+
 def test_edit_dialog_updates_name(
     qtbot,  # type: ignore[no-untyped-def]
     ctx_with_collections: AppContext,

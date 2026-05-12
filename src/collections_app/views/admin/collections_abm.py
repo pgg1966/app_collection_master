@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
 
 from collections_app.app_context import AppContext
 from collections_app.core.models.collection import Collection
-from collections_app.core.utils.paths import get_models_dir
+from collections_app.core.utils.paths import get_images_dir, get_models_dir
 from collections_app.services.exceptions import CollectionsError
 from collections_app.views.admin.csv_import_dialog import CsvImportDialog
 
@@ -137,6 +137,20 @@ class CollectionEditDialog(QDialog):
         ocr_row.addWidget(self._ocr_config_btn)
         form.addRow(self.tr("Modelo OCR"), ocr_row)
 
+        # Migración 003 — Imagen de guía OCR. Mismo patrón que el modelo:
+        # filename canónico + botón visible solo en admin para reemplazar.
+        self._pending_guide_filename: str | None = self._original.ocr_guide_filename
+        self._guide_status_label = QLabel(
+            self._original.ocr_guide_filename or self.tr("No configurada")
+        )
+        self._guide_config_btn = QPushButton(self.tr("Configurar imagen..."))
+        self._guide_config_btn.setVisible(admin_enabled)
+        self._guide_config_btn.clicked.connect(self._on_configure_ocr_guide)
+        guide_row = QHBoxLayout()
+        guide_row.addWidget(self._guide_status_label, 1)
+        guide_row.addWidget(self._guide_config_btn)
+        form.addRow(self.tr("Imagen de guía OCR"), guide_row)
+
         # Read-only en MVP.
         premium_label = QLabel(
             self.tr("Sí (con licencia)") if self._original.is_premium else self.tr("No")
@@ -190,6 +204,7 @@ class CollectionEditDialog(QDialog):
             album_rows=self._album_rows.value(),
             album_orientation=self._album_orient_combo.currentText(),
             ocr_model_filename=self._pending_ocr_filename,
+            ocr_guide_filename=self._pending_guide_filename,
         )
         try:
             self._ctx.collections.update(updated)
@@ -239,6 +254,47 @@ class CollectionEditDialog(QDialog):
 
         self._pending_ocr_filename = target_filename
         self._ocr_status_label.setText(target_filename)
+
+    def _on_configure_ocr_guide(self: CollectionEditDialog) -> None:
+        """Migración 003: copia la imagen elegida a `images/` con nombre canónico.
+
+        El archivo se renombra a `ocr_guide_<collection_id>.<ext>`,
+        reemplazando el anterior si existía. Soporta jpg/png/bmp/webp.
+        """
+        coll_id = self._original.collection_id
+        if coll_id is None:
+            QMessageBox.warning(
+                self,
+                self.tr("Imagen de guía OCR"),
+                self.tr("Guardá la colección primero antes de configurar la imagen."),
+            )
+            return
+
+        path_str, _ = QFileDialog.getOpenFileName(
+            self,
+            self.tr("Seleccionar imagen de guía OCR"),
+            str(get_images_dir()),
+            self.tr("Imágenes (*.jpg *.jpeg *.png *.bmp *.webp);;Todos los archivos (*)"),
+        )
+        if not path_str:
+            return
+
+        source = Path(path_str)
+        suffix = source.suffix.lower() or ".jpg"
+        target_filename = f"ocr_guide_{coll_id}{suffix}"
+        target_path = get_images_dir() / target_filename
+        try:
+            shutil.copyfile(source, target_path)
+        except OSError as exc:
+            QMessageBox.critical(
+                self,
+                self.tr("Error al copiar la imagen"),
+                self.tr("No se pudo copiar el archivo:\n{msg}").format(msg=exc),
+            )
+            return
+
+        self._pending_guide_filename = target_filename
+        self._guide_status_label.setText(target_filename)
 
 
 class CollectionsAbmView(QDialog):
