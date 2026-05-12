@@ -22,6 +22,10 @@ Guía para usuarios finales (Windows 10 / 11, 64-bit).
 5. La primera vez puede tardar 10-20 segundos en abrir (extrae el
    bundle a una carpeta temporal). Las siguientes veces es instantáneo.
 
+> **Primera vez:** la app puede tardar entre 20 y 40 segundos en abrir.
+> Es normal — Windows está preparando los archivos. Las veces
+> siguientes abre más rápido.
+
 ## Colecciones disponibles
 
 Al instalar la app encontrás ya cargadas:
