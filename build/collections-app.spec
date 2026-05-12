@@ -7,10 +7,11 @@
 # El .spec se modifica como código Python: PyInstaller lo ejecuta y usa
 # los objetos resultantes (Analysis / PYZ / EXE) para empaquetar.
 #
-# Bundle "liviano": las dependencias pesadas del OCR (torch, torchvision,
-# ultralytics, easyocr, cv2) NO van adentro — se instalan bajo demanda
-# desde la app (OcrInstallService) la primera vez que el usuario abre
-# la tab "Por foto". Ver docs/install_guide.md.
+# Bundle "todo-incluido" (Prompt 7e): torch + ultralytics + easyocr +
+# cv2 viven dentro del .exe. El usuario abre la app y el OCR funciona
+# sin instalar nada extra. Tamaño esperado: ~1.0-1.2 GB.
+#
+# Versiones probadas: ver build/requirements-build.txt
 
 from pathlib import Path
 
@@ -76,9 +77,11 @@ a = Analysis(
         "collections_app.services.exchange_apply_service",
         "collections_app.services.exchange_errors",
         "collections_app.services.exceptions",
-        # OCR — los modulos .py de la app SI van (son chicos y se importan
-        # de forma indirecta via app_context.get_ocr_service). Los packages
-        # pesados que ellos consumen (torch/cv2/etc.) estan en `excludes`.
+        # OCR — modulos .py de la app + packages pesados que se cargan
+        # lazy (torch / ultralytics / easyocr / cv2). PyInstaller hooks
+        # de pyinstaller-hooks-contrib se encargan de la mayoria de los
+        # transitivos, pero listamos los .py de la app explicitamente
+        # porque se importan de forma indirecta via app_context factories.
         "collections_app.services.ocr_install_service",
         "collections_app.services.ocr_service",
         "collections_app.services.ocr_reader",
@@ -106,13 +109,6 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        # Dependencias pesadas del OCR — NO van en el bundle, se instalan
-        # bajo demanda (OcrInstallService). Mantener el .exe liviano.
-        "torch",
-        "torchvision",
-        "ultralytics",
-        "easyocr",
-        "cv2",
         # Scraping y similares — no se usan en la app cliente.
         "duckduckgo_search",
         "bs4",
