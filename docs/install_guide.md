@@ -22,6 +22,16 @@ Guía para usuarios finales (Windows 10 / 11, 64-bit).
 5. La primera vez puede tardar 10-20 segundos en abrir (extrae el
    bundle a una carpeta temporal). Las siguientes veces es instantáneo.
 
+## Colecciones disponibles
+
+Al instalar la app encontrás ya cargadas:
+
+- **Panini FIFA WC 2026 Stickers** (figuritas)
+- **Panini FIFA WC 2026 Adrenalyn XL** (cards)
+
+Solo tenés que cargar tu propio inventario (tab **"Cargas" → "Manual"**
+o **"Por foto"**).
+
 ## Tus datos
 
 Todos los datos se guardan en:
