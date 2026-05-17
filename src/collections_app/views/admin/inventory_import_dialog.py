@@ -127,17 +127,32 @@ class InventoryImportPanel(QWidget):
 
         outer.addLayout(form)
 
-        # Botón descargar modelo + botón importar (alineados a la derecha).
+        # Botón descargar modelo + dos botones de import (alineados a la derecha).
+        # "Importar inventario": flow normal (replace/add según el toggle).
+        # "Importar como faltantes": calcula inventario = total − archivo
+        # (qty=1 para las no-listadas, qty=0 para las listadas). Ignora
+        # el toggle replace/add y la columna `cantidad` del archivo.
         actions_row = QHBoxLayout()
         actions_row.addWidget(QLabel(self.tr("¿No tenés un archivo?")))
         self._template_btn = QPushButton(self.tr("Descargar modelo"))
         self._template_btn.clicked.connect(self._on_download_template)
         actions_row.addWidget(self._template_btn)
         actions_row.addStretch()
-        self._import_btn = QPushButton(self.tr("Importar"))
+        self._import_btn = QPushButton(self.tr("Importar inventario"))
         self._import_btn.setDefault(True)
         self._import_btn.clicked.connect(self._on_import)
         actions_row.addWidget(self._import_btn)
+        self._import_missing_btn = QPushButton(self.tr("Importar como faltantes"))
+        self._import_missing_btn.setToolTip(
+            self.tr(
+                "Interpreta el archivo como lista de cards FALTANTES. "
+                "El inventario queda con qty=1 para todas las no listadas "
+                "y qty=0 para las listadas. Ignora el modo replace/add y "
+                "la columna cantidad."
+            )
+        )
+        self._import_missing_btn.clicked.connect(self._on_import_missing)
+        actions_row.addWidget(self._import_missing_btn)
         outer.addLayout(actions_row)
 
         # Resultado
@@ -216,7 +231,9 @@ class InventoryImportPanel(QWidget):
     # ------------------------------------------------------------------
 
     def _update_import_enabled(self: InventoryImportPanel) -> None:
-        self._import_btn.setEnabled(bool(self._file_edit.text().strip()))
+        has_file = bool(self._file_edit.text().strip())
+        self._import_btn.setEnabled(has_file)
+        self._import_missing_btn.setEnabled(has_file)
 
     def _selected_mode(self: InventoryImportPanel) -> Literal["replace", "add"]:
         return "replace" if self._mode_replace.isChecked() else "add"
@@ -281,25 +298,106 @@ class InventoryImportPanel(QWidget):
             )
             return
 
-        self._render_result(report)
+        self._render_result(report, mode="inventory")
         self.import_completed.emit(report)
+
+    def _on_import_missing(self: InventoryImportPanel) -> None:
+        """Aplica el archivo como lista de FALTANTES.
+
+        Si el archivo solo tiene header (sin filas de datos), pide
+        confirmación explícita antes de cargar TODAS las cards de la
+        colección como tenidas (qty=1). Esto evita que un click
+        accidental con un archivo vacío sobreescriba el inventario.
+        """
+        file_path = Path(self._file_edit.text().strip())
+        assert self._collection.collection_id is not None
+
+        if self._is_excel_empty(file_path):
+            reply = QMessageBox.question(
+                self,
+                self.tr("Archivo sin faltantes"),
+                self.tr(
+                    "El archivo no tiene cards listadas. "
+                    "¿Cargar TODAS las cards de la colección como tenidas (qty=1)?"
+                ),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+        try:
+            report = self._ctx.inventory_import.import_missing(
+                file_path=file_path,
+                collection_id=self._collection.collection_id,
+            )
+        except ServiceError as exc:
+            QMessageBox.critical(self, self.tr("Error de importación"), str(exc))
+            return
+        except OSError as exc:
+            QMessageBox.critical(
+                self,
+                self.tr("Error de I/O"),
+                self.tr("No se pudo abrir el archivo: {msg}").format(msg=exc),
+            )
+            return
+
+        self._render_result(report, mode="missing")
+        self.import_completed.emit(report)
+
+    def _is_excel_empty(self: InventoryImportPanel, file_path: Path) -> bool:
+        """Devuelve True si el archivo no tiene filas de datos (solo header o vacío).
+
+        Reusa el reader del service evitando duplicar lógica de parseo.
+        Si el archivo no existe o no es legible, devuelve False — el
+        service raise el error real al intentar abrirlo.
+        """
+        try:
+            rows = self._ctx.inventory_import._read_rows(file_path)  # noqa: SLF001
+        except (OSError, ServiceError):
+            return False
+        # rows[0] es el header; data_rows = rows[1:].
+        return len(rows) <= 1
 
     # ------------------------------------------------------------------
     # Render del resultado
     # ------------------------------------------------------------------
 
-    def _render_result(self: InventoryImportPanel, report: InventoryImportReport) -> None:
-        self._result_label.setText(
-            self.tr(
-                "Filas leídas: {total} · Aplicadas: {applied} · "
-                "Errores: {errors} · Avisos: {warnings}"
-            ).format(
-                total=report.rows_total,
-                applied=report.rows_applied,
-                errors=len(report.errors),
-                warnings=len(report.warnings),
+    def _render_result(
+        self: InventoryImportPanel,
+        report: InventoryImportReport,
+        *,
+        mode: Literal["inventory", "missing"] = "inventory",
+    ) -> None:
+        if mode == "missing":
+            # En modo missing: rows_applied = cards marcadas como tenidas
+            # (qty=1). El total de cards faltantes = filas del Excel válidas
+            # = rows_total - errors. La columna `warnings` queda vacía en
+            # este flow y no se muestra.
+            valid_excel_rows = report.rows_total - len(report.errors)
+            self._result_label.setText(
+                self.tr(
+                    "Marcadas como tenidas: {owned} · "
+                    "Marcadas como faltantes: {missing} · "
+                    "Filas del archivo con error: {errors}"
+                ).format(
+                    owned=report.rows_applied,
+                    missing=valid_excel_rows,
+                    errors=len(report.errors),
+                )
             )
-        )
+        else:
+            self._result_label.setText(
+                self.tr(
+                    "Filas leídas: {total} · Aplicadas: {applied} · "
+                    "Errores: {errors} · Avisos: {warnings}"
+                ).format(
+                    total=report.rows_total,
+                    applied=report.rows_applied,
+                    errors=len(report.errors),
+                    warnings=len(report.warnings),
+                )
+            )
         self._result_label.setVisible(True)
 
         rows: list[tuple[str, int, str, str]] = []

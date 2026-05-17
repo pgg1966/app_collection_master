@@ -269,6 +269,161 @@ class InventoryImportService:
         return report
 
     # ------------------------------------------------------------------
+    # Import por diferencia (lista de faltantes)
+    # ------------------------------------------------------------------
+
+    def import_missing(
+        self: InventoryImportService,
+        *,
+        file_path: Path,
+        collection_id: int,
+    ) -> InventoryImportReport:
+        """Aplica un Excel/CSV de FALTANTES como diferencia al inventario.
+
+        Semántica: `inventario_final = todas_las_cards − cards_del_archivo`.
+        Para cada card de la colección NO presente en el archivo, queda
+        con qty=1. Para cada card presente en el archivo, queda con
+        qty=0. La columna `cantidad` del archivo se ignora (no hay
+        info de duplicadas — aceptado por diseño).
+
+        Reusa `_read_rows`, `_validate_header` y `_resolve_card_id_from_row`
+        para no duplicar lógica de parseo. Filas con código/número
+        inválido se acumulan en `errors` y se ignoran.
+
+        Casos borde:
+        - Archivo vacío (solo header) → `missing_card_ids=∅` → TODAS
+          las cards quedan en qty=1.
+        - Archivo cubre toda la colección → todas las cards en qty=0.
+        - Cards de la colección con qty>1 previa que NO están en el
+          archivo: quedan en qty=1 (replace strict — pierden info de
+          duplicadas, aceptado por spec).
+
+        Atomicidad: todos los cambios en un único `with self._conn:`.
+        Logging: una `Transaction` por cada cambio efectivo (delta != 0)
+        con `exchange_event_id` compartido por todo el import.
+
+        Mapeo del `InventoryImportReport` devuelto:
+        - `rows_total`: filas del Excel (faltantes según el archivo).
+        - `rows_applied`: cards de la colección que quedaron qty=1.
+        - `rows_skipped`: filas del Excel inválidas (errors).
+        - `errors`: detalle por fila inválida del archivo.
+        - `warnings`: vacío en este flow.
+        """
+        collection = self._collections.get_by_id(collection_id)
+        if collection is None:
+            raise ServiceError(f"collection_id={collection_id} no existe")
+
+        rows = self._read_rows(file_path)
+        if not rows:
+            data_rows: list[list[str]] = []
+            column_indexes: dict[str, int] = {}
+        else:
+            column_indexes, data_rows = self._validate_header(
+                rows, requires_code=collection.requires_code
+            )
+
+        valid_codes: set[str] = set()
+        if collection.requires_code:
+            valid_codes = {
+                line.code_id for line in self._code_lines.list_by_header(collection.code_header_id)
+            }
+
+        cards = self._cards.list_by_collection(collection_id)
+        cards_index: dict[tuple[str, int], int] = {
+            (c.code_id, c.card_number): c.card_id for c in cards if c.card_id is not None
+        }
+        cards_by_number: dict[int, list[int]] = {}
+        for c in cards:
+            if c.card_id is not None:
+                cards_by_number.setdefault(c.card_number, []).append(c.card_id)
+
+        errors: list[InventoryImportError] = []
+        missing_card_ids: set[int] = set()
+
+        for i, row in enumerate(data_rows, start=1):
+            resolved = self._resolve_card_id_from_row(
+                row=row,
+                row_index=i,
+                column_indexes=column_indexes,
+                requires_code=collection.requires_code,
+                valid_codes=valid_codes,
+                cards_index=cards_index,
+                cards_by_number=cards_by_number,
+                errors=errors,
+            )
+            if resolved is None:
+                continue
+            card_id, _code_id, _number = resolved
+            missing_card_ids.add(card_id)
+
+        all_card_ids: set[int] = {c.card_id for c in cards if c.card_id is not None}
+        owned_card_ids = all_card_ids - missing_card_ids
+
+        # Aplicación atómica: por cada card de la colección, ajustar la
+        # qty al target (1 si "tenida", 0 si "faltante"). Las que ya
+        # están en su target generan delta=0 y no producen Transaction.
+        rows_applied = 0
+        event_id = generate_event_id()
+        with self._conn:
+            for card_id in owned_card_ids:
+                if self._set_qty(card_id=card_id, target_qty=1, event_id=event_id):
+                    pass  # cambio efectivo registrado
+                rows_applied += 1
+            for card_id in missing_card_ids:
+                self._set_qty(card_id=card_id, target_qty=0, event_id=event_id)
+
+        report = InventoryImportReport(
+            rows_total=len(data_rows),
+            rows_applied=rows_applied,
+            rows_skipped=len(errors),
+            errors=errors[:_REPORT_CAP],
+            warnings=[],
+        )
+        logger.info(
+            "import_missing: file=%s collection_id=%d total=%d "
+            "owned=%d missing=%d errors=%d event_id=%d",
+            file_path.name,
+            collection_id,
+            report.rows_total,
+            len(owned_card_ids),
+            len(missing_card_ids),
+            len(errors),
+            event_id,
+        )
+        return report
+
+    def _set_qty(
+        self: InventoryImportService,
+        *,
+        card_id: int,
+        target_qty: int,
+        event_id: int,
+    ) -> bool:
+        """Ajusta el inventory de `card_id` a `target_qty` exacto.
+
+        Devuelve True si hubo cambio efectivo (delta != 0) y se logueó
+        una Transaction; False si la qty ya coincidía con el target.
+        """
+        current = self._inventory.get_by_card_id(card_id)
+        current_qty = current.quantity if current is not None else 0
+        delta = target_qty - current_qty
+        if delta == 0:
+            return False
+        self._inventory.adjust_quantity(card_id, delta)
+        op = OperationType.ALTA if delta > 0 else OperationType.BAJA
+        self._transactions.log(
+            Transaction(
+                transaction_id=None,
+                card_id=card_id,
+                operation=op,
+                quantity=abs(delta),
+                transaction_date=_utc_now_naive(),
+                exchange_event_id=event_id,
+            )
+        )
+        return True
+
+    # ------------------------------------------------------------------
     # Helpers internos
     # ------------------------------------------------------------------
 
@@ -332,27 +487,19 @@ class InventoryImportService:
         pending: list[_PendingChange],
     ) -> None:
         """Valida una fila y la clasifica en errors / warnings / pending."""
-        code_id = ""
-        if requires_code:
-            code_id = self._cell(row, column_indexes, "código")
-            if not code_id:
-                errors.append(InventoryImportError(row_index, "código vacío"))
-                return
-            if code_id not in valid_codes:
-                errors.append(
-                    InventoryImportError(row_index, f"código {code_id!r} no existe en el header")
-                )
-                return
-
-        num_str = self._cell(row, column_indexes, "número")
-        try:
-            number = int(num_str)
-        except ValueError:
-            errors.append(InventoryImportError(row_index, f"número {num_str!r} no es entero"))
+        resolved = self._resolve_card_id_from_row(
+            row=row,
+            row_index=row_index,
+            column_indexes=column_indexes,
+            requires_code=requires_code,
+            valid_codes=valid_codes,
+            cards_index=cards_index,
+            cards_by_number=cards_by_number,
+            errors=errors,
+        )
+        if resolved is None:
             return
-        if number <= 0:
-            errors.append(InventoryImportError(row_index, f"número {number} debe ser > 0"))
-            return
+        card_id, code_id, number = resolved
 
         qty_str = self._cell(row, column_indexes, "cantidad")
         try:
@@ -363,44 +510,6 @@ class InventoryImportService:
         if qty < 0:
             errors.append(InventoryImportError(row_index, f"cantidad {qty} no puede ser negativa"))
             return
-
-        # Resolución de card_id:
-        # - requires_code=True: lookup exacto (code_id, number).
-        # - requires_code=False: lookup solo por número. Si hay >1 match
-        #   (la colección está mal modelada), reportar error claro y
-        #   no importar la fila.
-        if requires_code:
-            card_id = cards_index.get((code_id, number))
-            if card_id is None:
-                errors.append(
-                    InventoryImportError(
-                        row_index,
-                        f"card ({code_id!r}, {number}) no existe en el catálogo",
-                    )
-                )
-                return
-        else:
-            matches = cards_by_number.get(number, [])
-            if not matches:
-                errors.append(
-                    InventoryImportError(
-                        row_index,
-                        f"card con número {number} no existe en el catálogo",
-                    )
-                )
-                return
-            if len(matches) > 1:
-                errors.append(
-                    InventoryImportError(
-                        row_index,
-                        (
-                            f"el número {number} existe más de una vez en esta "
-                            f"colección. Revisá los datos."
-                        ),
-                    )
-                )
-                return
-            card_id = matches[0]
 
         if qty == 0:
             warnings_.append(
@@ -414,6 +523,84 @@ class InventoryImportService:
             return
 
         pending.append(_PendingChange(row_index, card_id, qty))
+
+    def _resolve_card_id_from_row(
+        self: InventoryImportService,
+        *,
+        row: list[str],
+        row_index: int,
+        column_indexes: dict[str, int],
+        requires_code: bool,
+        valid_codes: set[str],
+        cards_index: dict[tuple[str, int], int],
+        cards_by_number: dict[int, list[int]],
+        errors: list[InventoryImportError],
+    ) -> tuple[int, str, int] | None:
+        """Resuelve `(card_id, code_id, card_number)` desde una fila.
+
+        Encapsula la lectura y validación de las columnas `código` y
+        `número` y el lookup en el catálogo de cards. Si la fila es
+        inválida, agrega el error a `errors` y devuelve `None`. La
+        columna `cantidad` NO se toca acá — la maneja el caller según
+        contexto (import normal usa qty del archivo; import_missing la
+        ignora).
+        """
+        code_id = ""
+        if requires_code:
+            code_id = self._cell(row, column_indexes, "código")
+            if not code_id:
+                errors.append(InventoryImportError(row_index, "código vacío"))
+                return None
+            if code_id not in valid_codes:
+                errors.append(
+                    InventoryImportError(row_index, f"código {code_id!r} no existe en el header")
+                )
+                return None
+
+        num_str = self._cell(row, column_indexes, "número")
+        try:
+            number = int(num_str)
+        except ValueError:
+            errors.append(InventoryImportError(row_index, f"número {num_str!r} no es entero"))
+            return None
+        if number <= 0:
+            errors.append(InventoryImportError(row_index, f"número {number} debe ser > 0"))
+            return None
+
+        if requires_code:
+            card_id = cards_index.get((code_id, number))
+            if card_id is None:
+                errors.append(
+                    InventoryImportError(
+                        row_index,
+                        f"card ({code_id!r}, {number}) no existe en el catálogo",
+                    )
+                )
+                return None
+        else:
+            matches = cards_by_number.get(number, [])
+            if not matches:
+                errors.append(
+                    InventoryImportError(
+                        row_index,
+                        f"card con número {number} no existe en el catálogo",
+                    )
+                )
+                return None
+            if len(matches) > 1:
+                errors.append(
+                    InventoryImportError(
+                        row_index,
+                        (
+                            f"el número {number} existe más de una vez en esta "
+                            f"colección. Revisá los datos."
+                        ),
+                    )
+                )
+                return None
+            card_id = matches[0]
+
+        return card_id, code_id, number
 
     def _cell(
         self: InventoryImportService,

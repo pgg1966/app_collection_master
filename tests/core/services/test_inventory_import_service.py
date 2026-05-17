@@ -764,3 +764,268 @@ def test_import_inventory_no_code_ambiguous_number_errors(
     assert report.rows_applied == 0
     assert len(report.errors) == 1
     assert "más de una vez" in report.errors[0].message
+
+
+# ---------------------------------------------------------------------
+# import_missing — inventario por diferencia
+# ---------------------------------------------------------------------
+
+
+def test_import_missing_normal_flow_marks_unlisted_as_owned(
+    tmp_path: Path,
+    service: InventoryImportService,
+    db_conn: sqlite3.Connection,
+    collection_with_codes: Collection,
+) -> None:
+    """5 cards en la colección, archivo lista 2 como faltantes → 3 quedan qty=1, 2 qty=0."""
+    assert collection_with_codes.collection_id is not None
+    cid = collection_with_codes.collection_id
+    ids = _seed_cards(
+        db_conn,
+        collection_with_codes,
+        [
+            ("ARG", 1, "Messi"),
+            ("ARG", 2, "Di María"),
+            ("BRA", 1, "Neymar"),
+            ("BRA", 2, "Vinicius"),
+            ("FRA", 1, "Mbappé"),
+        ],
+    )
+
+    file_path = tmp_path / "faltantes.xlsx"
+    _write_xlsx(
+        file_path,
+        ["código", "número", "cantidad"],
+        [["ARG", 1, 1], ["BRA", 2, 1]],
+    )
+
+    report = service.import_missing(file_path=file_path, collection_id=cid)
+
+    assert report.rows_total == 2  # filas del Excel
+    assert report.rows_applied == 3  # cards tenidas
+    assert report.rows_skipped == 0
+    assert report.errors == []
+
+    # Cards listadas en el Excel quedan en qty=0.
+    assert _qty_for(db_conn, ids[("ARG", 1)]) == 0
+    assert _qty_for(db_conn, ids[("BRA", 2)]) == 0
+    # Cards no listadas quedan en qty=1.
+    assert _qty_for(db_conn, ids[("ARG", 2)]) == 1
+    assert _qty_for(db_conn, ids[("BRA", 1)]) == 1
+    assert _qty_for(db_conn, ids[("FRA", 1)]) == 1
+
+
+def test_import_missing_unknown_card_emits_error_does_not_abort(
+    tmp_path: Path,
+    service: InventoryImportService,
+    db_conn: sqlite3.Connection,
+    collection_with_codes: Collection,
+) -> None:
+    """Filas con (code, num) no existentes → errors[], el resto se procesa."""
+    assert collection_with_codes.collection_id is not None
+    cid = collection_with_codes.collection_id
+    ids = _seed_cards(
+        db_conn,
+        collection_with_codes,
+        [
+            ("ARG", 1, "Messi"),
+            ("ARG", 2, "Di María"),
+            ("BRA", 1, "Neymar"),
+        ],
+    )
+
+    file_path = tmp_path / "faltantes.xlsx"
+    _write_xlsx(
+        file_path,
+        ["código", "número", "cantidad"],
+        [["ARG", 1, 1], ["XXX", 99, 1]],  # XXX inválido
+    )
+
+    report = service.import_missing(file_path=file_path, collection_id=cid)
+
+    assert len(report.errors) == 1
+    assert report.rows_applied == 2  # ARG-2 y BRA-1 quedan owned
+    assert _qty_for(db_conn, ids[("ARG", 1)]) == 0  # faltante válida
+    assert _qty_for(db_conn, ids[("ARG", 2)]) == 1
+    assert _qty_for(db_conn, ids[("BRA", 1)]) == 1
+
+
+def test_import_missing_all_cards_in_excel_empties_inventory(
+    tmp_path: Path,
+    service: InventoryImportService,
+    db_conn: sqlite3.Connection,
+    collection_with_codes: Collection,
+) -> None:
+    """Archivo cubre toda la colección → inventario completo en qty=0."""
+    assert collection_with_codes.collection_id is not None
+    cid = collection_with_codes.collection_id
+    ids = _seed_cards(
+        db_conn,
+        collection_with_codes,
+        [("ARG", 1, "A"), ("BRA", 1, "B"), ("FRA", 1, "F")],
+    )
+
+    file_path = tmp_path / "todo.xlsx"
+    _write_xlsx(
+        file_path,
+        ["código", "número", "cantidad"],
+        [["ARG", 1, 1], ["BRA", 1, 1], ["FRA", 1, 1]],
+    )
+
+    report = service.import_missing(file_path=file_path, collection_id=cid)
+
+    assert report.rows_applied == 0  # ninguna card queda como tenida
+    for card_id in ids.values():
+        assert _qty_for(db_conn, card_id) == 0
+
+
+def test_import_missing_empty_excel_marks_all_owned(
+    tmp_path: Path,
+    service: InventoryImportService,
+    db_conn: sqlite3.Connection,
+    collection_with_codes: Collection,
+) -> None:
+    """Archivo solo con header → todas las cards quedan en qty=1."""
+    assert collection_with_codes.collection_id is not None
+    cid = collection_with_codes.collection_id
+    ids = _seed_cards(
+        db_conn,
+        collection_with_codes,
+        [("ARG", 1, "A"), ("BRA", 1, "B")],
+    )
+
+    file_path = tmp_path / "vacio.xlsx"
+    _write_xlsx(file_path, ["código", "número", "cantidad"], [])
+
+    report = service.import_missing(file_path=file_path, collection_id=cid)
+
+    assert report.rows_total == 0
+    assert report.rows_applied == 2
+    for card_id in ids.values():
+        assert _qty_for(db_conn, card_id) == 1
+
+
+def test_import_missing_overrides_existing_quantities(
+    tmp_path: Path,
+    service: InventoryImportService,
+    db_conn: sqlite3.Connection,
+    collection_with_codes: Collection,
+) -> None:
+    """Inventario previo qty>1 se pisa a 1 (replace strict, sin info de duplicadas)."""
+    assert collection_with_codes.collection_id is not None
+    cid = collection_with_codes.collection_id
+    ids = _seed_cards(
+        db_conn,
+        collection_with_codes,
+        [("ARG", 1, "A"), ("BRA", 1, "B")],
+    )
+    # Inventario previo: ARG-1 con qty=5 (la tengo con duplicadas);
+    # BRA-1 con qty=3 (la tengo, pero la pondré como faltante).
+    inv = InventoryRepository(db_conn)
+    inv.adjust_quantity(ids[("ARG", 1)], 5)
+    inv.adjust_quantity(ids[("BRA", 1)], 3)
+    db_conn.commit()
+
+    file_path = tmp_path / "faltantes.xlsx"
+    _write_xlsx(
+        file_path,
+        ["código", "número", "cantidad"],
+        [["BRA", 1, 1]],  # BRA-1 está en el archivo → debe quedar en 0
+    )
+
+    service.import_missing(file_path=file_path, collection_id=cid)
+
+    # ARG-1 no estaba en archivo: queda qty=1 (perdió la info de duplicadas).
+    assert _qty_for(db_conn, ids[("ARG", 1)]) == 1
+    # BRA-1 estaba en archivo: queda qty=0.
+    assert _qty_for(db_conn, ids[("BRA", 1)]) == 0
+
+
+def test_import_missing_ignores_cantidad_column(
+    tmp_path: Path,
+    service: InventoryImportService,
+    db_conn: sqlite3.Connection,
+    collection_with_codes: Collection,
+) -> None:
+    """La columna `cantidad` del archivo se ignora (qty=5 sigue siendo "una faltante")."""
+    assert collection_with_codes.collection_id is not None
+    cid = collection_with_codes.collection_id
+    ids = _seed_cards(
+        db_conn,
+        collection_with_codes,
+        [("ARG", 1, "A"), ("ARG", 2, "B")],
+    )
+
+    file_path = tmp_path / "faltantes.xlsx"
+    _write_xlsx(
+        file_path,
+        ["código", "número", "cantidad"],
+        [["ARG", 1, 99]],  # cantidad absurda — debe ignorarse
+    )
+
+    service.import_missing(file_path=file_path, collection_id=cid)
+
+    assert _qty_for(db_conn, ids[("ARG", 1)]) == 0  # faltante
+    assert _qty_for(db_conn, ids[("ARG", 2)]) == 1  # tenida
+
+
+def test_import_missing_logs_transactions_with_shared_event_id(
+    tmp_path: Path,
+    service: InventoryImportService,
+    db_conn: sqlite3.Connection,
+    collection_with_codes: Collection,
+) -> None:
+    """Todos los cambios efectivos comparten el mismo `exchange_event_id`."""
+    assert collection_with_codes.collection_id is not None
+    cid = collection_with_codes.collection_id
+    _seed_cards(
+        db_conn,
+        collection_with_codes,
+        [("ARG", 1, "A"), ("ARG", 2, "B"), ("BRA", 1, "C")],
+    )
+
+    file_path = tmp_path / "faltantes.xlsx"
+    _write_xlsx(
+        file_path,
+        ["código", "número", "cantidad"],
+        [["ARG", 1, 1]],
+    )
+
+    service.import_missing(file_path=file_path, collection_id=cid)
+
+    rows = db_conn.execute(
+        "SELECT DISTINCT exchange_event_id FROM transactions " "WHERE exchange_event_id IS NOT NULL"
+    ).fetchall()
+    # 2 cards owned + 0 missing changes (ARG-1 ya estaba en 0) → 2 transactions
+    # con el mismo event_id.
+    assert len(rows) == 1
+    counts = db_conn.execute(
+        "SELECT COUNT(*) FROM transactions WHERE exchange_event_id = ?", (rows[0][0],)
+    ).fetchone()
+    assert counts[0] == 2
+
+
+def test_import_missing_invalid_header_raises(
+    tmp_path: Path,
+    service: InventoryImportService,
+    collection_with_codes: Collection,
+) -> None:
+    """Header malformado → ServiceError catastrófico (igual que import_inventory)."""
+    assert collection_with_codes.collection_id is not None
+    cid = collection_with_codes.collection_id
+    file_path = tmp_path / "malo.xlsx"
+    _write_xlsx(file_path, ["foo", "bar", "baz"], [["ARG", 1, 1]])
+
+    with pytest.raises(ServiceError):
+        service.import_missing(file_path=file_path, collection_id=cid)
+
+
+def test_import_missing_unknown_collection_raises(
+    tmp_path: Path,
+    service: InventoryImportService,
+) -> None:
+    """collection_id inexistente → ServiceError."""
+    file_path = tmp_path / "x.xlsx"
+    _write_xlsx(file_path, ["código", "número", "cantidad"], [])
+    with pytest.raises(ServiceError):
+        service.import_missing(file_path=file_path, collection_id=9999)
