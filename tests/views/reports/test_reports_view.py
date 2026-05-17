@@ -104,8 +104,8 @@ def test_view_constructs_with_empty_reports_when_no_inventory(
     view = ReportsView(ctx=ctx, collection=coll)
     qtbot.addWidget(view)
     missing = view._missing_section.text()
-    assert "ARGENTINA: 1 - 2" in missing
-    assert "BRASIL: 1 - 2" in missing
+    assert "ARG: 1 - 2" in missing
+    assert "BRA: 1 - 2" in missing
     # Repetidas vacío (sin inventory > 1).
     assert view._duplicates_section.text() == ""
 
@@ -126,12 +126,12 @@ def test_view_reports_reflect_inventory(
     qtbot.addWidget(view)
 
     missing = view._missing_section.text()
-    assert "ARGENTINA" not in missing  # ambas tengo
-    assert "BRASIL: 2" in missing  # solo BRA-2 falta
+    assert "ARG:" not in missing  # ambas tengo
+    assert "BRA: 2" in missing  # solo BRA-2 falta
 
     duplicates = view._duplicates_section.text()
-    assert "ARGENTINA: 2 (x2)" in duplicates
-    assert "BRASIL: 1 (x4)" in duplicates
+    assert "ARG: 2 (x2)" in duplicates
+    assert "BRA: 1 (x4)" in duplicates
 
 
 def test_section_buttons_disabled_when_text_empty(
@@ -150,7 +150,7 @@ def test_section_buttons_disabled_when_text_empty(
     assert section._print_btn.isEnabled() is False
     assert section._mail_btn.isEnabled() is False
     assert section._whatsapp_btn.isEnabled() is False
-    section.set_text("ARGENTINA: 1")
+    section.set_text("ARG: 1")
     assert section._copy_btn.isEnabled() is True
 
 
@@ -216,7 +216,7 @@ def test_save_button_pre_fills_dialog_with_downloads_and_canonical_name(
     assert captured["suggested"].endswith(".txt")
     # El archivo se escribe donde el user eligió.
     assert target.exists()
-    assert "ARGENTINA" in target.read_text(encoding="utf-8")
+    assert "ARG:" in target.read_text(encoding="utf-8")
 
 
 def test_save_button_cancel_does_nothing(
@@ -427,7 +427,7 @@ def test_set_active_collection_swaps_data(
 
     view = ReportsView(ctx=ctx, collection=coll)
     qtbot.addWidget(view)
-    assert "ARGENTINA" in view._missing_section.text()
+    assert "ARG:" in view._missing_section.text()
 
     view.set_active_collection(other)
     # Sin cards en "Otra", missing está vacío.

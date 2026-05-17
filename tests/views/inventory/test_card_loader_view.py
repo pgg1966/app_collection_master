@@ -425,3 +425,63 @@ def test_shift_tab_from_empty_number_still_retrocedes(
     assert view._number_input.text() == ""
     QTest.keyClick(view._number_input, Qt.Key.Key_Backtab)
     assert view._code_edit.hasFocus()
+
+
+# ----------------------------------------------------------------------
+# Validación contra DB del campo de Código: bloqueo silencioso de
+# Tab/Enter cuando el texto NO matchea un code_id del catálogo.
+# ----------------------------------------------------------------------
+
+
+def test_invalid_code_tab_does_not_advance(
+    qtbot,  # type: ignore[no-untyped-def]
+    app_ctx: AppContext,
+    collection: Collection,
+) -> None:
+    """Tab con texto que no es un code_id válido no avanza al número."""
+    view = CardLoaderView(ctx=app_ctx, collection=collection)
+    qtbot.addWidget(view)
+    view.show()
+    qtbot.waitExposed(view)
+    # "X" no está en valid_code_ids ({"ARG", "BRA"}).
+    view._code_edit.setText("X")
+    view._code_edit.setFocus()
+    QTest.keyClick(view._code_edit, Qt.Key.Key_Tab)
+    assert not view._number_input.hasFocus()
+
+
+def test_invalid_code_enter_does_not_advance(
+    qtbot,  # type: ignore[no-untyped-def]
+    app_ctx: AppContext,
+    collection: Collection,
+) -> None:
+    """Enter con texto que no es un code_id válido no avanza al número."""
+    view = CardLoaderView(ctx=app_ctx, collection=collection)
+    qtbot.addWidget(view)
+    view.show()
+    qtbot.waitExposed(view)
+    view._code_edit.setText("ZZZ")
+    view._code_edit.setFocus()
+    QTest.keyClick(view._code_edit, Qt.Key.Key_Return)
+    assert not view._number_input.hasFocus()
+
+
+def test_invalid_code_does_not_flash_red(
+    qtbot,  # type: ignore[no-untyped-def]
+    app_ctx: AppContext,
+    collection: Collection,
+) -> None:
+    """Validación silenciosa: código inválido no produce flash visual.
+
+    El stylesheet del campo no debe contener `border: 1px solid red`
+    después de presionar Tab o Enter con un código inválido.
+    """
+    view = CardLoaderView(ctx=app_ctx, collection=collection)
+    qtbot.addWidget(view)
+    view.show()
+    qtbot.waitExposed(view)
+    view._code_edit.setText("ZZZ")
+    view._code_edit.setFocus()
+    QTest.keyClick(view._code_edit, Qt.Key.Key_Tab)
+    QTest.keyClick(view._code_edit, Qt.Key.Key_Return)
+    assert "red" not in view._code_edit.styleSheet()

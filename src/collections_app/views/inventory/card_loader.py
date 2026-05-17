@@ -114,6 +114,53 @@ class _EmptyFieldFilter(QObject):
         return True
 
 
+class _InvalidCodeFilter(QObject):
+    """Bloquea Tab/Enter en el campo de código cuando el texto NO es un
+    code_id válido de la colección activa.
+
+    El catálogo de códigos válidos vive en `_valid_code_ids` de la view;
+    se accede via callable porque el set cambia con `set_active_collection`
+    y con la entrada/salida del modo ambigüedad.
+
+    Comportamiento:
+    - Texto stripped + upper NO está en el set vigente → CONSUME el
+      evento Tab/Return/Enter sin feedback visual (validación silenciosa).
+    - Texto válido → deja pasar al navigator / returnPressed.
+    - Backtab pasa siempre (retroceder con texto inválido permite
+      corrección o volver a un campo previo).
+
+    Cubre también el caso vacío: el string vacío no matchea ningún
+    code_id válido → reemplaza al `_EmptyFieldFilter` específicamente
+    para el campo de código.
+    """
+
+    def __init__(
+        self,
+        get_text: Callable[[], str],
+        get_valid_codes: Callable[[], set[str]],
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._get_text = get_text
+        self._get_valid_codes = get_valid_codes
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
+        if event.type() != QEvent.Type.KeyPress:
+            return super().eventFilter(watched, event)
+        if not isinstance(event, QKeyEvent):
+            return super().eventFilter(watched, event)
+        if event.key() not in (
+            Qt.Key.Key_Tab,
+            Qt.Key.Key_Return,
+            Qt.Key.Key_Enter,
+        ):
+            return super().eventFilter(watched, event)
+        text = self._get_text().strip().upper()
+        if text in self._get_valid_codes():
+            return super().eventFilter(watched, event)
+        return True
+
+
 _CODE_ALLOWED_RE = re.compile(r"[^A-Za-z]")
 
 
@@ -720,7 +767,14 @@ class CardLoaderView(QWidget):
         self._install_empty_field_filters()
 
     def _install_empty_field_filters(self) -> None:
-        """Bloquea Tab/Enter en code_edit y number_input cuando vacíos."""
+        """Bloquea Tab/Enter en code_edit (texto inválido) y number_input (vacío).
+
+        Para el `_code_edit` se usa `_InvalidCodeFilter`, que valida el
+        texto contra `_valid_code_ids` (cacheado en memoria desde la
+        colección activa). Cubre tanto el caso vacío como el caso de
+        texto no presente en el catálogo.
+        Para `_number_input` basta con `_EmptyFieldFilter`.
+        """
         # Removemos cualquier filtro previo para evitar duplicados al
         # reinstalarse el navigator. Mantenemos refs vivas en self para
         # evitar que el GC los libere mientras Qt los tiene apuntados.
@@ -730,7 +784,9 @@ class CardLoaderView(QWidget):
                 # `removeEventFilter` es seguro aunque no esté instalado.
                 target = self._code_edit if attr == "_code_empty_filter" else self._number_input
                 target.removeEventFilter(old)
-        self._code_empty_filter = _EmptyFieldFilter(self._code_edit.text, self)
+        self._code_empty_filter = _InvalidCodeFilter(
+            self._code_edit.text, lambda: self._valid_code_ids, self
+        )
         self._number_empty_filter = _EmptyFieldFilter(self._number_input.text, self)
         self._code_edit.installEventFilter(self._code_empty_filter)
         self._number_input.installEventFilter(self._number_empty_filter)

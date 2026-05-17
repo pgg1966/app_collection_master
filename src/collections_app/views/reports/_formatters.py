@@ -10,7 +10,9 @@ los strings al panel de exportación.
 - Números separados por `" - "` (espacio guion espacio).
 - Repetidas: `<num> (x<extra>)` donde `extra = quantity - 1`.
 - Orden: respeta `code_order` del CodeHeader.
-- `code_name` se usa tal cual de la DB (sin uppercase, sin traducción).
+- Las líneas se etiquetan con `code_id` (sigla, ej "ARG", "BRA"),
+  no con `code_name`. El nombre largo del país/set se mantiene en la
+  DB para el ABM pero no se muestra en los reportes compartidos.
 
 **Helper de exportación**:
 
@@ -60,7 +62,7 @@ def format_missing_report(
         if not numbers:
             continue
         nums_text = " - ".join(str(n) for n in numbers)
-        lines.append(f"{code_line.code_name}: {nums_text}")
+        lines.append(f"{code_line.code_id}: {nums_text}")
     return "\n".join(lines)
 
 
@@ -99,7 +101,7 @@ def format_duplicates_report(
         if not entries:
             continue
         parts = [f"{num} (x{extra})" for num, extra in entries]
-        lines.append(f"{code_line.code_name}: {' - '.join(parts)}")
+        lines.append(f"{code_line.code_id}: {' - '.join(parts)}")
     return "\n".join(lines)
 
 

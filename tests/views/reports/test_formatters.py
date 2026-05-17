@@ -55,13 +55,13 @@ def test_missing_no_codes_returns_empty_string() -> None:
 def test_missing_one_code_one_card() -> None:
     codes = [_line("ARG", "ARGENTINA", 1)]
     missing = [_card(1, "ARG", 4)]
-    assert format_missing_report(missing, codes) == "ARGENTINA: 4"
+    assert format_missing_report(missing, codes) == "ARG: 4"
 
 
 def test_missing_one_code_multiple_cards_separated_by_dash() -> None:
     codes = [_line("ARG", "ARGENTINA", 1)]
     missing = [_card(1, "ARG", 4), _card(2, "ARG", 7), _card(3, "ARG", 12)]
-    assert format_missing_report(missing, codes) == "ARGENTINA: 4 - 7 - 12"
+    assert format_missing_report(missing, codes) == "ARG: 4 - 7 - 12"
 
 
 def test_missing_codes_sorted_by_code_order() -> None:
@@ -75,8 +75,8 @@ def test_missing_codes_sorted_by_code_order() -> None:
     missing = [_card(1, "ARG", 1), _card(2, "BRA", 3)]
     result = format_missing_report(missing, codes_sorted)
     lines = result.split("\n")
-    assert lines[0].startswith("ARGENTINA:")
-    assert lines[1].startswith("BRASIL:")
+    assert lines[0].startswith("ARG:")
+    assert lines[1].startswith("BRA:")
 
 
 def test_missing_omits_codes_without_missing_cards() -> None:
@@ -87,15 +87,15 @@ def test_missing_omits_codes_without_missing_cards() -> None:
     ]
     missing = [_card(1, "ARG", 1), _card(2, "FRA", 5)]
     result = format_missing_report(missing, codes)
-    assert "BRASIL" not in result
-    assert "ARGENTINA: 1" in result
-    assert "FRANCIA: 5" in result
+    assert "BRA:" not in result
+    assert "ARG: 1" in result
+    assert "FRA: 5" in result
 
 
 def test_missing_numbers_sorted_within_code() -> None:
     codes = [_line("ARG", "ARGENTINA", 1)]
     missing = [_card(1, "ARG", 18), _card(2, "ARG", 4), _card(3, "ARG", 12)]
-    assert format_missing_report(missing, codes) == "ARGENTINA: 4 - 12 - 18"
+    assert format_missing_report(missing, codes) == "ARG: 4 - 12 - 18"
 
 
 def test_missing_real_mundial_example_from_prompt() -> None:
@@ -124,12 +124,21 @@ def test_missing_real_mundial_example_from_prompt() -> None:
         _card(16, "FRA", 19),
     ]
     expected = (
-        "PANINI: 1 - 2\n"
-        "ARGENTINA: 4 - 7 - 12 - 18 - 23\n"
-        "BRASIL: 2 - 5 - 9\n"
-        "FRANCIA: 1 - 3 - 6 - 11 - 15 - 19"
+        "PNN: 1 - 2\n"
+        "ARG: 4 - 7 - 12 - 18 - 23\n"
+        "BRA: 2 - 5 - 9\n"
+        "FRA: 1 - 3 - 6 - 11 - 15 - 19"
     )
     assert format_missing_report(missing, codes) == expected
+
+
+def test_missing_uses_code_id_not_code_name() -> None:
+    """El reporte etiqueta cada línea con code_id (sigla), no code_name."""
+    codes = [_line("ARG", "Argentina", 1)]
+    missing = [_card(1, "ARG", 4)]
+    result = format_missing_report(missing, codes)
+    assert "ARG:" in result
+    assert "Argentina" not in result
 
 
 # ---------------------------------------------------------------------
@@ -154,14 +163,14 @@ def test_duplicates_quantity_two_shows_x1() -> None:
     codes = [_line("ARG", "ARGENTINA", 1)]
     cards_by_id = {1: _card(1, "ARG", 8)}
     duplicates = [_inv(1, 2)]
-    assert format_duplicates_report(duplicates, cards_by_id, codes) == ("ARGENTINA: 8 (x1)")
+    assert format_duplicates_report(duplicates, cards_by_id, codes) == ("ARG: 8 (x1)")
 
 
 def test_duplicates_quantity_five_shows_x4() -> None:
     codes = [_line("ARG", "ARGENTINA", 1)]
     cards_by_id = {1: _card(1, "ARG", 8)}
     duplicates = [_inv(1, 5)]
-    assert format_duplicates_report(duplicates, cards_by_id, codes) == ("ARGENTINA: 8 (x4)")
+    assert format_duplicates_report(duplicates, cards_by_id, codes) == ("ARG: 8 (x4)")
 
 
 def test_duplicates_real_example_from_prompt() -> None:
@@ -183,8 +192,18 @@ def test_duplicates_real_example_from_prompt() -> None:
         _inv(4, 5),  # BRA 7 (x4)
         _inv(5, 3),  # BRA 19 (x2)
     ]
-    expected = "ARGENTINA: 8 (x2) - 14 (x3)\n" "BRASIL: 1 (x2) - 7 (x4) - 19 (x2)"
+    expected = "ARG: 8 (x2) - 14 (x3)\n" "BRA: 1 (x2) - 7 (x4) - 19 (x2)"
     assert format_duplicates_report(duplicates, cards_by_id, codes) == expected
+
+
+def test_duplicates_uses_code_id_not_code_name() -> None:
+    """El reporte etiqueta cada línea con code_id (sigla), no code_name."""
+    codes = [_line("ARG", "Argentina", 1)]
+    cards_by_id = {1: _card(1, "ARG", 8)}
+    duplicates = [_inv(1, 2)]
+    result = format_duplicates_report(duplicates, cards_by_id, codes)
+    assert "ARG:" in result
+    assert "Argentina" not in result
 
 
 def test_duplicates_orphan_card_id_skipped() -> None:
