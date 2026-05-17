@@ -19,19 +19,22 @@ tinte Alta/Baja, manejo del completer — no se modifica.
 """
 
 import logging
+import re
 from collections.abc import Callable
 
 from PySide6.QtCore import (
     QEvent,
+    QMimeData,
     QModelIndex,
     QObject,
     QPersistentModelIndex,
+    QRegularExpression,
     QStringListModel,
     Qt,
     QTimer,
     Signal,
 )
-from PySide6.QtGui import QIntValidator, QKeyEvent
+from PySide6.QtGui import QIntValidator, QKeyEvent, QRegularExpressionValidator
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCompleter,
@@ -71,32 +74,29 @@ logger = logging.getLogger(__name__)
 
 
 class _EmptyFieldFilter(QObject):
-    """Bloquea Tab/Backtab/Enter cuando el QLineEdit watched está vacío.
+    """Bloquea Tab/Enter cuando el QLineEdit watched está vacío.
 
     Pensado para el campo de Código (cuando requires_code=True) y el de
     Número: el usuario no debería poder saltar al siguiente campo ni
     disparar el save sin haber tipeado nada. El filter:
 
-    - Si la tecla es Tab, Backtab, Return o Enter Y el texto stripeado
-      está vacío: llama `on_empty(field_name)` y CONSUME el evento
-      (return True) — el foco no avanza, el handler suele mostrar
-      un flash de borde rojo en el campo.
+    - Si la tecla es Tab, Return o Enter Y el texto stripeado está
+      vacío: CONSUME el evento (return True) — el foco no avanza, sin
+      feedback visual.
     - Si el texto NO está vacío: deja pasar el evento (return False)
       para que el resto de la cadena (EnterNavigator, returnPressed)
       lo maneje normalmente.
+    - Backtab (Shift+Tab) se deja pasar siempre: retroceder desde un
+      campo vacío al previo es una operación válida (corrección).
     """
 
     def __init__(
         self,
-        field_name: str,
         get_text: Callable[[], str],
-        on_empty: Callable[[str], None],
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
-        self._field_name = field_name
         self._get_text = get_text
-        self._on_empty = on_empty
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
         if event.type() != QEvent.Type.KeyPress:
@@ -105,17 +105,55 @@ class _EmptyFieldFilter(QObject):
             return super().eventFilter(watched, event)
         if event.key() not in (
             Qt.Key.Key_Tab,
-            Qt.Key.Key_Backtab,
             Qt.Key.Key_Return,
             Qt.Key.Key_Enter,
         ):
             return super().eventFilter(watched, event)
         if self._get_text().strip():
-            # Hay texto → dejar pasar al navigator / returnPressed.
             return super().eventFilter(watched, event)
-        # Campo vacío: feedback visual + consumir el evento (no avanzar).
-        self._on_empty(self._field_name)
         return True
+
+
+_CODE_ALLOWED_RE = re.compile(r"[^A-Za-z]")
+
+
+class _CodeLineEdit(QLineEdit):
+    """QLineEdit del campo Código: acepta SOLO letras y normaliza a uppercase.
+
+    Triple defensa:
+
+    1. `QRegularExpressionValidator(r"[A-Za-z]*")` rechaza dígitos y
+       especiales en typing — Qt descarta el keypress silenciosamente
+       sin emitir signal.
+    2. Override de `insertFromMimeData`: el validator no se aplica al
+       paste, así que filtramos manualmente el clipboard a letras y
+       hacemos `insert()` con el texto saneado.
+    3. Slot `textChanged` que upper-casea el contenido. Cubre cualquier
+       camino residual (drag-drop, IME, etc.) y muestra el SET en
+       mayúsculas mientras el usuario tipea.
+
+    El slot `_uppercase` es idempotente (`upper().upper() == upper()`)
+    así que la re-emisión de `textChanged` por `setText` no recursa.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        validator = QRegularExpressionValidator(QRegularExpression(r"[A-Za-z]*"), self)
+        self.setValidator(validator)
+        self.textChanged.connect(self._uppercase)
+
+    def insertFromMimeData(self, source: QMimeData) -> None:  # noqa: N802
+        text = source.text() if source is not None else ""
+        filtered = _CODE_ALLOWED_RE.sub("", text).upper()
+        if filtered:
+            self.insert(filtered)
+
+    def _uppercase(self) -> None:
+        txt = self.text()
+        if txt != txt.upper():
+            cursor = self.cursorPosition()
+            self.setText(txt.upper())
+            self.setCursorPosition(cursor)
 
 
 class _CodeOnlyCompleter(QCompleter):
@@ -245,7 +283,7 @@ class CardLoaderView(QWidget):
         # inicia oculto y solo aparece si find_by_number devuelve >1
         # (ambigüedad).
         self._code_label = QLabel((self.collection.code_field_name or self.tr("Código")) + ":")
-        self._code_edit = QLineEdit()
+        self._code_edit = _CodeLineEdit()
         self._code_edit.setPlaceholderText(self.tr("Código (ej: ARG)"))
         self._code_edit.setMaxLength(10)
         # Subclass propio: Qt inserta solo el code_id ("FWC"), no el item
@@ -682,7 +720,7 @@ class CardLoaderView(QWidget):
         self._install_empty_field_filters()
 
     def _install_empty_field_filters(self) -> None:
-        """Bloquea Tab/Backtab/Enter en code_edit y number_input cuando vacíos."""
+        """Bloquea Tab/Enter en code_edit y number_input cuando vacíos."""
         # Removemos cualquier filtro previo para evitar duplicados al
         # reinstalarse el navigator. Mantenemos refs vivas en self para
         # evitar que el GC los libere mientras Qt los tiene apuntados.
@@ -692,12 +730,8 @@ class CardLoaderView(QWidget):
                 # `removeEventFilter` es seguro aunque no esté instalado.
                 target = self._code_edit if attr == "_code_empty_filter" else self._number_input
                 target.removeEventFilter(old)
-        self._code_empty_filter = _EmptyFieldFilter(
-            "code", self._code_edit.text, self._show_field_error, self
-        )
-        self._number_empty_filter = _EmptyFieldFilter(
-            "number", self._number_input.text, self._show_field_error, self
-        )
+        self._code_empty_filter = _EmptyFieldFilter(self._code_edit.text, self)
+        self._number_empty_filter = _EmptyFieldFilter(self._number_input.text, self)
         self._code_edit.installEventFilter(self._code_empty_filter)
         self._number_input.installEventFilter(self._number_empty_filter)
 

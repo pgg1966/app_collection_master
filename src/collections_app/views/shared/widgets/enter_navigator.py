@@ -10,11 +10,13 @@ from PySide6.QtWidgets import QWidget
 
 
 class EnterNavigator(QObject):
-    """Hace que `Enter` avance al siguiente widget de una cadena ordenada.
+    """Hace que `Enter`/`Tab` avancen al siguiente widget de una cadena ordenada.
 
     En el último widget de la cadena, dispara `on_last_enter` (si está
-    seteado). Funciona con cualquier QWidget; usa un `eventFilter` que
-    detecta `QEvent.KeyPress` con `Key_Return` o `Key_Enter`.
+    seteado). `Backtab` (Shift+Tab) retrocede al widget anterior; si ya
+    está en el primero, consume el evento sin acción. Funciona con
+    cualquier QWidget; usa un `eventFilter` que detecta `QEvent.KeyPress`
+    con `Key_Return`, `Key_Enter`, `Key_Tab` o `Key_Backtab`.
 
     Uso típico:
         nav = EnterNavigator(self)
@@ -52,20 +54,32 @@ class EnterNavigator(QObject):
     def eventFilter(  # noqa: N802
         self: EnterNavigator, watched: QObject, event: QEvent
     ) -> bool:
-        """Intercepta KeyPress de Enter/Return en la cadena."""
+        """Intercepta KeyPress de Enter/Return/Tab/Backtab en la cadena."""
         if event.type() != QEvent.Type.KeyPress:
             return super().eventFilter(watched, event)
 
         key_event = event
         if not isinstance(key_event, QKeyEvent):
             return super().eventFilter(watched, event)
-        if key_event.key() not in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+        key = key_event.key()
+        if key not in (
+            Qt.Key.Key_Return,
+            Qt.Key.Key_Enter,
+            Qt.Key.Key_Tab,
+            Qt.Key.Key_Backtab,
+        ):
             return super().eventFilter(watched, event)
 
         try:
             idx = self._chain.index(watched)  # type: ignore[arg-type]
         except ValueError:
             return super().eventFilter(watched, event)
+
+        if key == Qt.Key.Key_Backtab:
+            if idx == 0:
+                return True
+            self._chain[idx - 1].setFocus()
+            return True
 
         if idx == len(self._chain) - 1:
             if self.on_last_enter is not None:

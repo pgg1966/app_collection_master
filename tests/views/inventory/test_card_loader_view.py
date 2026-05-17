@@ -14,6 +14,8 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 import pytest
+from PySide6.QtCore import QMimeData, Qt
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from collections_app.app_context import AppContext, create_app_context
@@ -21,7 +23,7 @@ from collections_app.core.models.card import Card
 from collections_app.core.models.code_header import CodeHeader
 from collections_app.core.models.code_line import CodeLine
 from collections_app.core.models.collection import Collection
-from collections_app.views.inventory.card_loader import CardLoaderView
+from collections_app.views.inventory.card_loader import CardLoaderView, _CodeLineEdit
 
 pytestmark = pytest.mark.gui
 
@@ -261,3 +263,165 @@ def test_card_loader_no_longer_embeds_inventory_import_panel(
     view = CardLoaderView(ctx=app_ctx, collection=coll)
     qtbot.addWidget(view)
     assert not hasattr(view, "_import_panel")
+
+
+# ----------------------------------------------------------------------
+# Restricciones de input en el campo de Código (aisladas al widget)
+# ----------------------------------------------------------------------
+#
+# Estos tests instancian `_CodeLineEdit` directo, no la `CardLoaderView`,
+# para evitar interferencia con la lógica de auto-tab del view
+# (que avanza foco al campo número cuando hay un match único de code_id).
+
+
+def test_code_field_rejects_digits_and_specials(
+    qtbot,  # type: ignore[no-untyped-def]
+) -> None:
+    """Tipear "a1b2c3!" deja "ABC": dígitos y especiales descartados silenciosamente."""
+    edit = _CodeLineEdit()
+    qtbot.addWidget(edit)
+    edit.setFocus()
+    QTest.keyClicks(edit, "a1b2c3!")
+    assert edit.text() == "ABC"
+
+
+def test_code_field_auto_uppercases_typing(
+    qtbot,  # type: ignore[no-untyped-def]
+) -> None:
+    """Tipear minúsculas muestra el display en mayúsculas."""
+    edit = _CodeLineEdit()
+    qtbot.addWidget(edit)
+    edit.setFocus()
+    QTest.keyClicks(edit, "arg")
+    assert edit.text() == "ARG"
+
+
+def test_code_field_paste_filters_and_uppercases(
+    qtbot,  # type: ignore[no-untyped-def]
+) -> None:
+    """Pegar "arg123" → queda "ARG"; insertFromMimeData filtra dígitos y upper-casea."""
+    edit = _CodeLineEdit()
+    qtbot.addWidget(edit)
+    mime = QMimeData()
+    mime.setText("arg123")
+    edit.insertFromMimeData(mime)
+    assert edit.text() == "ARG"
+
+
+def test_code_field_paste_only_digits_is_noop(
+    qtbot,  # type: ignore[no-untyped-def]
+) -> None:
+    """Pegar texto sin letras no inserta nada (no rompe el campo)."""
+    edit = _CodeLineEdit()
+    qtbot.addWidget(edit)
+    mime = QMimeData()
+    mime.setText("123!@#")
+    edit.insertFromMimeData(mime)
+    assert edit.text() == ""
+
+
+# ----------------------------------------------------------------------
+# Navegación con Tab / Shift+Tab y bloqueo de avance con campo vacío
+# ----------------------------------------------------------------------
+
+
+def test_empty_code_tab_does_not_advance(
+    qtbot,  # type: ignore[no-untyped-def]
+    app_ctx: AppContext,
+    collection: Collection,
+) -> None:
+    """Tab con código vacío no debe mover foco al número."""
+    view = CardLoaderView(ctx=app_ctx, collection=collection)
+    qtbot.addWidget(view)
+    view.show()
+    qtbot.waitExposed(view)
+    view._code_edit.setFocus()
+    QTest.keyClick(view._code_edit, Qt.Key.Key_Tab)
+    assert not view._number_input.hasFocus()
+
+
+def test_empty_code_enter_does_not_advance(
+    qtbot,  # type: ignore[no-untyped-def]
+    app_ctx: AppContext,
+    collection: Collection,
+) -> None:
+    """Enter con código vacío no debe mover foco al número."""
+    view = CardLoaderView(ctx=app_ctx, collection=collection)
+    qtbot.addWidget(view)
+    view.show()
+    qtbot.waitExposed(view)
+    view._code_edit.setFocus()
+    QTest.keyClick(view._code_edit, Qt.Key.Key_Return)
+    assert not view._number_input.hasFocus()
+
+
+def test_empty_code_does_not_flash_red(
+    qtbot,  # type: ignore[no-untyped-def]
+    app_ctx: AppContext,
+    collection: Collection,
+) -> None:
+    """Spec: Enter/Tab con código vacío no muestra ningún feedback de error.
+
+    El stylesheet del campo no debe contener `border: 1px solid red`
+    después de presionar Tab o Enter con el campo vacío.
+    """
+    view = CardLoaderView(ctx=app_ctx, collection=collection)
+    qtbot.addWidget(view)
+    view.show()
+    qtbot.waitExposed(view)
+    view._code_edit.setFocus()
+    QTest.keyClick(view._code_edit, Qt.Key.Key_Tab)
+    QTest.keyClick(view._code_edit, Qt.Key.Key_Return)
+    assert "red" not in view._code_edit.styleSheet()
+
+
+def test_tab_advances_like_enter_when_code_present(
+    qtbot,  # type: ignore[no-untyped-def]
+    app_ctx: AppContext,
+    collection: Collection,
+) -> None:
+    """Con código presente, Tab debe mover foco al número (igual que Enter).
+
+    Usamos `setText` programático para evitar que el auto-tab del view
+    (gatillado en `textEdited` cuando hay 1 match único por code_id)
+    interfiera con la verificación del Tab manual.
+    """
+    view = CardLoaderView(ctx=app_ctx, collection=collection)
+    qtbot.addWidget(view)
+    view.show()
+    qtbot.waitExposed(view)
+    view._code_edit.setText("ARG")
+    view._code_edit.setFocus()
+    QTest.keyClick(view._code_edit, Qt.Key.Key_Tab)
+    assert view._number_input.hasFocus()
+
+
+def test_shift_tab_retrocedes_from_number_to_code(
+    qtbot,  # type: ignore[no-untyped-def]
+    app_ctx: AppContext,
+    collection: Collection,
+) -> None:
+    """Shift+Tab desde el campo número debe volver al de código."""
+    view = CardLoaderView(ctx=app_ctx, collection=collection)
+    qtbot.addWidget(view)
+    view.show()
+    qtbot.waitExposed(view)
+    view._number_input.setFocus()
+    QTest.keyClick(view._number_input, Qt.Key.Key_Backtab)
+    assert view._code_edit.hasFocus()
+
+
+def test_shift_tab_from_empty_number_still_retrocedes(
+    qtbot,  # type: ignore[no-untyped-def]
+    app_ctx: AppContext,
+    collection: Collection,
+) -> None:
+    """Backtab debe permitirse aun con campo vacío (corrección de typos)."""
+    view = CardLoaderView(ctx=app_ctx, collection=collection)
+    qtbot.addWidget(view)
+    view.show()
+    qtbot.waitExposed(view)
+    view._number_input.setFocus()
+    assert view._number_input.text() == ""
+    QTest.keyClick(view._number_input, Qt.Key.Key_Backtab)
+    assert view._code_edit.hasFocus()
